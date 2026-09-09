@@ -13,6 +13,8 @@
 
 #pragma once
 
+#include <wavex/Base/Logger.hpp>
+#include <wavex/Base/Chainable.hpp>
 #include <wavex/Base/MimeTypes.hpp>
 #include <wavex/protos/protos.hpp>
 #include <wavex/protos/http/http.hpp>
@@ -20,6 +22,7 @@
 #include <wavex/Engine/HttpRouter.hpp>
 #include <wavex/Server/Server.hpp>
 #include <wavex/Client/HttpClient.hpp>
+#include <wavex/CLI/CLI.hpp>
 
 /**
  * @brief Macro representing the current version of the WaveX framework.

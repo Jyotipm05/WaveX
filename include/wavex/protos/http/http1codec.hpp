@@ -77,13 +77,17 @@ namespace wavex::protos::http {
          */
         inline void append_uint(std::string &out, const unsigned int v) {
             char buf[10];
-            if (const auto [end, ec] = std::to_chars(buf, buf + sizeof(buf), v); ec == std::errc{}) out.append(buf, end);
+            if (const auto [end, ec] = std::to_chars(buf, buf + sizeof(buf), v); ec == std::errc{})
+                out.
+                        append(buf, end);
         }
 
         /** @brief Same as append_uint but for std::size_t (Content-Length). */
         inline void append_size(std::string &out, const std::size_t v) {
             char buf[20];
-            if (const auto [end, ec] = std::to_chars(buf, buf + sizeof(buf), v); ec == std::errc{}) out.append(buf, end);
+            if (const auto [end, ec] = std::to_chars(buf, buf + sizeof(buf), v); ec == std::errc{})
+                out.
+                        append(buf, end);
         }
     } // namespace detail
     // ─────────────────────────────────────────────────────────────────────────────
@@ -229,9 +233,9 @@ namespace wavex::protos::http {
          * @brief Helper to find the next LF (\n) line terminator and strip optional CR (\r).
          */
         static bool find_next_line(const std::string_view buffer,
-                                  const std::size_t cursor,
-                                  std::size_t &line_end,
-                                  std::size_t &next_cursor) {
+                                   const std::size_t cursor,
+                                   std::size_t &line_end,
+                                   std::size_t &next_cursor) {
             const std::size_t pos = buffer.find('\n', cursor);
             if (pos == std::string_view::npos) return false;
 
@@ -469,7 +473,8 @@ namespace wavex::protos::http {
 
                 if (chunk_size == 0) {
                     if (cursor < buffer.size()) {
-                        if (std::size_t dummy_end = 0, after_crlf = 0; find_next_line(buffer, cursor, dummy_end, after_crlf)) {
+                        if (std::size_t dummy_end = 0, after_crlf = 0; find_next_line(
+                            buffer, cursor, dummy_end, after_crlf)) {
                             cursor = after_crlf;
                         }
                     }
@@ -574,7 +579,7 @@ namespace wavex::protos::http {
          *   req.method_type = method::GET;
          *   req.target = "/api/users";
          *   auto bytes = encoder::serialize_request(req);
-         * @endcode 
+         * @endcode
          */
         static std::string serialize_request(const request &req) {
             std::size_t est = 32 + req.body.size() + 40;
@@ -660,8 +665,8 @@ namespace wavex::protos::http {
          */
         [[nodiscard]]
         static parser::result decode_response(const std::string_view buffer,
-                                             response &res,
-                                             std::size_t &bytes_consumed) {
+                                              response &res,
+                                              std::size_t &bytes_consumed) {
             return parser::parse_response(buffer, res, bytes_consumed);
         }
 
@@ -736,5 +741,3 @@ namespace wavex::protos::http {
         }
     };
 }
-
-

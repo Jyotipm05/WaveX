@@ -35,8 +35,8 @@
 namespace wavex::protos::http {
     enum class CompressionMode {
         None,
-        Gzip,    // Planned for future zlib update
-        Deflate  // Planned for future zlib update
+        Gzip, // Planned for future zlib update
+        Deflate // Planned for future zlib update
     };
 
     /**
@@ -44,21 +44,22 @@ namespace wavex::protos::http {
      * @brief HTTP response parameterized on Codec — supports both server-side creation & client parsing.
      * @tparam Codec Protocol codec defining parser, encoder, decoder, request, and response types.
      */
-    template <typename Codec = wavex::protos::http::http1codec>
+    template<typename Codec = wavex::protos::http::http1codec>
     class HttpResponse final : public base::Response {
     public:
         using codec_type = Codec;
-        using parser_type = typename Codec::parser;
-        using encoder_type = typename Codec::encoder;
-        using decoder_type = typename Codec::decoder;
-        using response_type = typename Codec::response;
+        using parser_type = Codec::parser;
+        using encoder_type = Codec::encoder;
+        using decoder_type = Codec::decoder;
+        using response_type = Codec::response;
 
-        using base::Response::status_code_;
-        using base::Response::body_;
-        using base::Response::headers_;
-        using base::Response::is_sent_;
-        using base::Response::set;
-        using base::Response::send;
+        using Response::status_code_;
+        using Response::body_;
+        using Response::headers_;
+        using Response::is_sent_;
+        using Response::set;
+        using Response::remove_header;
+        using Response::send;
 
         /// Set the response status code and automatically update status text from Codec
         HttpResponse &status(const unsigned int code) {
@@ -76,7 +77,8 @@ namespace wavex::protos::http {
 
         HttpResponse() = default;
 
-        explicit HttpResponse(asio::ip::tcp::socket *socket) : socket_(socket) {}
+        explicit HttpResponse(asio::ip::tcp::socket *socket) : socket_(socket) {
+        }
 
         ~HttpResponse() = default;
 
@@ -91,8 +93,8 @@ namespace wavex::protos::http {
               dechunked_body_storage_(other.dechunked_body_storage_),
               parsed_(other.parsed_) {
             const auto buf_base = other.buffer_owner_.data();
-            const auto buf_len  = other.buffer_owner_.size();
-            const auto my_base  = buffer_owner_.data();
+            const auto buf_len = other.buffer_owner_.size();
+            const auto my_base = buffer_owner_.data();
 
             auto rebase_buf = [buf_base, buf_len, my_base](
                 const std::string_view sv) -> std::string_view {
@@ -100,6 +102,8 @@ namespace wavex::protos::http {
                 const auto off = static_cast<std::size_t>(sv.data() - buf_base);
                 if (off < buf_len && off + sv.size() <= buf_len)
                     return {my_base + off, sv.size()};
+                // False positive disabled
+                // ReSharper disable once CppDFALocalValueEscapesFunction
                 return sv;
             };
 
@@ -108,8 +112,8 @@ namespace wavex::protos::http {
                 status_text_ = rebase_buf(other.status_text_);
                 parsed_.status_text = rebase_buf(other.parsed_.status_text);
                 parsed_.body = rebase_buf(other.parsed_.body);
-                for (auto &h : parsed_.headers) {
-                    h.name  = rebase_buf(h.name);
+                for (auto &h: parsed_.headers) {
+                    h.name = rebase_buf(h.name);
                     h.value = rebase_buf(h.value);
                 }
             }
@@ -117,18 +121,20 @@ namespace wavex::protos::http {
             // Rebase body_view_ — may point into dechunked_body_storage_
             if (!other.dechunked_body_storage_.empty()) {
                 const auto dk_base = other.dechunked_body_storage_.data();
-                const auto dk_len  = other.dechunked_body_storage_.size();
+                const auto dk_len = other.dechunked_body_storage_.size();
                 const auto off = static_cast<std::size_t>(
                     other.body_view_.data() - dk_base);
                 if (off < dk_len && off + other.body_view_.size() <= dk_len)
-                    body_view_ = {dechunked_body_storage_.data() + off,
-                                  other.body_view_.size()};
+                    body_view_ = {
+                        dechunked_body_storage_.data() + off,
+                        other.body_view_.size()
+                    };
             }
 
             // Rebase headers_views_ (all from buffer_owner_)
             headers_views_.reserve(other.headers_views_.size());
             if (buf_len > 0) {
-                for (const auto &[k, v] : other.headers_views_)
+                for (const auto &[k, v]: other.headers_views_)
                     headers_views_.emplace_back(rebase_buf(k), rebase_buf(v));
             } else {
                 headers_views_ = other.headers_views_;
@@ -200,8 +206,8 @@ namespace wavex::protos::http {
             response_type res;
             res.status_code = status_code_;
             res.status_text = (status_text_.empty() || (status_text_ == "OK" && status_code_ != 200))
-                ? Codec::status_text_for(status_code_)
-                : status_text_;
+                                  ? Codec::status_text_for(status_code_)
+                                  : status_text_;
             res.body = body_view_.empty() ? std::string_view(body_) : body_view_;
 
             if (!headers_views_.empty()) {
@@ -237,7 +243,7 @@ namespace wavex::protos::http {
         }
 
         /// Access zero-copy headers views
-        [[nodiscard]] const std::vector<std::pair<std::string_view, std::string_view>> &header_views() const {
+        [[nodiscard]] const std::vector<std::pair<std::string_view, std::string_view> > &header_views() const {
             return headers_views_;
         }
 
@@ -252,11 +258,12 @@ namespace wavex::protos::http {
          */
         HttpResponse &set_keep_alive(bool enable, unsigned timeout_sec = 5, unsigned max_requests = 1000) {
             if (enable) {
-                set("Connection", "keep-alive");
-                set("Keep-Alive", "timeout=" + std::to_string(timeout_sec) + ", max=" + std::to_string(max_requests));
+                this->set("Connection", "keep-alive");
+                this->set("Keep-Alive",
+                          "timeout=" + std::to_string(timeout_sec) + ", max=" + std::to_string(max_requests));
             } else {
-                set("Connection", "close");
-                remove_header("Keep-Alive");
+                this->set("Connection", "close");
+                this->remove_header("Keep-Alive");
             }
             return *this;
         }
@@ -274,12 +281,12 @@ namespace wavex::protos::http {
          * @brief Starts chunked response streaming over the bound socket.
          * Transmits HTTP status line and Transfer-Encoding: chunked headers immediately.
          */
-        asio::awaitable<std::expected<void, std::error_code>> start_chunked(
+        asio::awaitable<std::expected<void, std::error_code> > start_chunked(
             const std::chrono::milliseconds timeout = std::chrono::milliseconds(15000)) {
             if (is_headers_sent_) co_return std::expected<void, std::error_code>{};
 
-            set("Transfer-Encoding", "chunked");
-            set("Connection", "keep-alive");
+            this->set("Transfer-Encoding", "chunked");
+            this->set("Connection", "keep-alive");
 
             std::string head = serialize_headers_only();
             is_headers_sent_ = true;
@@ -290,7 +297,7 @@ namespace wavex::protos::http {
         /**
          * @brief Writes a single chunk of data to the chunked HTTP stream.
          */
-        asio::awaitable<std::expected<void, std::error_code>> write_chunk(
+        asio::awaitable<std::expected<void, std::error_code> > write_chunk(
             const std::string_view data,
             const std::chrono::milliseconds timeout = std::chrono::milliseconds(15000)) {
             if (!is_headers_sent_) {
@@ -308,7 +315,7 @@ namespace wavex::protos::http {
         /**
          * @brief Sends terminal chunk 0\r\n\r\n and finishes the chunked HTTP response.
          */
-        asio::awaitable<std::expected<void, std::error_code>> end_chunked(
+        asio::awaitable<std::expected<void, std::error_code> > end_chunked(
             const std::chrono::milliseconds timeout = std::chrono::milliseconds(15000)) {
             if (is_sent_) co_return std::expected<void, std::error_code>{};
 
@@ -327,7 +334,7 @@ namespace wavex::protos::http {
         /**
          * @brief Streams a file from disk with automatic MIME detection and default/custom timeouts.
          */
-        asio::awaitable<std::expected<void, std::error_code>> send_file(
+        asio::awaitable<std::expected<void, std::error_code> > send_file(
             const std::string_view filepath,
             const std::chrono::milliseconds timeout = std::chrono::milliseconds(30000),
             const std::size_t buffer_size = 65536,
@@ -339,13 +346,13 @@ namespace wavex::protos::http {
         /**
          * @brief Streams a file from disk with custom MIME override and default/custom timeouts.
          */
-        asio::awaitable<std::expected<void, std::error_code>> send_file(
+        asio::awaitable<std::expected<void, std::error_code> > send_file(
             const std::string_view filepath,
             const std::string_view custom_mime,
             const std::chrono::milliseconds timeout = std::chrono::milliseconds(30000),
             const std::size_t buffer_size = 65536,
             const CompressionMode compression = CompressionMode::None) {
-            (void)compression; // Reserved for future zlib update
+            (void) compression; // Reserved for future zlib update
 
             std::filesystem::path path(filepath);
             std::error_code ec;
@@ -359,10 +366,11 @@ namespace wavex::protos::http {
                 co_return std::unexpected(std::make_error_code(std::errc::no_such_file_or_directory));
             }
 
-            set("Content-Type", custom_mime);
+            this->set("Content-Type", custom_mime);
 
-            if (file_size < 100 * 1024 * 1024) { // < 100 MB: use Content-Length
-                set("Content-Length", std::to_string(file_size));
+            if (file_size < 100 * 1024 * 1024) {
+                // < 100 MB: use Content-Length
+                this->set("Content-Length", std::to_string(file_size));
                 std::string headers = serialize_headers_only();
                 is_headers_sent_ = true;
                 if (auto res = co_await async_write_with_timeout(headers, timeout); !res) {
@@ -373,7 +381,8 @@ namespace wavex::protos::http {
                 while (file.read(buf.data(), static_cast<std::streamsize>(buf.size())) || file.gcount() > 0) {
                     const auto bytes_read = static_cast<std::size_t>(file.gcount());
                     if (bytes_read == 0) break;
-                    if (auto res = co_await async_write_with_timeout(std::string_view(buf.data(), bytes_read), timeout); !res) {
+                    if (auto res = co_await async_write_with_timeout(std::string_view(buf.data(), bytes_read), timeout);
+                        !res) {
                         co_return res;
                     }
                 }
@@ -394,7 +403,7 @@ namespace wavex::protos::http {
         }
 
     private:
-        [[nodiscard]] asio::awaitable<std::expected<void, std::error_code>> async_write_with_timeout(
+        [[nodiscard]] asio::awaitable<std::expected<void, std::error_code> > async_write_with_timeout(
             const std::string_view data,
             const std::chrono::milliseconds timeout) const {
             if (!socket_ || !socket_->is_open()) {
@@ -418,7 +427,7 @@ namespace wavex::protos::http {
                 asio::buffer(data),
                 asio::as_tuple(asio::use_awaitable));
 
-            (void)timer.cancel();
+            (void) timer.cancel();
 
             if (timed_out || write_ec == asio::error::operation_aborted) {
                 std::error_code close_ec;
@@ -437,8 +446,8 @@ namespace wavex::protos::http {
             response_type res;
             res.status_code = status_code_;
             res.status_text = (status_text_.empty() || (status_text_ == "OK" && status_code_ != 200))
-                ? Codec::status_text_for(status_code_)
-                : status_text_;
+                                  ? Codec::status_text_for(status_code_)
+                                  : status_text_;
             res.body = "";
 
             if (!headers_views_.empty()) {
@@ -462,7 +471,7 @@ namespace wavex::protos::http {
         std::string dechunked_body_storage_;
         std::string_view body_view_;
         response_type parsed_;
-        std::vector<std::pair<std::string_view, std::string_view>> headers_views_;
+        std::vector<std::pair<std::string_view, std::string_view> > headers_views_;
         bool is_headers_sent_ = false;
     };
 

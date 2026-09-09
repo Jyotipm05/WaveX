@@ -18,27 +18,17 @@
 #include <string_view>
 #include <vector>
 #include <utility>
-#include <optional>
 
-#include <asio/io_context.hpp>
-#include <asio/ip/tcp.hpp>
-#include <asio/connect.hpp>
 #include <asio/co_spawn.hpp>
-#include <asio/this_coro.hpp>
-#include <asio/use_awaitable.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <asio/redirect_error.hpp>
 #include <nlohmann/json.hpp>
 
-#include <wavex/Base/Url.hpp>
 #include <wavex/protos/http/HttpRequest.hpp>
 #include <wavex/protos/http/HttpResponse.hpp>
 
 namespace wavex::client {
-    using wavex::protos::http::method;
-    using wavex::protos::http::Http1Request;
-    using wavex::protos::http::Http1Response;
+    using protos::http::method;
+    using protos::http::Http1Request;
+    using protos::http::Http1Response;
 
     /**
      * @class HttpClient
@@ -82,6 +72,6 @@ namespace wavex::client {
             method m,
             std::string_view url,
             std::string_view body = "",
-            const std::vector<std::pair<std::string, std::string>> &headers = {});
+            const std::vector<std::pair<std::string, std::string> > &headers = {});
     };
 } // namespace wavex::client

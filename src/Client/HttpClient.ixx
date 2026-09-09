@@ -15,7 +15,7 @@ module;
 export module wavex:client;
 
 export namespace wavex::client {
-    using wavex::client::HttpClient;
-    using wavex::protos::http::method;
+    using client::HttpClient;
+    using protos::http::method;
     using enum wavex::protos::http::method;
 }

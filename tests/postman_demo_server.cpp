@@ -59,7 +59,8 @@ asio::awaitable<void> auth_middleware(const HttpRequest &req, HttpResponse &res,
 
 int main() {
     std::cout << "=========================================================================\n";
-    std::cout << ("               WaveX Interactive Dev v"+std::string(wx_version)+" / Postman Server                    \n");
+    std::cout << ("               WaveX Interactive Dev v" + std::string(wx_version) +
+                  " / Postman Server                    \n");
     std::cout << "=========================================================================\n";
     std::cout << " Endpoints available for testing:\n";
     std::cout << "  1. GET  http://127.0.0.1:8080/\n";

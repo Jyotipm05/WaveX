@@ -19,5 +19,5 @@ module;
 export module wavex:router;
 
 export namespace wavex::engine {
-    using wavex::engine::Router;
+    using engine::Router;
 }

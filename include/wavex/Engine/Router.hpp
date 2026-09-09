@@ -109,8 +109,11 @@ namespace wavex::engine {
         }
 
         Router(const Router &) = delete;
+
         Router &operator=(const Router &) = delete;
+
         Router(Router &&) noexcept = default;
+
         Router &operator=(Router &&) noexcept = default;
 
         /**
@@ -191,9 +194,10 @@ namespace wavex::engine {
         /**
          * @brief Registers a route using a StaticChain.
          */
-        template <typename... Handlers>
+        template<typename... Handlers>
         void route(MethodType m, const std::string_view pattern, StaticChain<Handlers...> chain) {
-            route(m, pattern, [c = std::move(chain)](RequestType &req, ResponseType &res) mutable -> asio::awaitable<void> {
+            route(m, pattern, [c = std::move(chain)](RequestType &req,
+                                                     ResponseType &res) mutable -> asio::awaitable<void> {
                 co_await c.process_all_async(req, res);
             });
         }
@@ -228,9 +232,10 @@ namespace wavex::engine {
         /**
          * @brief Registers a global static middleware chain.
          */
-        template <typename... Handlers>
+        template<typename... Handlers>
         void use(StaticChain<Handlers...> chain) {
-            use([c = std::move(chain)](RequestType &req, ResponseType &res, base::Next next) mutable -> asio::awaitable<void> {
+            use([c = std::move(chain)](RequestType &req, ResponseType &res,
+                                       base::Next next) mutable -> asio::awaitable<void> {
                 if (const bool ok = co_await c.process_all_async(req, res); ok) {
                     co_await next();
                 }
@@ -240,9 +245,10 @@ namespace wavex::engine {
         /**
          * @brief Registers a scoped static middleware chain.
          */
-        template <typename... Handlers>
+        template<typename... Handlers>
         void use(const std::string_view prefix, StaticChain<Handlers...> chain) {
-            use(prefix, [c = std::move(chain)](RequestType &req, ResponseType &res, base::Next next) mutable -> asio::awaitable<void> {
+            use(prefix, [c = std::move(chain)](RequestType &req, ResponseType &res,
+                                               base::Next next) mutable -> asio::awaitable<void> {
                 if (const bool ok = co_await c.process_all_async(req, res); ok) {
                     co_await next();
                 }
@@ -267,14 +273,15 @@ namespace wavex::engine {
          * @param content_type Optional Content-Type header (defaults to "text/plain").
          */
         void not_found(std::string body, std::string content_type = "text/plain") {
-            not_found_handler_ = [b = std::move(body), ct = std::move(content_type)](RequestType &, ResponseType &res) -> asio::awaitable<void> {
-                res.status(404);
-                if (!ct.empty()) {
-                    res.set("Content-Type", ct);
-                }
-                res.send(b);
-                co_return;
-            };
+            not_found_handler_ = [b = std::move(body), ct = std::move(content_type)](
+                RequestType &, ResponseType &res) -> asio::awaitable<void> {
+                        res.status(404);
+                        if (!ct.empty()) {
+                            res.set("Content-Type", ct);
+                        }
+                        res.send(b);
+                        co_return;
+                    };
         }
 
         /**
@@ -290,7 +297,7 @@ namespace wavex::engine {
                 std::ifstream file(file_path, std::ios::binary);
                 if (file) {
                     std::string content((std::istreambuf_iterator<char>(file)),
-                                         std::istreambuf_iterator<char>());
+                                        std::istreambuf_iterator<char>());
                     std::string mime = std::string(base::mime_type_from_path(file_path.string()));
                     not_found(std::move(content), std::move(mime));
                     return;
@@ -539,7 +546,8 @@ namespace wavex::engine {
                     auto pname = std::string(inner.substr(0, colon));
                     auto pat = std::string(inner.substr(colon + 1));
                     for (const auto &child: parent->param_children) {
-                        if (child->is_param && child->constraint && child->param_name == pname && child->pattern == pat) {
+                        if (child->is_param && child->constraint && child->param_name == pname && child->pattern ==
+                            pat) {
                             return child.get();
                         }
                     }

@@ -42,7 +42,7 @@ namespace wavex::base {
      *       WX_LOG_INFO("<- {} {}", res.status_code(), req.path());
      *   };
      */
-    template <typename ReqT, typename ResT>
+    template<typename ReqT, typename ResT>
     using GenericMiddlewareFn = std::function<asio::awaitable<void>(ReqT &, ResT &, Next)>;
 
     /**
@@ -50,12 +50,13 @@ namespace wavex::base {
      * @param timeout_sec Keep-Alive idle timeout in seconds.
      * @param max_requests Max requests per connection before closing.
      */
-    template <typename ReqT, typename ResT>
+    template<typename ReqT, typename ResT>
     GenericMiddlewareFn<ReqT, ResT> keep_alive(unsigned timeout_sec = 5, unsigned max_requests = 1000) {
         return [timeout_sec, max_requests](ReqT &req, ResT &res, Next next) -> asio::awaitable<void> {
             if (req.should_keep_alive()) {
                 res.set("Connection", "keep-alive");
-                res.set("Keep-Alive", "timeout=" + std::to_string(timeout_sec) + ", max=" + std::to_string(max_requests));
+                res.set("Keep-Alive",
+                        "timeout=" + std::to_string(timeout_sec) + ", max=" + std::to_string(max_requests));
             } else {
                 res.set("Connection", "close");
             }
@@ -66,10 +67,10 @@ namespace wavex::base {
     /**
      * @brief Middleware preparing headers for Server-Sent Events (SSE) stay-active streams.
      */
-    template <typename ReqT, typename ResT>
+    template<typename ReqT, typename ResT>
     GenericMiddlewareFn<ReqT, ResT> sse_stay_active() {
-        return [](ReqT &req, ResT &res, Next next) -> asio::awaitable<void> {
-            (void)req;
+        return [](const ReqT &req, ResT &res, const Next next) -> asio::awaitable<void> {
+            (void) req;
             res.set("Content-Type", "text/event-stream");
             res.set("Cache-Control", "no-cache");
             res.set("Connection", "keep-alive");

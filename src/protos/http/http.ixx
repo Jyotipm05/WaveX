@@ -24,32 +24,32 @@ export import :protos_http_request;
 export import :protos_http_response;
 
 export namespace wavex::protos::http {
-    using wavex::protos::http::method;
-    using wavex::protos::http::header;
-    using wavex::protos::http::message_base;
-    using wavex::protos::http::request;
-    using wavex::protos::http::response;
-    using wavex::protos::http::to_string;
-    using wavex::protos::http::from_string;
-    using wavex::protos::http::status_text_for;
-    using wavex::protos::http::parser;
-    using wavex::protos::http::encoder;
-    using wavex::protos::http::decoder;
-    using wavex::protos::http::http1codec;
-    using wavex::protos::http::HttpRequest;
-    using wavex::protos::http::Http1Request;
-    using wavex::protos::http::http1request;
-    using wavex::protos::http::HttpResponse;
-    using wavex::protos::http::Http1Response;
-    using wavex::protos::http::http1response;
+    using http::method;
+    using http::header;
+    using http::message_base;
+    using http::request;
+    using http::response;
+    using http::to_string;
+    using http::from_string;
+    using http::status_text_for;
+    using http::parser;
+    using http::encoder;
+    using http::decoder;
+    using http::http1codec;
+    using http::HttpRequest;
+    using http::Http1Request;
+    using http::http1request;
+    using http::HttpResponse;
+    using http::Http1Response;
+    using http::http1response;
 
     // Templated codec helpers
-    using wavex::protos::http::parse_request;
-    using wavex::protos::http::parse_response;
-    using wavex::protos::http::serialize_request;
-    using wavex::protos::http::serialize_response;
-    using wavex::protos::http::format_chunk;
-    using wavex::protos::http::format_terminal_chunk;
-    using wavex::protos::http::decode_response;
-    using wavex::protos::http::dechunk;
+    using http::parse_request;
+    using http::parse_response;
+    using http::serialize_request;
+    using http::serialize_response;
+    using http::format_chunk;
+    using http::format_terminal_chunk;
+    using http::decode_response;
+    using http::dechunk;
 }

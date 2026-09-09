@@ -21,7 +21,6 @@ module;
 // to the module body below.
 #define ASIO_HAS_CO_AWAIT 1
 #include <functional>
-#include <string>
 #include <asio/awaitable.hpp>
 #include <wavex/Base/MimeTypes.hpp>
 #include <wavex/Base/Request.hpp>
@@ -31,10 +30,10 @@ module;
 export module wavex:middleware;
 
 export namespace wavex::base {
-    using wavex::base::Request;
-    using wavex::base::Response;
-    using wavex::base::mime_type_from_ext;
-    using wavex::base::mime_type_from_path;
+    using base::Request;
+    using base::Response;
+    using base::mime_type_from_ext;
+    using base::mime_type_from_path;
 
     /// Callable that invokes the next middleware or the final handler.
     using Next = std::function<asio::awaitable<void>()>;
@@ -42,9 +41,9 @@ export namespace wavex::base {
     /**
      * @brief Generic middleware function signature for CRTP Request and Response types.
      */
-    template <typename ReqT, typename ResT>
+    template<typename ReqT, typename ResT>
     using GenericMiddlewareFn = std::function<asio::awaitable<void>(ReqT &, ResT &, Next)>;
 
-    using wavex::base::keep_alive;
-    using wavex::base::sse_stay_active;
+    using base::keep_alive;
+    using base::sse_stay_active;
 } // export namespace wavex::base

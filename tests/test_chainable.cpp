@@ -1,4 +1,4 @@
-#include <wavex/Base/Chainable.hpp>
+#include <wavex/wavex.hpp>
 #include <iostream>
 #include <cassert>
 #include <functional>
@@ -11,7 +11,8 @@ class PrefixHandler : public wavex::Chainable {
     std::string prefix_;
 
 public:
-    explicit PrefixHandler(std::string prefix) : prefix_(std::move(prefix)) {}
+    explicit PrefixHandler(std::string prefix) : prefix_(std::move(prefix)) {
+    }
 
     [[nodiscard]] static std::string_view name_impl() { return "PrefixHandler"; }
 
@@ -24,7 +25,8 @@ class SuffixHandler : public wavex::Chainable {
     std::string suffix_;
 
 public:
-    explicit SuffixHandler(std::string suffix) : suffix_(std::move(suffix)) {}
+    explicit SuffixHandler(std::string suffix) : suffix_(std::move(suffix)) {
+    }
 
     [[nodiscard]] static std::string_view name_impl() { return "SuffixHandler"; }
 
@@ -50,7 +52,8 @@ public:
 struct AuthGuard : public wavex::Chainable {
     bool allow = true;
 
-    explicit AuthGuard(const bool a = true) : allow(a) {}
+    explicit AuthGuard(const bool a = true) : allow(a) {
+    }
 
     [[nodiscard]] static std::string_view name_impl() { return "AuthGuard"; }
 

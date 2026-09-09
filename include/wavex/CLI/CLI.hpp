@@ -14,21 +14,19 @@
 #include <string_view>
 #include <vector>
 #include <unordered_map>
-#include <optional>
 #include <iostream>
 #include <sstream>
 #include <algorithm>
 
 namespace wavex::cli {
-
     /**
      * @enum OptionType
      * @brief Type of CLI option.
      */
     enum class OptionType {
-        Flag,       ///< Boolean flag (e.g. --verbose, -v)
-        Value,      ///< Value option (e.g. --port 8080, --host 127.0.0.1)
-        Positional  ///< Positional argument
+        Flag, ///< Boolean flag (e.g. --verbose, -v)
+        Value, ///< Value option (e.g. --port 8080, --host 127.0.0.1)
+        Positional ///< Positional argument
     };
 
     /**
@@ -36,14 +34,14 @@ namespace wavex::cli {
      * @brief Definition and state of a CLI option/flag.
      */
     struct Option {
-        std::string name;          ///< Long option name (e.g. "port")
-        std::string description;   ///< Help description
+        std::string name; ///< Long option name (e.g. "port")
+        std::string description; ///< Help description
         std::string default_value; ///< Default value string
-        std::string value;         ///< Parsed string value
+        std::string value; ///< Parsed string value
         OptionType type{OptionType::Value}; ///< Enum type
-        char short_name{'\0'};     ///< Short option character (e.g. 'p')
-        bool required{false};      ///< Indicates if required
-        bool specified{false};     ///< Indicates if specified in command line
+        char short_name{'\0'}; ///< Short option character (e.g. 'p')
+        bool required{false}; ///< Indicates if required
+        bool specified{false}; ///< Indicates if specified in command line
     };
 
     /**
@@ -250,14 +248,14 @@ namespace wavex::cli {
             }
 
             // Verify required options and positionals
-            for (const auto &[name, opt] : options_) {
+            for (const auto &[name, opt]: options_) {
                 if (opt.required && !opt.specified) {
                     res.success = false;
                     res.error_message = "Missing required option: --" + name;
                     return res;
                 }
             }
-            for (const auto &pos : positionals_) {
+            for (const auto &pos: positionals_) {
                 if (pos.required && !pos.specified) {
                     res.success = false;
                     res.error_message = "Missing required positional argument: <" + pos.name + ">";
@@ -273,7 +271,7 @@ namespace wavex::cli {
          */
         [[nodiscard]] bool has(const std::string &name) const {
             if (const auto *opt = find_option(name)) return opt->specified;
-            for (const auto &pos : positionals_) {
+            for (const auto &pos: positionals_) {
                 if (pos.name == name) return pos.specified;
             }
             return false;
@@ -284,7 +282,7 @@ namespace wavex::cli {
          */
         [[nodiscard]] std::string get_string(const std::string &name) const {
             if (const auto *opt = find_option(name)) return opt->value;
-            for (const auto &pos : positionals_) {
+            for (const auto &pos: positionals_) {
                 if (pos.name == name) return pos.value;
             }
             return "";
@@ -351,7 +349,7 @@ namespace wavex::cli {
             std::ostringstream oss;
             oss << "Usage: " << (program_name_.empty() ? "app" : program_name_);
             if (!options_.empty()) oss << " [options]";
-            for (const auto &pos : positionals_) {
+            for (const auto &pos: positionals_) {
                 if (pos.required) oss << " <" << pos.name << ">";
                 else oss << " [" << pos.name << "]";
             }
@@ -362,7 +360,7 @@ namespace wavex::cli {
             }
 
             oss << "\nOptions:\n";
-            for (const auto &name : option_order_) {
+            for (const auto &name: option_order_) {
                 const auto &opt = options_.at(name);
                 oss << "  ";
                 if (opt.short_name != '\0') {
@@ -389,7 +387,7 @@ namespace wavex::cli {
 
             if (!positionals_.empty()) {
                 oss << "\nPositional Arguments:\n";
-                for (const auto &pos : positionals_) {
+                for (const auto &pos: positionals_) {
                     oss << "  " << pos.name;
                     size_t padding = (pos.name.size() < 20) ? 20 - pos.name.size() : 2;
                     oss << std::string(padding, ' ') << pos.description;
@@ -444,5 +442,4 @@ namespace wavex::cli {
         std::vector<Option> positionals_;
         std::vector<std::string> extra_positionals_;
     };
-
 } // namespace wavex::cli

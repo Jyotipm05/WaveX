@@ -15,5 +15,5 @@ module;
 export module wavex:server_tls_config;
 
 export namespace wavex::server {
-    using wavex::server::TlsConfig;
+    using server::TlsConfig;
 }

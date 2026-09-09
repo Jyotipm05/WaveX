@@ -29,13 +29,13 @@ namespace wavex::protos::http {
      * @brief HTTP request parameterized on Codec — supports both server-side parsing and client-side creation.
      * @tparam Codec Protocol codec defining parser, encoder, decoder, request, and response types.
      */
-    template <typename Codec = wavex::protos::http::http1codec>
+    template<typename Codec = http1codec>
     class HttpRequest final : public base::Request {
     public:
         using codec_type = Codec;
-        using parser_type = typename Codec::parser;
-        using encoder_type = typename Codec::encoder;
-        using request_type = typename Codec::request;
+        using parser_type = Codec::parser;
+        using encoder_type = Codec::encoder;
+        using request_type = Codec::request;
 
         using base::Request::query;
         using base::Request::params;
@@ -70,7 +70,7 @@ namespace wavex::protos::http {
          * @param stream_buf Stream buffer view containing wire data.
          * @return parser_type::result (success, incomplete, error).
          */
-        typename parser_type::result parse_stream(const std::string_view stream_buf) {
+        parser_type::result parse_stream(const std::string_view stream_buf) {
             consumed_ = 0;
             const auto result = parser_type::parse_request(stream_buf, parsed_, consumed_);
             if (result == parser_type::result::success) {
@@ -191,14 +191,14 @@ namespace wavex::protos::http {
             }
         }
 
-        std::string buffer_;              ///< owned receive buffer (server)
-        size_t consumed_{0};              ///< byte count consumed by parser
-        request_type parsed_;             ///< zero-copy views
-        std::string path_;               ///< extracted path
-        std::string raw_target_owned_;   ///< owned full target string (client)
-        std::string path_target_owned_;  ///< owned path + query string (client)
-        std::string body_owned_;         ///< owned body string (client)
-        std::vector<std::pair<std::string, std::string>> headers_owned_; ///< owned headers (client)
+        std::string buffer_; ///< owned receive buffer (server)
+        size_t consumed_{0}; ///< byte count consumed by parser
+        request_type parsed_; ///< zero-copy views
+        std::string path_; ///< extracted path
+        std::string raw_target_owned_; ///< owned full target string (client)
+        std::string path_target_owned_; ///< owned path + query string (client)
+        std::string body_owned_; ///< owned body string (client)
+        std::vector<std::pair<std::string, std::string> > headers_owned_; ///< owned headers (client)
     };
 
     /// Concrete default HTTP/1.x request type aliases

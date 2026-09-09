@@ -21,14 +21,14 @@ export import :server_queue;
 export import :server_pool;
 
 export namespace wavex::server {
-    using wavex::server::TlsConfig;
-    using wavex::server::Task;
-    using wavex::server::LocalQueue;
-    using wavex::server::InjectorQueue;
-    using wavex::server::ThreadPoolConfig;
-    using wavex::server::WorkerNode;
-    using wavex::server::ThreadPool;
-    using wavex::server::Server;
-    using wavex::server::Http1Server;
-    using wavex::server::http1server;
+    using server::TlsConfig;
+    using server::Task;
+    using server::LocalQueue;
+    using server::InjectorQueue;
+    using server::ThreadPoolConfig;
+    using server::WorkerNode;
+    using server::ThreadPool;
+    using server::Server;
+    using server::Http1Server;
+    using server::http1server;
 }

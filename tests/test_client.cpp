@@ -46,7 +46,7 @@ namespace {
     std::string strip_cr(const std::string_view sv) {
         std::string out;
         out.reserve(sv.size());
-        for (const char c : sv) {
+        for (const char c: sv) {
             if (c != '\r') out += c;
         }
         return out;
@@ -64,7 +64,7 @@ namespace {
         auto safe = [](const std::string_view sv) -> std::string {
             std::string out;
             out.reserve(sv.size());
-            for (unsigned char c : sv) {
+            for (unsigned char c: sv) {
                 if (c >= 0x20 && c <= 0x7e)
                     out += static_cast<char>(c);
                 else
@@ -81,7 +81,7 @@ namespace {
     void dump_to_file(const std::string &path, const std::string_view data) {
         std::ofstream ofs(path, std::ios::binary);
         if (!ofs) return;
-        for (const char c : data) {
+        for (const char c: data) {
             if (c != '\r') ofs.put(c);
         }
     }
@@ -101,9 +101,9 @@ namespace {
         }
         ofs << "Body size: " << res.get_body().size() << " bytes\n";
         ofs << "Body starts with <!doctype: "
-            << res.get_body().starts_with("<!doctype html>") << "\n";
+                << res.get_body().starts_with("<!doctype html>") << "\n";
         ofs << "Body ends with </html>: "
-            << res.get_body().ends_with("</html>") << "\n";
+                << res.get_body().ends_with("</html>") << "\n";
     }
 }
 
@@ -122,7 +122,8 @@ void test_http_request_client_serialization() {
 
     std::string wire = req.serialize();
     check(wire.starts_with("GET /v1/users?page=2 HTTP/1.1\r\n"), "Request line matches GET /v1/users?page=2 HTTP/1.1");
-    check(wire.find("Authorization: Bearer token123\r\n") != std::string::npos, "Serialized wire contains Authorization header");
+    check(wire.find("Authorization: Bearer token123\r\n") != std::string::npos,
+          "Serialized wire contains Authorization header");
 }
 
 // ─── Test 2: HttpResponse Client Parsing & Socket-less Usage ───────────────
@@ -131,30 +132,30 @@ void test_http_response_client_parsing() {
     std::cout << "\n[Test 2] HttpResponse client parsing & chunked de-chunking\n";
 
     std::string raw_res =
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: application/json\r\n"
-        "Server: TestServer/1.0\r\n"
-        "Content-Length: 19\r\n"
-        "\r\n"
-        "{\"status\":\"active\"}";
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: application/json\r\n"
+            "Server: TestServer/1.0\r\n"
+            "Content-Length: 19\r\n"
+            "\r\n"
+            "{\"status\":\"active\"}";
 
     HttpResponse res;
     check(res.parse(raw_res), "HttpResponse parsed raw HTTP response");
     check(res.status_code() == 200, "Status code is 200");
     check(res.status_text() == "OK", "Status text is OK");
     check(res.header("Content-Type") == "application/json", "Content-Type is application/json");
-    check(res.get_body() == "{\"status\":\"active\"}", "Body equals JSON string");
+    check(res.get_body() == R"({"status":"active"})", "Body equals JSON string");
 
     // Chunked response parsing & auto-dechunking test (multi-chunk)
     std::string raw_chunked_res =
-        "HTTP/1.1 200 OK\r\n"
-        "Transfer-Encoding: chunked\r\n"
-        "\r\n"
-        "7\r\n"
-        "Mozilla\r\n"
-        "a\r\n"
-        " Developer\r\n"
-        "0\r\n\r\n";
+            "HTTP/1.1 200 OK\r\n"
+            "Transfer-Encoding: chunked\r\n"
+            "\r\n"
+            "7\r\n"
+            "Mozilla\r\n"
+            "a\r\n"
+            " Developer\r\n"
+            "0\r\n\r\n";
 
     HttpResponse chunked_res;
     check(chunked_res.parse(raw_chunked_res), "Chunked response parsed");
@@ -164,16 +165,16 @@ void test_http_response_client_parsing() {
     // Transfer-Encoding: chunked, single chunk, no Content-Length.
     // Body size is determined dynamically — no hardcoded byte count.
     constexpr std::string_view html_body =
-        "<!doctype html><html lang=\"en\"><head><title>Example Domain</title>"
-        "<link rel=\"icon\" href=\"data:,\"><meta name=\"viewport\" "
-        "content=\"width=device-width, initial-scale=1\"><style>"
-        "body{background:#eee;width:60vw;margin:15vh auto;font-family:"
-        "system-ui,sans-serif}h1{font-size:1.5em}div{opacity:0.8}"
-        "a:link,a:visited{color:#00f}a:hover{text-decoration:underline}"
-        "</style></head><body><div><h1>Example Domain</h1><p>"
-        "This domain is for use in illustrative examples in documents.</p>"
-        "<p>You may use this domain in literature without prior coordination."
-        "</p></div></body></html>";
+            "<!doctype html><html lang=\"en\"><head><title>Example Domain</title>"
+            "<link rel=\"icon\" href=\"data:,\"><meta name=\"viewport\" "
+            "content=\"width=device-width, initial-scale=1\"><style>"
+            "body{background:#eee;width:60vw;margin:15vh auto;font-family:"
+            "system-ui,sans-serif}h1{font-size:1.5em}div{opacity:0.8}"
+            "a:link,a:visited{color:#00f}a:hover{text-decoration:underline}"
+            "</style></head><body><div><h1>Example Domain</h1><p>"
+            "This domain is for use in illustrative examples in documents.</p>"
+            "<p>You may use this domain in literature without prior coordination."
+            "</p></div></body></html>";
 
     constexpr auto body_len = html_body.size();
 
@@ -184,22 +185,22 @@ void test_http_response_client_parsing() {
     chunk_size_line += "\r\n";
 
     std::string real_chunked_res =
-        "HTTP/1.1 200 OK\r\n"
-        "Date: Sat, 25 Jul 2026 08:21:32 GMT\r\n"
-        "Content-Type: text/html\r\n"
-        "Transfer-Encoding: chunked\r\n"
-        "Connection: close\r\n"
-        "Server: cloudflare\r\n"
-        "Last-Modified: Tue, 21 Jul 2026 07:16:00 GMT\r\n"
-        "Allow: GET, HEAD\r\n"
-        "Accept-Ranges: bytes\r\n"
-        "Age: 9311\r\n"
-        "cf-cache-status: HIT\r\n"
-        "CF-RAY: a209c0710de9c617-BOM\r\n"
-        "\r\n"
-        + chunk_size_line
-        + std::string(html_body) + "\r\n"
-        "0\r\n\r\n";
+            "HTTP/1.1 200 OK\r\n"
+            "Date: Sat, 25 Jul 2026 08:21:32 GMT\r\n"
+            "Content-Type: text/html\r\n"
+            "Transfer-Encoding: chunked\r\n"
+            "Connection: close\r\n"
+            "Server: cloudflare\r\n"
+            "Last-Modified: Tue, 21 Jul 2026 07:16:00 GMT\r\n"
+            "Allow: GET, HEAD\r\n"
+            "Accept-Ranges: bytes\r\n"
+            "Age: 9311\r\n"
+            "cf-cache-status: HIT\r\n"
+            "CF-RAY: a209c0710de9c617-BOM\r\n"
+            "\r\n"
+            + chunk_size_line
+            + std::string(html_body) + "\r\n"
+            "0\r\n\r\n";
 
     constexpr std::size_t expected_header_count = 11;
 
@@ -243,7 +244,10 @@ void test_http_response_client_parsing() {
     // Structural sanity: no header name should start with '<' (HTML leak)
     bool no_html_leak = true;
     for (const auto &k: real_res.header_views() | std::views::keys) {
-        if (!k.empty() && k[0] == '<') { no_html_leak = false; break; }
+        if (!k.empty() && k[0] == '<') {
+            no_html_leak = false;
+            break;
+        }
     }
     check(no_html_leak, "No header name starts with '<' (no HTML body leak)");
 
@@ -252,7 +256,7 @@ void test_http_response_client_parsing() {
     // Previously (default copy ctor), copying an HttpResponse left all
     // string_view members pointing at the SOURCE's buffer — a use-after-free.
     {
-        HttpResponse copy = real_res;   // copy ctor
+        HttpResponse copy = real_res; // copy ctor
         check(copy.status_code() == 200,
               "Copied response status code is 200");
         check(copy.status_text() == "OK",
@@ -363,8 +367,14 @@ void test_external_example_server() {
 
             // ── Programmatic assertions (no raw bytes on stdout) ─────────────
             std::cout << "  Raw response: " << res.raw_response().size()
-                      << (" bytes (see " PROJECT_DIR "/tmp/wavex_raw_response.txt)\n");
-            std::cout << "  Parsed summary: (see " PROJECT_DIR "/tmp/wavex_parsed_response.txt)\n";
+                    << (" bytes (see "
+            PROJECT_DIR
+            "/tmp/wavex_raw_response.txt)\n"
+            )
+            ;
+            std::cout << "  Parsed summary: (see "
+            PROJECT_DIR
+            "/tmp/wavex_parsed_response.txt)\n";
 
             const auto &hdrs = res.header_views();
 

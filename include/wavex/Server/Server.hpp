@@ -26,6 +26,8 @@
 #include <filesystem>
 #include <fstream>
 #include <chrono>
+#include <atomic>
+
 #include <wavex/Base/MimeTypes.hpp>
 
 #include <asio/io_context.hpp>
@@ -58,7 +60,7 @@ namespace wavex::server {
      * @tparam Codec Protocol codec (default `protos::http::http1codec`).
      * @tparam RouterType Router specialization (default `engine::HttpRouter`).
      */
-    template<typename Codec = wavex::protos::http::http1codec, typename RouterType = wavex::engine::HttpRouter<Codec>>
+    template<typename Codec = wavex::protos::http::http1codec, typename RouterType = wavex::engine::HttpRouter<Codec> >
     class Server {
     public:
         using codec_type = Codec;
@@ -75,14 +77,15 @@ namespace wavex::server {
             : router_(router),
               address_(std::move(address)),
               acceptor_(master_io_, asio::ip::tcp::endpoint(asio::ip::make_address(address_), port)),
-              port_(port)
-        {}
+              port_(port) {
+        }
 
         ~Server() {
             stop();
         }
 
         Server(const Server &) = delete;
+
         Server &operator=(const Server &) = delete;
 
         /**
@@ -95,8 +98,9 @@ namespace wavex::server {
             init_ssl();
             tls_enabled_ = true;
 #else
-            (void)config;
-            throw std::runtime_error("Server::enable_tls failed: WaveX was built without OpenSSL TLS support (WAVEX_HAS_SSL=0)");
+            (void) config;
+            throw std::runtime_error(
+                "Server::enable_tls failed: WaveX was built without OpenSSL TLS support (WAVEX_HAS_SSL=0)");
 #endif
         }
 
@@ -175,14 +179,15 @@ namespace wavex::server {
          * @param content_type Optional Content-Type header (defaults to "text/plain").
          */
         void set_not_found(std::string body, std::string content_type = "text/plain") {
-            server_not_found_handler_ = [b = std::move(body), ct = std::move(content_type)](RequestType &, ResponseType &res) -> asio::awaitable<void> {
-                res.status(404);
-                if (!ct.empty()) {
-                    res.set("Content-Type", ct);
-                }
-                res.send(b);
-                co_return;
-            };
+            server_not_found_handler_ = [b = std::move(body), ct = std::move(content_type)](
+                RequestType &, ResponseType &res) -> asio::awaitable<void> {
+                        res.status(404);
+                        if (!ct.empty()) {
+                            res.set("Content-Type", ct);
+                        }
+                        res.send(b);
+                        co_return;
+                    };
         }
 
         /**
@@ -198,7 +203,7 @@ namespace wavex::server {
                 std::ifstream file(file_path, std::ios::binary);
                 if (file) {
                     std::string content((std::istreambuf_iterator<char>(file)),
-                                         std::istreambuf_iterator<char>());
+                                        std::istreambuf_iterator<char>());
                     std::string mime = std::string(base::mime_type_from_path(file_path.string()));
                     set_not_found(std::move(content), std::move(mime));
                     return;
@@ -214,7 +219,7 @@ namespace wavex::server {
         asio::ip::tcp::acceptor acceptor_;
         ThreadPool pool_;
         unsigned short port_;
-        bool is_running_{false};
+        std::atomic<bool> is_running_{false};
         bool tls_enabled_{false};
         TlsConfig tls_config_;
         std::chrono::seconds keep_alive_timeout_{5};
@@ -239,9 +244,10 @@ namespace wavex::server {
             );
 
             if (!tls_config_.key_password.empty()) {
-                ssl_ctx_->set_password_callback([pwd = tls_config_.key_password](std::size_t, asio::ssl::context::password_purpose) {
-                    return pwd;
-                });
+                ssl_ctx_->set_password_callback(
+                    [pwd = tls_config_.key_password](std::size_t, asio::ssl::context::password_purpose) {
+                        return pwd;
+                    });
             }
 
             std::string cert_path = tls_config_.cert_file;
@@ -283,7 +289,8 @@ namespace wavex::server {
                     asio::ip::tcp::socket socket = co_await acceptor_.async_accept();
 #if WAVEX_HAS_SSL
                     if (tls_enabled_ && ssl_ctx_) {
-                        auto ssl_socket = std::make_unique<asio::ssl::stream<asio::ip::tcp::socket>>(std::move(socket), *ssl_ctx_);
+                        auto ssl_socket = std::make_unique<asio::ssl::stream<asio::ip::tcp::socket> >(
+                            std::move(socket), *ssl_ctx_);
                         pool_.spawn_coroutine(handle_tls_client(std::move(ssl_socket)));
                         continue;
                     }
@@ -356,7 +363,8 @@ namespace wavex::server {
                     auto match = router_.resolve(req.method_type(), req.path());
                     if (!match) {
                         ResponseType not_found_res(&socket);
-                        not_found_res.set_keep_alive(keep_alive, static_cast<unsigned>(keep_alive_timeout_.count()), max_keep_alive_requests_ - request_count);
+                        not_found_res.set_keep_alive(keep_alive, static_cast<unsigned>(keep_alive_timeout_.count()),
+                                                     max_keep_alive_requests_ - request_count);
                         not_found_res.status(404);
 
                         if (server_not_found_handler_) {
@@ -375,7 +383,8 @@ namespace wavex::server {
                     }
 
                     ResponseType res(&socket);
-                    res.set_keep_alive(keep_alive, static_cast<unsigned>(keep_alive_timeout_.count()), max_keep_alive_requests_ - request_count);
+                    res.set_keep_alive(keep_alive, static_cast<unsigned>(keep_alive_timeout_.count()),
+                                       max_keep_alive_requests_ - request_count);
 
                     if (match->middlewares.empty()) {
                         co_await match->handler(req, res);
@@ -406,8 +415,9 @@ namespace wavex::server {
 
 #if WAVEX_HAS_SSL
         /// TLS client connection processing coroutine with persistent stay-active loop
-        asio::awaitable<void> handle_tls_client(std::unique_ptr<asio::ssl::stream<asio::ip::tcp::socket>> ssl_socket_ptr) {
-            auto& ssl_socket = *ssl_socket_ptr;
+        asio::awaitable<void> handle_tls_client(
+            std::unique_ptr<asio::ssl::stream<asio::ip::tcp::socket> > ssl_socket_ptr) {
+            auto &ssl_socket = *ssl_socket_ptr;
             std::string stream_buf;
             stream_buf.reserve(8192);
             auto executor = co_await asio::this_coro::executor;
@@ -468,7 +478,8 @@ namespace wavex::server {
                     auto match = router_.resolve(req.method_type(), req.path());
                     if (!match) {
                         ResponseType not_found_res;
-                        not_found_res.set_keep_alive(keep_alive, static_cast<unsigned>(keep_alive_timeout_.count()), max_keep_alive_requests_ - request_count);
+                        not_found_res.set_keep_alive(keep_alive, static_cast<unsigned>(keep_alive_timeout_.count()),
+                                                     max_keep_alive_requests_ - request_count);
                         not_found_res.status(404);
 
                         if (server_not_found_handler_) {
@@ -485,7 +496,8 @@ namespace wavex::server {
                     }
 
                     ResponseType res;
-                    res.set_keep_alive(keep_alive, static_cast<unsigned>(keep_alive_timeout_.count()), max_keep_alive_requests_ - request_count);
+                    res.set_keep_alive(keep_alive, static_cast<unsigned>(keep_alive_timeout_.count()),
+                                       max_keep_alive_requests_ - request_count);
 
                     if (match->middlewares.empty()) {
                         co_await match->handler(req, res);
@@ -514,7 +526,7 @@ namespace wavex::server {
 #endif
 
         /// Generic middleware chain runner helper for arbitrary CRTP Request/Response types
-        template <typename ReqT, typename ResT, typename MwVec, typename H>
+        template<typename ReqT, typename ResT, typename MwVec, typename H>
         static asio::awaitable<void> run_chain(
             ReqT &req,
             ResT &res,

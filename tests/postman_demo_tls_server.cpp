@@ -60,7 +60,7 @@ asio::awaitable<void> tls_auth_middleware(const HttpRequest &req, HttpResponse &
     co_await next();
 }
 
-int main(int argc, char* argv[]) {
+int main(int argc, char *argv[]) {
     std::string cert_file = "ssl/test.crt";
     std::string key_file = "ssl/test.key";
 
@@ -70,7 +70,8 @@ int main(int argc, char* argv[]) {
     }
 
     std::cout << "=========================================================================\n";
-    std::cout << ("               WaveX TLS 1.3 Dev v"+std::string(wx_version)+" / Postman Server               \n");
+    std::cout << ("               WaveX TLS 1.3 Dev v" + std::string(wx_version) +
+                  " / Postman Server               \n");
     std::cout << "=========================================================================\n";
     std::cout << " Cert File: " << cert_file << "\n";
     std::cout << " Key File : " << key_file << "\n";

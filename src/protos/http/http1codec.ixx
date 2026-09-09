@@ -15,15 +15,15 @@ module;
 export module wavex:protos_http_codec;
 
 export namespace wavex::protos::http {
-    using wavex::protos::http::header;
-    using wavex::protos::http::message_base;
-    using wavex::protos::http::request;
-    using wavex::protos::http::response;
-    using wavex::protos::http::to_string;
-    using wavex::protos::http::from_string;
-    using wavex::protos::http::status_text_for;
-    using wavex::protos::http::parser;
-    using wavex::protos::http::encoder;
-    using wavex::protos::http::http1codec;
+    using http::header;
+    using http::message_base;
+    using http::request;
+    using http::response;
+    using http::to_string;
+    using http::from_string;
+    using http::status_text_for;
+    using http::parser;
+    using http::encoder;
+    using http::http1codec;
 }
 

@@ -27,7 +27,7 @@ namespace wavex::engine {
      * @brief Protocol adapter for HTTP — provides the method, request, and response types for a specific Codec.
      * @tparam Codec HTTP protocol codec type (defaults to http1codec).
      */
-    template <typename Codec = protos::http::http1codec>
+    template<typename Codec = protos::http::http1codec>
     struct HttpProto {
         using method = protos::http::method;
         using request = protos::http::HttpRequest<Codec>;
@@ -43,10 +43,10 @@ namespace wavex::engine {
      * @brief HTTP-specific convenience wrapper around Router<HttpProto<Codec>>.
      * @tparam Codec HTTP protocol codec type (defaults to http1codec).
      */
-    template <typename Codec = protos::http::http1codec>
-    class HttpRouter : public Router<HttpProto<Codec>> {
+    template<typename Codec = protos::http::http1codec>
+    class HttpRouter : public Router<HttpProto<Codec> > {
     public:
-        using Base = Router<HttpProto<Codec>>;
+        using Base = Router<HttpProto<Codec> >;
         using typename Base::Handler;
         using typename Base::NotFoundHandler;
         using typename Base::MiddlewareFn;
@@ -58,9 +58,13 @@ namespace wavex::engine {
         using Base::not_found_handler;
 
         HttpRouter() = default;
+
         HttpRouter(const HttpRouter &) = delete;
+
         HttpRouter &operator=(const HttpRouter &) = delete;
+
         HttpRouter(HttpRouter &&) noexcept = default;
+
         HttpRouter &operator=(HttpRouter &&) noexcept = default;
 
         /**
@@ -250,7 +254,7 @@ namespace wavex::engine {
          * @param pattern Route pattern.
          * @param chain StaticChain instance.
          */
-        template <typename... Handlers>
+        template<typename... Handlers>
         void get(const std::string_view pattern, StaticChain<Handlers...> chain) {
             route(protos::http::method::GET, pattern, std::move(chain));
         }
@@ -261,7 +265,7 @@ namespace wavex::engine {
          * @param pattern Route pattern.
          * @param chain StaticChain instance.
          */
-        template <typename... Handlers>
+        template<typename... Handlers>
         void post(const std::string_view pattern, StaticChain<Handlers...> chain) {
             route(protos::http::method::POST, pattern, std::move(chain));
         }
@@ -272,7 +276,7 @@ namespace wavex::engine {
          * @param pattern Route pattern.
          * @param chain StaticChain instance.
          */
-        template <typename... Handlers>
+        template<typename... Handlers>
         void put(const std::string_view pattern, StaticChain<Handlers...> chain) {
             route(protos::http::method::PUT, pattern, std::move(chain));
         }
@@ -283,7 +287,7 @@ namespace wavex::engine {
          * @param pattern Route pattern.
          * @param chain StaticChain instance.
          */
-        template <typename... Handlers>
+        template<typename... Handlers>
         void del(const std::string_view pattern, StaticChain<Handlers...> chain) {
             route(protos::http::method::DELETE, pattern, std::move(chain));
         }
@@ -294,7 +298,7 @@ namespace wavex::engine {
          * @param pattern Route pattern.
          * @param chain StaticChain instance.
          */
-        template <typename... Handlers>
+        template<typename... Handlers>
         void head(const std::string_view pattern, StaticChain<Handlers...> chain) {
             route(protos::http::method::HEAD, pattern, std::move(chain));
         }
@@ -305,7 +309,7 @@ namespace wavex::engine {
          * @param pattern Route pattern.
          * @param chain StaticChain instance.
          */
-        template <typename... Handlers>
+        template<typename... Handlers>
         void options(const std::string_view pattern, StaticChain<Handlers...> chain) {
             route(protos::http::method::OPTIONS, pattern, std::move(chain));
         }
@@ -316,7 +320,7 @@ namespace wavex::engine {
          * @param pattern Route pattern.
          * @param chain StaticChain instance.
          */
-        template <typename... Handlers>
+        template<typename... Handlers>
         void patch(const std::string_view pattern, StaticChain<Handlers...> chain) {
             route(protos::http::method::PATCH, pattern, std::move(chain));
         }
@@ -327,7 +331,7 @@ namespace wavex::engine {
          * @param pattern Route pattern.
          * @param chain StaticChain instance.
          */
-        template <typename... Handlers>
+        template<typename... Handlers>
         void query(const std::string_view pattern, StaticChain<Handlers...> chain) {
             route(protos::http::method::QUERY, pattern, std::move(chain));
         }

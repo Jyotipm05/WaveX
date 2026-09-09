@@ -15,5 +15,5 @@ module;
 export module wavex:protos_http_methods;
 
 export namespace wavex::protos::http {
-    using wavex::protos::http::method;
+    using http::method;
 }

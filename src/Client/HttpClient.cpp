@@ -13,13 +13,13 @@
 #include <wavex/Client/HttpClient.hpp>
 #include <asio/write.hpp>
 #include <asio/connect.hpp>
+#include <asio/redirect_error.hpp>
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
 #include <asio/ssl.hpp>
 #endif
 
 namespace wavex::client {
-
     asio::awaitable<Http1Response> HttpClient::send(Http1Request req) {
         Http1Response res;
 
@@ -100,7 +100,7 @@ namespace wavex::client {
                 }
 
                 asio::error_code ignore_ec;
-                std::ignore = ssl_socket.async_shutdown(asio::redirect_error(asio::use_awaitable, ignore_ec));
+                co_await ssl_socket.async_shutdown(asio::redirect_error(asio::use_awaitable, ignore_ec));
                 ssl_socket.lowest_layer().close(ignore_ec);
             } catch (const std::exception &ex) {
                 res.status(502).send(std::string("Bad Gateway: ") + ex.what());
@@ -160,8 +160,7 @@ namespace wavex::client {
         const method m,
         const std::string_view url,
         const std::string_view body,
-        const std::vector<std::pair<std::string, std::string>> &headers) {
-
+        const std::vector<std::pair<std::string, std::string> > &headers) {
         Http1Request req(m, url);
         for (const auto &[k, v]: headers) {
             req.set_header(k, v);
@@ -171,5 +170,4 @@ namespace wavex::client {
         }
         return send(std::move(req));
     }
-
 } // namespace wavex::client

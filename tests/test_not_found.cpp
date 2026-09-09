@@ -4,10 +4,6 @@
  */
 
 #include <wavex/wavex.hpp>
-#include <wavex/Engine/HttpRouter.hpp>
-#include <wavex/Server/Server.hpp>
-#include <wavex/protos/http/HttpRequest.hpp>
-#include <wavex/protos/http/HttpResponse.hpp>
 
 #include <iostream>
 #include <string>
@@ -86,8 +82,7 @@ void test_router_custom_page_file() {
     std::cout << "\n[Test 3] Router custom page from file\n";
 
     // Create a temporary 404 html file
-    std::string temp_file = "test_temp_404.html";
-    {
+    std::string temp_file = "test_temp_404.html"; {
         std::ofstream out(temp_file);
         out << "<!DOCTYPE html><html><body><h1>404 Custom Error</h1></body></html>";
     }
@@ -128,7 +123,8 @@ void test_router_dynamic_coroutine_handler() {
     std::cout << "\n[Test 4] Router dynamic coroutine handler\n";
 
     auto router = wavex::engine::Http1Router::make_instance();
-    router.not_found([](wavex::protos::http::Http1Request &req, wavex::protos::http::Http1Response &res) -> asio::awaitable<void> {
+    router.not_found([](wavex::protos::http::Http1Request &req,
+                        wavex::protos::http::Http1Response &res) -> asio::awaitable<void> {
         nlohmann::json j = {
             {"error", "Route Not Found"},
             {"requested_path", std::string(req.path())}
@@ -226,7 +222,8 @@ void test_server_custom_404_integration() {
         std::string resp(buf, n);
 
         check(resp.find("HTTP/1.1 404 Not Found") != std::string::npos, "Response status line is 404 Not Found");
-        check(resp.find("Custom 404: The requested resource does not exist.") != std::string::npos, "Response body contains custom server text");
+        check(resp.find("Custom 404: The requested resource does not exist.") != std::string::npos,
+              "Response body contains custom server text");
 
         client_socket.close();
     } catch (const std::exception &e) {

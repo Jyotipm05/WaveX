@@ -13,9 +13,9 @@ WaveX draws inspiration from **Rust's Actix Web** (hybrid radix-tree routing), *
 
 ## Features
 
-- **⚡ Coroutine-Native Engine** — Async server handlers and client requests written with Asio C++23 coroutines (`co_await`, `asio::awaitable<void>`), zero callback boilerplate.
+- **⚡ Coroutine-Native Engine** — Async server handlers and client requests written with asio C++23 coroutines (`co_await`, `asio::awaitable<void>`), zero callback boilerplate.
 - **⚡ C++23 "Deducing This" Static Pipelines** — Zero-overhead static dispatch mixin (`wavex::Chainable`) enabling compile-time tuple pipelines (`wavex::StaticChain`), `make_chain` factory, and semi-static runtime toggles (`ConditionalChainable`), eliminating vtable and dynamic `std::function` heap allocation overhead.
-- **⚡ CRTP Zero-VTable Architecture** — Static compile-time polymorphism (`Request<Derived>`, `Response<Derived>`) eliminating virtual function pointers (`vptr`), saving memory and enabling zero-overhead direct dispatch.
+- **⚡ CRTP Zero-Vtable Architecture** — Static compile-time polymorphism (`Request<Derived>`, `Response<Derived>`) eliminating virtual function pointers (`vptr`), saving memory and enabling zero-overhead direct dispatch.
 - **🚀 Express.js-Style Linear Pipeline** — Iterative, non-recursive `run_chain()` middleware runner with immediate response dispatch (`res.send()` / `res.json()`) and zero-allocation socket pointer dispatch (`HttpResponse res(&socket)`).
 - **🌳 Hybrid Radix-Tree Router** — High-performance radix-tree supporting static segments, dynamic parameters (`:id`), `{id:[0-9]+}` RE2 regex constraints, catch-all wildcards (`*filepath`), and RFC 9110 HTTP methods including `QUERY`.
 - **🌐 Async Coroutine HTTP Client** — Modern, coroutine-native HTTP/1.1 client (`HttpClient`) for non-blocking outbound requests (`get`, `post`, `send`) with connection reuse and optional TLS 1.3 encryption *(HTTP/2 support to be released soon)*.
@@ -23,7 +23,7 @@ WaveX draws inspiration from **Rust's Actix Web** (hybrid radix-tree routing), *
 - **🗂 MIME Type Detection Engine** — Fast, built-in file extension to MIME content-type resolver (`MimeTypes.hpp`) supporting over 50+ common web media types.
 - **🛠 Modern CLI Engine** — High-performance CLI argument parser (`wavex::cli::CliParser`) supporting flags (`--verbose`, `-v`), key-value options (`--host`, `-p`), positional arguments, typed getters (`get_int`, `get_bool`), and automatic `--help` generation.
 - **🔒 TLS 1.3 OpenSSL Encryption Engine** — Strict, native TLS 1.3 server encryption (`enable_tls()`, `wavex::server::TlsConfig`) supporting custom PEM certificate chains (`cert_file`), private key passphrases (`key_password`), DH parameters (`dh_file`), and strict legacy SSL/TLS protocol disabling (`force_tls13`).
-- **🔄 HTTP Stay-Active & Inactivity Timeout (RFC 7230 / RFC 9112)** — Full persistent connection support over Plain TCP and TLS 1.3 streams. Handles HTTP pipelining without socket re-establishment, manages inactivity timeouts (`set_keep_alive_timeout`) via Asio steady timers, enforces maximum request thresholds (`set_max_keep_alive_requests`), and includes zero-cost compile-time policies (`KeepAlivePolicy`) and middlewares (`keep_alive`, `sse_stay_active`).
+- **🔄 HTTP Stay-Active & Inactivity Timeout (RFC 7230 / RFC 9112)** — Full persistent connection support over Plain TCP and TLS 1.3 streams. Handles HTTP pipelining without socket re-establishment, manages inactivity timeouts (`set_keep_alive_timeout`) via asio steady timers, enforces maximum request thresholds (`set_max_keep_alive_requests`), and includes zero-cost compile-time policies (`KeepAlivePolicy`) and middlewares (`keep_alive`, `sse_stay_active`).
 - **🚫 Configurable 404 Not Found Engine** — Default `"Not Found"` string response with full customization support across Router and Server: custom text, HTML/JSON bodies with automatic MIME types, static error pages loaded from disk (`not_found_page`), or custom coroutine handlers.
 - **🧵 Tokio-Style Work-Stealing Dual-Queue Runtime** —
   - **`LocalQueue`**: Bounded 256-slot ring buffer per worker thread for ultra-fast LIFO/FIFO work stealing.
@@ -323,6 +323,7 @@ int main() {
 WaveX natively supports RFC 7230 / RFC 9112 persistent connections (`Keep-Alive`) and HTTP pipelining for both Plain TCP and TLS 1.3 servers.
 
 #### Server Inactivity Timeout & Request Quotas
+
 Configure idle timeout thresholds and sequential request limits per persistent connection directly on `Server`:
 
 ```cpp
@@ -338,6 +339,7 @@ server.run();
 ```
 
 #### Granular Response Header Control
+
 Control keep-alive persistence dynamically in route handlers:
 
 ```cpp
@@ -357,6 +359,7 @@ router.get("/logout", [](auto &, auto &res) -> asio::awaitable<void> {
 ```
 
 #### Zero-Cost Policies & Middleware
+
 Use compile-time static chain policies or dynamic middlewares:
 
 ```cpp
@@ -375,6 +378,7 @@ router.get("/events", {wavex::base::sse_stay_active()}, SseHandler);
 By default, any unmatched route automatically responds with HTTP status 404 and the plain text `"Not Found"`. Developers can easily customize 404 handling across both `HttpRouter` and `Server`:
 
 #### Option A: Custom String, HTML, or JSON
+
 ```cpp
 // Custom plain text or HTML on Router
 router.not_found("<h1>404 - Page Not Found</h1>", "text/html");
@@ -384,6 +388,7 @@ server.set_not_found("Custom 404 text", "text/plain");
 ```
 
 #### Option B: Load Error Page from File (Auto-MIME Detection)
+
 ```cpp
 // Reads static file from disk and infers Content-Type via wavex::base::mime_type_from_path
 router.not_found_page("public/404.html");
@@ -393,6 +398,7 @@ server.set_not_found_page("public/404.html");
 ```
 
 #### Option C: Full Dynamic Coroutine Handler
+
 ```cpp
 router.not_found([](auto &req, auto &res) -> asio::awaitable<void> {
     nlohmann::json j = {
@@ -494,7 +500,7 @@ graph LR
 
 ### Request Lifecycle (UML Activity Diagram)
 
-The following UML activity diagram illustrates the end-to-end lifecycle of an HTTP connection in WaveX — from initial TCP/TLS acceptance, Asio coroutine scheduling, and zero-copy `http1codec` parsing, through radix-tree route resolution, middleware chain execution, short-circuit dispatch, configurable 404 fallback, and persistent Keep-Alive evaluation:
+The following UML activity diagram illustrates the end-to-end lifecycle of an HTTP connection in WaveX — from initial TCP/TLS acceptance, asio coroutine scheduling, and zero-copy `http1codec` parsing, through radix-tree route resolution, middleware chain execution, short-circuit dispatch, configurable 404 fallback, and persistent Keep-Alive evaluation:
 
 ```mermaid
 flowchart TD
@@ -554,27 +560,27 @@ flowchart TD
 
 ## Component Status
 
-| Component | Status | Description |
-| :--- | :--- | :--- |
-| `Base/Logger` | ✅ Complete | Levelled logger (TRACE, DEBUG, INFO, WARN, ERROR, FATAL) |
-| `Base/Uri` / `Base/Url` | ✅ Complete | RFC 3986 URI encode/decode & URL query string parser |
-| `Base/MimeTypes` | ✅ Complete | Fast file extension to MIME type mappings (`mime_type_from_ext`) |
-| `Base/Chainable` | ✅ Complete | C++23 "Deducing `this`" static pipeline dispatch (`StaticChain`, `make_chain`, `KeepAlivePolicy`, `ConditionalChainable`) |
-| `Base/Request` | ✅ Complete | Protocol-agnostic CRTP request base (`Request<Derived>`, zero-vtable) |
-| `Base/Response` | ✅ Complete | Protocol-agnostic CRTP response builder (`Response<Derived>`, zero-vtable, fluent API) |
-| `Base/MiddleWare` | ✅ Complete | Coroutine-aware middleware template (`GenericMiddlewareFn`), linear pipeline, `keep_alive` & `sse_stay_active` |
-| `Engine/Router` | ✅ Complete | Protocol-agnostic radix tree with RE2 regex, wildcard matching & configurable 404 handler |
-| `Engine/HttpRouter` | ✅ Complete | HTTP method convenience routing (`get`, `post`, `put`, `del`, `patch`, `query`) & 404 customization |
-| `Server/LocalQueue` | ✅ Complete | Per-worker 256-slot ring buffer for ultra-fast task stealing |
-| `Server/InjectorQueue` | ✅ Complete | Global unbounded MPMC task overflow queue with atomic size tracking |
-| `Server/ThreadPool` | ✅ Complete | Adaptive Tokio-style work-stealing thread pool with load hysteresis |
-| `Server/Server` | ✅ Complete | Coroutine TCP & TLS 1.3 server with master acceptor, worker pool, persistent Keep-Alive, idle timeouts & 404 handling |
-| `Server/TlsConfig` | ✅ Complete | TLS 1.3 server encryption config (`cert_file`, `key_file`, `key_password`, `dh_file`, `force_tls13`) |
-| `protos/http/http1codec` | ✅ Complete | Zero-copy HTTP/1.x parser, encoder, response decoder, chunked framing & stream pipelining |
-| `protos/http/HttpRequest` | ✅ Complete | Concrete HTTP request with zero-copy stream parsing (`parse_stream`) & keep-alive detection (`should_keep_alive`) |
-| `protos/http/HttpResponse` | ✅ Complete | Concrete HTTP response with zero-alloc socket writing, client parsing & `set_keep_alive` control |
-| `Client/HttpClient` | ✅ Complete | Async coroutine HTTP/1.1 client (`get`, `post`, `send`) — *HTTP/2 to be released soon* |
-| `Cli/Cli` | ✅ Complete | Type-safe CLI argument parser (`wavex::cli::CliParser`), flag validator, and option engine |
+| Component                  | Status     | Description                                                                                                               |
+|:---------------------------|:-----------|:--------------------------------------------------------------------------------------------------------------------------|
+| `Base/Logger`              | ✅ Complete | Levelled logger (TRACE, DEBUG, INFO, WARN, ERROR, FATAL)                                                                  |
+| `Base/Uri` / `Base/Url`    | ✅ Complete | RFC 3986 URI encode/decode & URL query string parser                                                                      |
+| `Base/MimeTypes`           | ✅ Complete | Fast file extension to MIME type mappings (`mime_type_from_ext`)                                                          |
+| `Base/Chainable`           | ✅ Complete | C++23 "Deducing `this`" static pipeline dispatch (`StaticChain`, `make_chain`, `KeepAlivePolicy`, `ConditionalChainable`) |
+| `Base/Request`             | ✅ Complete | Protocol-agnostic CRTP request base (`Request<Derived>`, zero-vtable)                                                     |
+| `Base/Response`            | ✅ Complete | Protocol-agnostic CRTP response builder (`Response<Derived>`, zero-vtable, fluent API)                                    |
+| `Base/MiddleWare`          | ✅ Complete | Coroutine-aware middleware template (`GenericMiddlewareFn`), linear pipeline, `keep_alive` & `sse_stay_active`            |
+| `Engine/Router`            | ✅ Complete | Protocol-agnostic radix tree with RE2 regex, wildcard matching & configurable 404 handler                                 |
+| `Engine/HttpRouter`        | ✅ Complete | HTTP method convenience routing (`get`, `post`, `put`, `del`, `patch`, `query`) & 404 customization                       |
+| `Server/LocalQueue`        | ✅ Complete | Per-worker 256-slot ring buffer for ultra-fast task stealing                                                              |
+| `Server/InjectorQueue`     | ✅ Complete | Global unbounded MPMC task overflow queue with atomic size tracking                                                       |
+| `Server/ThreadPool`        | ✅ Complete | Adaptive Tokio-style work-stealing thread pool with load hysteresis                                                       |
+| `Server/Server`            | ✅ Complete | Coroutine TCP & TLS 1.3 server with master acceptor, worker pool, persistent Keep-Alive, idle timeouts & 404 handling     |
+| `Server/TlsConfig`         | ✅ Complete | TLS 1.3 server encryption config (`cert_file`, `key_file`, `key_password`, `dh_file`, `force_tls13`)                      |
+| `protos/http/http1codec`   | ✅ Complete | Zero-copy HTTP/1.x parser, encoder, response decoder, chunked framing & stream pipelining                                 |
+| `protos/http/HttpRequest`  | ✅ Complete | Concrete HTTP request with zero-copy stream parsing (`parse_stream`) & keep-alive detection (`should_keep_alive`)         |
+| `protos/http/HttpResponse` | ✅ Complete | Concrete HTTP response with zero-alloc socket writing, client parsing & `set_keep_alive` control                          |
+| `Client/HttpClient`        | ✅ Complete | Async coroutine HTTP/1.1 client (`get`, `post`, `send`) — *HTTP/2 to be released soon*                                    |
+| `Cli/Cli`                  | ✅ Complete | Type-safe CLI argument parser (`wavex::cli::CliParser`), flag validator, and option engine                                |
 
 ---
 
@@ -583,42 +589,70 @@ flowchart TD
 ### Requirements
 
 - **C++ Compiler**: GCC 13+, Clang 16+, or MSVC 19.36+ with C++23 enabled.
-- **Build System**: CMake 3.20+.
+- **Build System**: CMake 4.0+, [Ninja](https://ninja-build.org/) generator.
+- **Package Manager**: [vcpkg](https://vcpkg.io/) with `VCPKG_ROOT` environment variable configured.
 
-### Build & Run Tests
+### Build & Run with CMake Presets
 
+WaveX uses standard [CMake Presets](CMakePresets.json) for rapid Ninja-backed configuration, multi-core parallel builds, and automated CTest runs.
+
+#### 1. Configure
 ```bash
 # Clone the repository
 git clone https://github.com/Jyotipm05/WaveX.git
 cd WaveX
 
-# Configure with tests enabled
-cmake -B build -DWAVEX_TEST=ON
-cmake --build build
+# Configure development build (Debug, tests enabled)
+cmake --preset test-profile
 
-# Run automated tests
-ctest --test-dir build --output-on-failure
+# Or configure production release (Release, tests disabled)
+cmake --preset release
 
-# Run Keep-Alive tests
-ctest --test-dir build --output-on-failure -R test_server_keepalive
+# Or configure with runtime sanitizers
+cmake --preset asan   # Address + UB + Leak Sanitizers
+cmake --preset tsan   # Thread Sanitizer
+```
 
-# Run 404 Not Found handling tests
-ctest --test-dir build --output-on-failure -R test_not_found
+#### 2. Build
+```bash
+# Fast build (10 parallel jobs)
+cmake --build --preset fast-dev
+
+# Max build (all available CPU cores)
+cmake --build --preset max-dev
+
+# Build production Release binaries
+cmake --build --preset fast-release
+```
+
+#### 3. Run Tests
+```bash
+# Run all automated tests via test preset
+ctest --preset run-tests --output-on-failure
+
+# Run specific test suites
+ctest --preset run-tests -R test_server_keepalive --output-on-failure
+ctest --preset run-tests -R test_not_found --output-on-failure
+
+# Run Sanitizer test suites
+ctest --preset asan
+ctest --preset tsan
 ```
 
 ### Manual Testing with Postman & cURL
 
-Launch the interactive dev servers:
+Launch the interactive dev servers (generated under `build/test-profile/`):
 
 ```bash
 # 1. Plain HTTP dev server (http://127.0.0.1:8080)
-./build/tests/Debug/wavex_postman_server.exe
+./build/test-profile/wavex_postman_server.exe
 
 # 2. TLS 1.3 HTTPS dev server (https://127.0.0.1:8443)
-./build/tests/Debug/wavex_postman_tls_server.exe
+./build/test-profile/wavex_postman_tls_server.exe
 ```
 
 Test TLS 1.3 endpoints directly via cURL:
+
 ```bash
 curl -k https://127.0.0.1:8443/api/json
 ```
@@ -627,12 +661,12 @@ curl -k https://127.0.0.1:8443/api/json
 
 ## Dependencies
 
-| Library | Purpose | License |
-| :--- | :--- | :--- |
-| [Asio](https://think-async.com/Asio/) | Async I/O & C++ coroutines (standalone) | BSL-1.0 |
-| [nlohmann/json](https://github.com/nlohmann/json) | Modern C++ JSON parsing & serialization | MIT |
-| [Google RE2](https://github.com/google/re2) | Linear-time regex for route pattern constraints | BSD 3-Clause |
-| [OpenSSL](https://www.openssl.org/) | TLS 1.3 encryption (Optional) | Apache-2.0 |
+| Library                                           | Purpose                                         | License      |
+|:--------------------------------------------------|:------------------------------------------------|:-------------|
+| [Asio](https://think-async.com/Asio/)             | Async I/O & C++ coroutines (standalone)         | BSL-1.0      |
+| [nlohmann/json](https://github.com/nlohmann/json) | Modern C++ JSON parsing & serialization         | MIT          |
+| [Google RE2](https://github.com/google/re2)       | Linear-time regex for route pattern constraints | BSD 3-Clause |
+| [OpenSSL](https://www.openssl.org/)               | TLS 1.3 encryption (Optional)                   | Apache-2.0   |
 
 ---
 

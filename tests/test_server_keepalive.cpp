@@ -13,12 +13,7 @@
 #include <thread>
 #include <chrono>
 
-#include <wavex/protos/http/HttpRequest.hpp>
-#include <wavex/protos/http/HttpResponse.hpp>
-#include <wavex/Base/Chainable.hpp>
-#include <wavex/Base/MiddleWare.hpp>
-#include <wavex/Engine/HttpRouter.hpp>
-#include <wavex/Server/Server.hpp>
+#include <wavex/wavex.hpp>
 
 namespace {
     int tests_run = 0;
@@ -69,7 +64,8 @@ void test_request_keep_alive() {
     std::string pipelined = req1_str + req2_str;
     wavex::protos::http::Http1Request pipe_req;
     auto res = pipe_req.parse_stream(pipelined);
-    check(res == wavex::protos::http::http1codec::parser::result::success, "First pipelined request parsed from stream");
+    check(res == wavex::protos::http::http1codec::parser::result::success,
+          "First pipelined request parsed from stream");
     check(pipe_req.consumed_bytes() == req1_str.size(), "First pipelined request consumed bytes matches req1");
 }
 
@@ -94,7 +90,10 @@ void test_response_keep_alive() {
 void test_chainable_keep_alive() {
     std::cout << "\n[Test 3] StaticChain KeepAlivePolicy static handler\n";
 
-    auto chain = wavex::make_chain(wavex::KeepAlivePolicy<15, 200>{});
+    auto chain = wavex::make_chain(wavex::KeepAlivePolicy < 15, 200 > {
+    }
+    )
+    ;
     wavex::protos::http::Http1Request req("GET /api HTTP/1.1\r\nHost: localhost\r\n\r\n");
     check(req.parse(), "Parse request for chain");
 
@@ -148,12 +147,14 @@ void test_server_persistent_connection() {
     std::cout << "\n[Test 5] Integration Test: Sequential requests on single persistent TCP socket\n";
 
     auto router = wavex::engine::Http1Router::make_instance();
-    router.get("/hello", [](wavex::protos::http::Http1Request &, wavex::protos::http::Http1Response &res) -> asio::awaitable<void> {
+    router.get("/hello", [](wavex::protos::http::Http1Request &,
+                            wavex::protos::http::Http1Response &res) -> asio::awaitable<void> {
         res.status(200).send("Hello KeepAlive");
         co_return;
     });
 
-    router.get("/counter", [](wavex::protos::http::Http1Request &, wavex::protos::http::Http1Response &res) -> asio::awaitable<void> {
+    router.get("/counter", [](wavex::protos::http::Http1Request &,
+                              wavex::protos::http::Http1Response &res) -> asio::awaitable<void> {
         static int counter = 0;
         counter++;
         res.status(200).send(std::to_string(counter));
@@ -211,7 +212,8 @@ void test_server_persistent_connection() {
         // Socket should now be closed by server
         asio::error_code ec;
         client_socket.read_some(asio::buffer(buf), ec);
-        check(ec == asio::error::eof || ec == asio::error::connection_reset, "Server closed socket after Connection: close");
+        check(ec == asio::error::eof || ec == asio::error::connection_reset,
+              "Server closed socket after Connection: close");
 
         client_socket.close();
     } catch (const std::exception &ex) {

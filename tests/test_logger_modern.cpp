@@ -1,4 +1,4 @@
-#include <wavex/Base/Logger.hpp>
+#include <wavex/wavex.hpp>
 #include <iostream>
 #include <sstream>
 #include <cassert>
