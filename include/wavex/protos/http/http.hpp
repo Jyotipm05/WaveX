@@ -17,7 +17,10 @@
 #include <string_view>
 
 #include <wavex/protos/http/http1codec.hpp>
+#include <wavex/protos/http/http2codec.hpp>
 #include <wavex/protos/http/HttpResponse.hpp>
+
+#include "HttpRequest.hpp"
 
 namespace wavex::protos::http {
     // ─── Codec-Templated Parser Methods ──────────────────────────────────────────
@@ -95,7 +98,7 @@ namespace wavex::protos::http {
      * @return Terminal chunk view (e.g. "0\r\n\r\n").
      */
     template<typename Codec = http1codec>
-    [[nodiscard]] inline std::string_view format_terminal_chunk() {
+    [[nodiscard]] inline constexpr std::string_view format_terminal_chunk() noexcept {
         return Codec::encoder::format_terminal_chunk();
     }
 
@@ -127,4 +130,10 @@ namespace wavex::protos::http {
     [[nodiscard]] inline std::string dechunk(const std::string_view chunked_raw) {
         return Codec::decoder::dechunk(chunked_raw);
     }
+
+    // ─── HTTP/2 Type Aliases ──────────────────────────────────────────────────────
+    using Http2Request = HttpRequest<wavex::protos::http::http2codec>;
+    using http2request = Http2Request;
+    using Http2Response = HttpResponse<wavex::protos::http::http2codec>;
+    using http2response = Http2Response;
 } // namespace wavex::protos::http

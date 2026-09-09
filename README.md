@@ -14,15 +14,17 @@ WaveX draws inspiration from **Rust's Actix Web** (hybrid radix-tree routing), *
 ## Features
 
 - **⚡ Coroutine-Native Engine** — Async server handlers and client requests written with asio C++23 coroutines (`co_await`, `asio::awaitable<void>`), zero callback boilerplate.
+- **⚡ Native HTTP/2 (RFC 7540) & HPACK (RFC 7541)** — Full binary framing engine (`http2codec`), connection preface validation (`PRI * HTTP/2.0...`), client/server `SETTINGS` negotiation & ACK handshake, server-side ALPN selection (`h2` over TLS 1.3), stream multiplexing, and HPACK static/dynamic table compression.
+- **⚡ Dual-Protocol Server Architecture** — Extensible `Server<Codec, Router>` template providing dedicated first-class `Http1Server` and `Http2Server` specializations with zero runtime protocol switching overhead.
 - **⚡ C++23 "Deducing This" Static Pipelines** — Zero-overhead static dispatch mixin (`wavex::Chainable`) enabling compile-time tuple pipelines (`wavex::StaticChain`), `make_chain` factory, and semi-static runtime toggles (`ConditionalChainable`), eliminating vtable and dynamic `std::function` heap allocation overhead.
 - **⚡ CRTP Zero-Vtable Architecture** — Static compile-time polymorphism (`Request<Derived>`, `Response<Derived>`) eliminating virtual function pointers (`vptr`), saving memory and enabling zero-overhead direct dispatch.
 - **🚀 Express.js-Style Linear Pipeline** — Iterative, non-recursive `run_chain()` middleware runner with immediate response dispatch (`res.send()` / `res.json()`) and zero-allocation socket pointer dispatch (`HttpResponse res(&socket)`).
 - **🌳 Hybrid Radix-Tree Router** — High-performance radix-tree supporting static segments, dynamic parameters (`:id`), `{id:[0-9]+}` RE2 regex constraints, catch-all wildcards (`*filepath`), and RFC 9110 HTTP methods including `QUERY`.
-- **🌐 Async Coroutine HTTP Client** — Modern, coroutine-native HTTP/1.1 client (`HttpClient`) for non-blocking outbound requests (`get`, `post`, `send`) with connection reuse and optional TLS 1.3 encryption *(HTTP/2 support to be released soon)*.
+- **🌐 Async Coroutine HTTP Client** — Modern, coroutine-native HTTP/1.1 client (`HttpClient`) for non-blocking outbound requests (`get`, `post`, `send`) with connection reuse and optional TLS 1.3 encryption *(HTTP/2 client support to be released soon)*.
 - **📦 Chunked Transfer-Encoding** — Full streaming support for HTTP/1.1 chunked request and response encoding & decoding.
 - **🗂 MIME Type Detection Engine** — Fast, built-in file extension to MIME content-type resolver (`MimeTypes.hpp`) supporting over 50+ common web media types.
 - **🛠 Modern CLI Engine** — High-performance CLI argument parser (`wavex::cli::CliParser`) supporting flags (`--verbose`, `-v`), key-value options (`--host`, `-p`), positional arguments, typed getters (`get_int`, `get_bool`), and automatic `--help` generation.
-- **🔒 TLS 1.3 OpenSSL Encryption Engine** — Strict, native TLS 1.3 server encryption (`enable_tls()`, `wavex::server::TlsConfig`) supporting custom PEM certificate chains (`cert_file`), private key passphrases (`key_password`), DH parameters (`dh_file`), and strict legacy SSL/TLS protocol disabling (`force_tls13`).
+- **🔒 TLS 1.3 OpenSSL Encryption Engine** — Strict, native TLS 1.3 server encryption (`enable_tls()`, `wavex::server::TlsConfig`) supporting custom PEM certificate chains (`cert_file`), private key passphrases (`key_password`), DH parameters (`dh_file`), ALPN protocol negotiation (`http/1.1`, `h2`), and strict legacy SSL/TLS protocol disabling (`force_tls13`).
 - **🔄 HTTP Stay-Active & Inactivity Timeout (RFC 7230 / RFC 9112)** — Full persistent connection support over Plain TCP and TLS 1.3 streams. Handles HTTP pipelining without socket re-establishment, manages inactivity timeouts (`set_keep_alive_timeout`) via asio steady timers, enforces maximum request thresholds (`set_max_keep_alive_requests`), and includes zero-cost compile-time policies (`KeepAlivePolicy`) and middlewares (`keep_alive`, `sse_stay_active`).
 - **🚫 Configurable 404 Not Found Engine** — Default `"Not Found"` string response with full customization support across Router and Server: custom text, HTML/JSON bodies with automatic MIME types, static error pages loaded from disk (`not_found_page`), or custom coroutine handlers.
 - **🧵 Tokio-Style Work-Stealing Dual-Queue Runtime** —
@@ -30,8 +32,8 @@ WaveX draws inspiration from **Rust's Actix Web** (hybrid radix-tree routing), *
   - **`InjectorQueue`**: Unbounded global MPMC queue with atomic size tracking for external tasks and overflow.
   - **Zero Request Loss on Scale-Down**: Retiring workers safely drain their remaining local ring tasks back into `InjectorQueue` on thread exit.
 - **🛡 Pipeline Short-Circuiting** — Middleware rejection (e.g. `401 Unauthorized`) immediately sends the response while skipping downstream middlewares and route handlers.
-- **📦 C++20/C++23 Modules & Headers** — Dual distribution models: standard C++ header inclusions (`#include <wavex/wavex.hpp>`) and modern C++ module partitions (`import wavex;`).
-- **🧪 Interactive Postman Dev Servers** — Pre-configured testing servers for Plain HTTP ([tests/postman_demo_server.cpp](tests/postman_demo_server.cpp)) and HTTPS/TLS 1.3 ([tests/postman_demo_tls_server.cpp](tests/postman_demo_tls_server.cpp)) with ready-to-use Postman test endpoints.
+- **🧪 Interactive Postman Dev Servers** — Pre-configured CLI-driven testing servers for HTTP/1.1 ([tests/postman_demo_http1_server.cpp](tests/postman_demo_http1_server.cpp)) and HTTP/2 ([tests/postman_demo_http2_server.cpp](tests/postman_demo_http2_server.cpp)) supporting plain and TLS 1.3 modes via WaveX's built-in CLI parser.
+
 
 ---
 
@@ -96,7 +98,41 @@ int main() {
 }
 ```
 
-### 3. Full HTTP Server & Coroutine Middleware
+### 3. HTTP/2 Server (Cleartext h2c & TLS 1.3 h2)
+
+WaveX provides native HTTP/2 server support via `Http2Server` and `Http2Router`, implementing RFC 7540 binary framing and RFC 7541 HPACK header compression:
+
+```cpp
+#include <wavex/wavex.hpp>
+
+int main() {
+    auto &router = wavex::engine::Http2Router::instance();
+
+    // Stream-aware HTTP/2 JSON endpoint
+    router.get("/api/h2", [](auto &req, auto &res) -> asio::awaitable<void> {
+        res.status(200).json({
+            {"protocol", "HTTP/2"},
+            {"stream_id", req.stream_id()},
+            {"framework", "WaveX"}
+        });
+        co_return;
+    });
+
+    // Option A: Cleartext HTTP/2 (h2c) on port 8082
+    wavex::server::Http2Server server(router, "127.0.0.1", 8082);
+
+    // Option B: HTTP/2 over TLS 1.3 (ALPN 'h2' negotiated automatically on port 8444)
+    // wavex::server::Http2Server server(router, "127.0.0.1", 8444);
+    // server.enable_tls("ssl/test.crt", "ssl/test.key");
+
+    wavex::log::info("WaveX HTTP/2 server running on http://127.0.0.1:8082");
+    server.run();
+
+    return 0;
+}
+```
+
+### 4. Full HTTP Server & Coroutine Middleware
 
 ```cpp
 #include <iostream>
@@ -149,7 +185,7 @@ int main() {
 }
 ```
 
-### 4. Modern Logging with Source Location & ANSI Colors
+### 5. Modern Logging with Source Location & ANSI Colors
 
 Zero-macro, high-performance logging with automatic `std::source_location` call-site capture and ANSI terminal colors:
 
@@ -177,7 +213,7 @@ int main() {
 }
 ```
 
-### 5. C++23 "Deducing This" Static Pipelines (`class Chainable`)
+### 6. C++23 "Deducing This" Static Pipelines (`class Chainable`)
 
 Build compile-time static dispatch pipelines without vtables or dynamic heap allocations using `StaticChain` and `make_chain`:
 
@@ -223,10 +259,10 @@ int main() {
 }
 ```
 
-### 6. Async HTTP Client
+### 7. Async HTTP Client
 
 > [!NOTE]
-> `HttpClient` currently supports **HTTP/1.1** (with TLS 1.3). **HTTP/2** support is planned for release soon.
+> `HttpClient` currently supports **HTTP/1.1** (with TLS 1.3). **HTTP/2** client support is planned for release soon.
 
 ```cpp
 #include <iostream>
@@ -249,7 +285,7 @@ asio::awaitable<void> fetch_data(asio::io_context &ioc) {
 }
 ```
 
-### 7. Command-Line Interface (CLI) Engine
+### 8. Command-Line Interface (CLI) Engine
 
 ```cpp
 #include <wavex/Cli/Cli.hpp>
@@ -281,7 +317,7 @@ int main(int argc, char* argv[]) {
 }
 ```
 
-### 8. TLS 1.3 Server Encryption (`TlsConfig`)
+### 9. TLS 1.3 Server Encryption (`TlsConfig`)
 
 Enable strict TLS 1.3 HTTPS server encryption using `server.enable_tls()` with custom certificate/key paths or a `wavex::server::TlsConfig` struct:
 
@@ -318,7 +354,7 @@ int main() {
 }
 ```
 
-### 9. HTTP Stay-Active (Keep-Alive) & Inactivity Timeout
+### 10. HTTP Stay-Active (Keep-Alive) & Inactivity Timeout
 
 WaveX natively supports RFC 7230 / RFC 9112 persistent connections (`Keep-Alive`) and HTTP pipelining for both Plain TCP and TLS 1.3 servers.
 
@@ -373,7 +409,7 @@ router.get("/api/data", {wavex::base::keep_alive(10, 500)}, DataHandler);
 router.get("/events", {wavex::base::sse_stay_active()}, SseHandler);
 ```
 
-### 10. Configurable 404 Not Found Handling
+### 11. Configurable 404 Not Found Handling
 
 By default, any unmatched route automatically responds with HTTP status 404 and the plain text `"Not Found"`. Developers can easily customize 404 handling across both `HttpRouter` and `Server`:
 
@@ -411,7 +447,7 @@ router.not_found([](auto &req, auto &res) -> asio::awaitable<void> {
 });
 ```
 
-### 11. C++23 Modules Quick Start
+### 12. C++23 Modules Quick Start
 
 WaveX fully supports C++23 module imports for ultra-fast compilation:
 
@@ -443,24 +479,27 @@ graph LR
 
     subgraph "Engine"
         Router["Router&lt;Proto&gt;<br/><small>radix tree + RE2</small>"]
-        HttpRouter["HttpRouter<br/><small>get/post/put/del/query</small>"]
-        Router --> HttpRouter
+        Http1Router["Http1Router<br/><small>HTTP/1.1 routes</small>"]
+        Http2Router["Http2Router<br/><small>HTTP/2 routes</small>"]
+        Router --> Http1Router
+        Router --> Http2Router
     end
 
     subgraph "Tokio Dual-Queue Runtime"
         LocalQ["LocalQueue<br/><small>256-slot lock-free ring</small>"]
         InjQ["InjectorQueue<br/><small>global MPMC overflow</small>"]
         Pool["ThreadPool<br/><small>hysteresis scaling</small>"]
-        Server["Server<br/><small>coroutine acceptor</small>"]
+        Server["Server&lt;Codec, Router&gt;<br/><small>Http1Server / Http2Server</small>"]
         LocalQ --> Pool
         InjQ --> Pool
         Pool --> Server
     end
 
     subgraph "Protos & Networking"
-        Codec["http1codec<br/><small>chunked + zero-copy</small>"]
-        HReq["HttpRequest"]
-        HRes["HttpResponse"]
+        H1Codec["http1codec<br/><small>chunked + zero-copy</small>"]
+        H2Codec["http2codec<br/><small>RFC 7540 + HPACK RFC 7541</small>"]
+        HReq["HttpRequest<br/><small>Http1Request / Http2Request</small>"]
+        HRes["HttpResponse<br/><small>Http1Response / Http2Response</small>"]
         Client["HttpClient<br/><small>async coroutine client</small>"]
         HReq --> Server
         HRes --> Server
@@ -472,11 +511,14 @@ graph LR
 
     Req --> HReq
     Res --> HRes
-    Chainable --> HttpRouter
-    HttpRouter --> Server
+    Chainable --> Http1Router
+    Chainable --> Http2Router
+    Http1Router --> Server
+    Http2Router --> Server
     MW --> Server
-    Codec --> Server
-    Codec --> Client
+    H1Codec --> Server
+    H2Codec --> Server
+    H1Codec --> Client
 
     style Logger fill:#2d6a4f,color:#fff
     style Uri fill:#2d6a4f,color:#fff
@@ -486,8 +528,10 @@ graph LR
     style Res fill:#2d6a4f,color:#fff
     style MW fill:#2d6a4f,color:#fff
     style Router fill:#1b4332,color:#fff
-    style HttpRouter fill:#1b4332,color:#fff
-    style Codec fill:#40916c,color:#fff
+    style Http1Router fill:#1b4332,color:#fff
+    style Http2Router fill:#1b4332,color:#fff
+    style H1Codec fill:#40916c,color:#fff
+    style H2Codec fill:#40916c,color:#fff
     style HReq fill:#40916c,color:#fff
     style HRes fill:#40916c,color:#fff
     style Client fill:#40916c,color:#fff
@@ -570,16 +614,17 @@ flowchart TD
 | `Base/Response`            | ✅ Complete | Protocol-agnostic CRTP response builder (`Response<Derived>`, zero-vtable, fluent API)                                    |
 | `Base/MiddleWare`          | ✅ Complete | Coroutine-aware middleware template (`GenericMiddlewareFn`), linear pipeline, `keep_alive` & `sse_stay_active`            |
 | `Engine/Router`            | ✅ Complete | Protocol-agnostic radix tree with RE2 regex, wildcard matching & configurable 404 handler                                 |
-| `Engine/HttpRouter`        | ✅ Complete | HTTP method convenience routing (`get`, `post`, `put`, `del`, `patch`, `query`) & 404 customization                       |
+| `Engine/HttpRouter`        | ✅ Complete | HTTP/1.1 (`Http1Router`) & HTTP/2 (`Http2Router`) method convenience routing (`get`, `post`, etc.) & 404 customization    |
 | `Server/LocalQueue`        | ✅ Complete | Per-worker 256-slot ring buffer for ultra-fast task stealing                                                              |
 | `Server/InjectorQueue`     | ✅ Complete | Global unbounded MPMC task overflow queue with atomic size tracking                                                       |
 | `Server/ThreadPool`        | ✅ Complete | Adaptive Tokio-style work-stealing thread pool with load hysteresis                                                       |
-| `Server/Server`            | ✅ Complete | Coroutine TCP & TLS 1.3 server with master acceptor, worker pool, persistent Keep-Alive, idle timeouts & 404 handling     |
+| `Server/Server`            | ✅ Complete | Coroutine TCP & TLS 1.3 server (`Http1Server`, `Http2Server`) with master acceptor, worker pool, ALPN, Keep-Alive & 404   |
 | `Server/TlsConfig`         | ✅ Complete | TLS 1.3 server encryption config (`cert_file`, `key_file`, `key_password`, `dh_file`, `force_tls13`)                      |
 | `protos/http/http1codec`   | ✅ Complete | Zero-copy HTTP/1.x parser, encoder, response decoder, chunked framing & stream pipelining                                 |
-| `protos/http/HttpRequest`  | ✅ Complete | Concrete HTTP request with zero-copy stream parsing (`parse_stream`) & keep-alive detection (`should_keep_alive`)         |
-| `protos/http/HttpResponse` | ✅ Complete | Concrete HTTP response with zero-alloc socket writing, client parsing & `set_keep_alive` control                          |
-| `Client/HttpClient`        | ✅ Complete | Async coroutine HTTP/1.1 client (`get`, `post`, `send`) — *HTTP/2 to be released soon*                                    |
+| `protos/http/http2codec`   | ✅ Complete | Full RFC 7540 binary framing, RFC 7541 HPACK encoder/decoder, stream multiplexing & SETTINGS negotiation                  |
+| `protos/http/HttpRequest`  | ✅ Complete | HTTP/1.1 (`Http1Request`) & HTTP/2 (`Http2Request`) with zero-copy stream parsing & keep-alive detection                    |
+| `protos/http/HttpResponse` | ✅ Complete | HTTP/1.1 (`Http1Response`) & HTTP/2 (`Http2Response`) with zero-alloc socket writing & fluent builder API                 |
+| `Client/HttpClient`        | ✅ Complete | Async coroutine HTTP/1.1 client (`get`, `post`, `send`) — *HTTP/2 client support to be released soon*                     |
 | `Cli/Cli`                  | ✅ Complete | Type-safe CLI argument parser (`wavex::cli::CliParser`), flag validator, and option engine                                |
 
 ---
@@ -631,6 +676,7 @@ cmake --build --preset fast-release
 ctest --preset run-tests --output-on-failure
 
 # Run specific test suites
+ctest --preset run-tests -R test_http2_codec --output-on-failure
 ctest --preset run-tests -R test_server_keepalive --output-on-failure
 ctest --preset run-tests -R test_not_found --output-on-failure
 
@@ -641,20 +687,55 @@ ctest --preset tsan
 
 ### Manual Testing with Postman & cURL
 
-Launch the interactive dev servers (generated under `build/test-profile/`):
+WaveX includes two pre-configured, CLI-driven interactive dev servers for manual validation via Postman, cURL, or browsers:
+
+#### Dev Server Executables
+
+| Executable | Protocol Modes | Default Ports | Source |
+|:---|:---|:---|:---|
+| `wavex_postman_http1_server` | Plain HTTP / HTTPS (TLS 1.3) | `8080` (plain), `8443` (`--tls`) | [tests/postman_demo_http1_server.cpp](tests/postman_demo_http1_server.cpp) |
+| `wavex_postman_http2_server` | Cleartext h2c / HTTP/2 over TLS 1.3 (h2) | `8082` (cleartext), `8444` (`--tls`) | [tests/postman_demo_http2_server.cpp](tests/postman_demo_http2_server.cpp) |
+
+#### Command-Line Options (Built-in CLI)
+
+Both servers support the following command-line flags:
+
+| Flag | Short | Default | Description |
+|:---|:---|:---|:---|
+| `--tls` | `-s` | disabled | Enable TLS 1.3 encryption (ALPN `http/1.1` or `h2`) |
+| `--port <num>` | `-p` | 8080/8082 (plain), 8443/8444 (TLS) | Port to listen on |
+| `--host <ip>` | `-H` | `127.0.0.1` | Host address to bind |
+| `--cert <path>` | `-c` | `ssl/test.crt` | Path to TLS certificate file |
+| `--key <path>` | `-k` | `ssl/test.key` | Path to TLS private key file |
+| `--help` | `-h` | — | Show CLI help and options |
+
+#### Launching the Servers
 
 ```bash
-# 1. Plain HTTP dev server (http://127.0.0.1:8080)
-./build/test-profile/wavex_postman_server.exe
+# 1. HTTP/1.1 Server
+./build/test-profile/wavex_postman_http1_server.exe                     # Plain HTTP on http://127.0.0.1:8080
+./build/test-profile/wavex_postman_http1_server.exe --tls               # HTTPS/TLS 1.3 on https://127.0.0.1:8443
+./build/test-profile/wavex_postman_http1_server.exe -p 9000             # Custom port
 
-# 2. TLS 1.3 HTTPS dev server (https://127.0.0.1:8443)
-./build/test-profile/wavex_postman_tls_server.exe
+# 2. HTTP/2 Server
+./build/test-profile/wavex_postman_http2_server.exe                     # Cleartext HTTP/2 (h2c) on http://127.0.0.1:8082
+./build/test-profile/wavex_postman_http2_server.exe --tls               # HTTP/2 over TLS 1.3 (h2) on https://127.0.0.1:8444
+./build/test-profile/wavex_postman_http2_server.exe --tls -p 9444       # Custom port with TLS
 ```
 
-Test TLS 1.3 endpoints directly via cURL:
+#### cURL Verification Commands
 
 ```bash
+# HTTP/1.1 Plain & TLS
+curl http://127.0.0.1:8080/api/json
 curl -k https://127.0.0.1:8443/api/json
+
+# HTTP/2 Cleartext (h2c prior knowledge) & TLS 1.3 (ALPN h2 negotiation)
+curl --http2-prior-knowledge http://127.0.0.1:8082/api/json
+curl -k --http2 https://127.0.0.1:8444/api/json
+
+# HTTP/2 Protected Endpoint (Middleware Auth Check)
+curl -k --http2 -H "Authorization: Bearer secret123" https://127.0.0.1:8444/api/protected
 ```
 
 ---
@@ -666,7 +747,7 @@ curl -k https://127.0.0.1:8443/api/json
 | [Asio](https://think-async.com/Asio/)             | Async I/O & C++ coroutines (standalone)         | BSL-1.0      |
 | [nlohmann/json](https://github.com/nlohmann/json) | Modern C++ JSON parsing & serialization         | MIT          |
 | [Google RE2](https://github.com/google/re2)       | Linear-time regex for route pattern constraints | BSD 3-Clause |
-| [OpenSSL](https://www.openssl.org/)               | TLS 1.3 encryption (Optional)                   | Apache-2.0   |
+| [OpenSSL](https://www.openssl.org/)               | TLS 1.3 encryption & ALPN negotiation           | Apache-2.0   |
 
 ---
 
@@ -686,11 +767,11 @@ include/wavex/
 │   └── Url.hpp              ← URL & query string parser
 ├── Engine/
 │   ├── Router.hpp           ← Protocol-agnostic radix tree + RE2
-│   └── HttpRouter.hpp       ← HTTP route shortcuts (get, post, put, del, query)
+│   └── HttpRouter.hpp       ← HTTP route shortcuts (Http1Router & Http2Router)
 ├── Server/
 │   ├── WorkStealingQueue.hpp← LocalQueue (lock-free ring) & InjectorQueue (global MPMC)
 │   ├── ThreadPool.hpp       ← Tokio-style adaptive worker pool
-│   ├── Server.hpp           ← Coroutine TCP & TLS 1.3 server
+│   ├── Server.hpp           ← Coroutine TCP & TLS 1.3 server (Http1Server & Http2Server)
 │   └── TlsConfig.hpp        ← TLS 1.3 encryption configuration
 ├── Client/
 │   └── HttpClient.hpp       ← Async coroutine HTTP client
@@ -700,8 +781,9 @@ include/wavex/
     └── http/
         ├── Methods.hpp      ← HTTP method enum (GET, POST, PUT, DELETE, QUERY, etc.)
         ├── http1codec.hpp   ← Zero-copy HTTP/1.x parser + chunked encoder/decoder
-        ├── HttpRequest.hpp  ← Concrete HTTP request
-        └── HttpResponse.hpp ← Concrete HTTP response
+        ├── http2codec.hpp   ← RFC 7540 binary frame parser & RFC 7541 HPACK codec
+        ├── HttpRequest.hpp  ← Concrete HTTP request (Http1Request & Http2Request)
+        └── HttpResponse.hpp ← Concrete HTTP response (Http1Response & Http2Response)
 
 src/                         ← Implementation + C++20 module partitions (.ixx)
 tests/                       ← Automated unit tests & interactive postman servers

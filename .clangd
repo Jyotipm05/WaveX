@@ -9,8 +9,8 @@
 #   can find it without any per-developer IDE configuration.
 
 CompileFlags:
-  # Read compile_commands.json from the project root
-  CompilationDatabase: .
+  # Read compile_commands.json from build/test-profile or project root
+  CompilationDatabase: build/test-profile
   # Remove:
   #   - -std:*
   #   - -external:*

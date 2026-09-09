@@ -31,4 +31,6 @@ export namespace wavex::server {
     using server::Server;
     using server::Http1Server;
     using server::http1server;
+    using server::Http2Server;
+    using server::http2server;
 }

@@ -138,7 +138,9 @@ ctest --preset run-tests
 For HTTP protocol testing or Postman verification, launch the interactive demo server:
 
 ```bash
-./build/tests/Debug/wavex_postman_server.exe
+./build/test-profile/wavex_postman_http1_server.exe
+# Or with TLS:
+./build/test-profile/wavex_postman_http1_server.exe --tls
 ```
 
 Test endpoints against `http://127.0.0.1:8080`.

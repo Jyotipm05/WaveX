@@ -624,20 +624,46 @@ namespace wavex::protos::http {
         static std::string format_chunk_header(const std::size_t chunk_size) {
             char hex_buf[32];
             const auto [ptr, ec] = std::to_chars(hex_buf, hex_buf + sizeof(hex_buf), chunk_size, 16);
-            std::string out(hex_buf, ptr);
-            out += "\r\n";
+            const auto hex_len = static_cast<std::size_t>(ptr - hex_buf);
+            std::string out;
+            out.reserve(hex_len + 2);
+            out.append(hex_buf, hex_len);
+            out.append("\r\n", 2);
             return out;
         }
 
         /**
-         * @brief Format a complete HTTP chunk: "size_hex\r\ndata\r\n".
+         * @brief Format a complete HTTP chunk into an existing buffer without redundant reallocations.
+         */
+        static void format_chunk_to(std::string &out, const std::string_view data) {
+            if (data.empty()) {
+                out.append(format_terminal_chunk());
+                return;
+            }
+            char hex_buf[32];
+            const auto [ptr, ec] = std::to_chars(hex_buf, hex_buf + sizeof(hex_buf), data.size(), 16);
+            const auto hex_len = static_cast<std::size_t>(ptr - hex_buf);
+            out.reserve(out.size() + hex_len + 2 + data.size() + 2);
+            out.append(hex_buf, hex_len);
+            out.append("\r\n", 2);
+            out.append(data);
+            out.append("\r\n", 2);
+        }
+
+        /**
+         * @brief Format a complete HTTP chunk: "size_hex\r\ndata\r\n" with a single exact allocation.
          */
         static std::string format_chunk(const std::string_view data) {
-            if (data.empty()) return "0\r\n\r\n";
-            std::string out = format_chunk_header(data.size());
-            out.reserve(out.size() + data.size() + 2);
-            out += data;
-            out += "\r\n";
+            if (data.empty()) return std::string(format_terminal_chunk());
+            char hex_buf[32];
+            const auto [ptr, ec] = std::to_chars(hex_buf, hex_buf + sizeof(hex_buf), data.size(), 16);
+            const auto hex_len = static_cast<std::size_t>(ptr - hex_buf);
+            std::string out;
+            out.reserve(hex_len + 2 + data.size() + 2);
+            out.append(hex_buf, hex_len);
+            out.append("\r\n", 2);
+            out.append(data);
+            out.append("\r\n", 2);
             return out;
         }
 
@@ -726,18 +752,80 @@ namespace wavex::protos::http {
     };
 
     /**
+     * @namespace wavex::protos::http::http1
+     * @brief HTTP/1.x specific message structures, parser, and encoder matching http2 namespace.
+     */
+    namespace http1 {
+        using http::header;
+        using http::message_base;
+        using http::request;
+        using http::response;
+        using http::parser;
+        using http::encoder;
+        using http::decoder;
+    }
+
+    /**
      * @struct http1codec
-     * @brief HTTP/1.x Protocol Codec combining zero-copy parser, encoder, and decoder.
+     * @brief HTTP/1.x Protocol Codec combining zero-copy parser, encoder, decoder, and developer-friendly facade.
      */
     struct http1codec {
-        using parser = wavex::protos::http::parser;
-        using encoder = wavex::protos::http::encoder;
-        using decoder = wavex::protos::http::decoder;
-        using request = wavex::protos::http::request;
-        using response = wavex::protos::http::response;
+        using parser = wavex::protos::http::http1::parser;
+        using encoder = wavex::protos::http::http1::encoder;
+        using decoder = wavex::protos::http::http1::decoder;
+        using request = wavex::protos::http::http1::request;
+        using response = wavex::protos::http::http1::response;
+        using result = parser::result;
 
         static std::string_view status_text_for(const unsigned int code) noexcept {
             return wavex::protos::http::status_text_for(code);
+        }
+
+        // ─── Developer-Friendly Codec Facade (Symmetrical with http2codec) ───
+
+        /** @brief Serialize an HTTP/1.x response to wire format. */
+        static std::string serialize(const response &res) {
+            return encoder::serialize(res);
+        }
+
+        /** @brief Serialize an HTTP/1.x request to wire format. */
+        static std::string serialize_request(const request &req) {
+            return encoder::serialize_request(req);
+        }
+
+        /** @brief Parse raw buffer into an HTTP/1.x request. */
+        static result parse_request(const std::string_view buffer, request &req, std::size_t &bytes_consumed) {
+            return parser::parse_request(buffer, req, bytes_consumed);
+        }
+
+        /** @brief Parse raw buffer into an HTTP/1.x response. */
+        static result parse_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed) {
+            return parser::parse_response(buffer, res, bytes_consumed);
+        }
+
+        /** @brief Decode a raw HTTP/1.x response buffer. */
+        static result decode_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed) {
+            return decoder::decode_response(buffer, res, bytes_consumed);
+        }
+
+        /** @brief Un-chunk a Transfer-Encoding: chunked raw body payload. */
+        static std::string dechunk(const std::string_view chunked_raw) {
+            return decoder::dechunk(chunked_raw);
+        }
+
+        /** @brief Format a complete HTTP chunk. */
+        static std::string format_chunk(const std::string_view data) {
+            return encoder::format_chunk(data);
+        }
+
+        /** @brief Format a complete HTTP chunk directly into a provided buffer. */
+        static void format_chunk_to(std::string &out, const std::string_view data) {
+            encoder::format_chunk_to(out, data);
+        }
+
+        /** @brief Terminal HTTP chunk signaling end of chunked stream. */
+        [[nodiscard]] static constexpr std::string_view format_terminal_chunk() noexcept {
+            return encoder::format_terminal_chunk();
         }
     };
 }

@@ -126,6 +126,26 @@ namespace wavex::protos::http {
             return *this;
         }
 
+        // ── Stream ID for HTTP/2 & Multiplexed Protocols ────────────────────
+        [[nodiscard]] uint32_t stream_id() const noexcept {
+            if constexpr (requires { parsed_.stream_id; }) {
+                return parsed_.stream_id;
+            } else {
+                return 0;
+            }
+        }
+
+        HttpRequest &stream_id(const uint32_t id) noexcept {
+            if constexpr (requires { parsed_.stream_id; }) {
+                parsed_.stream_id = id;
+            }
+            return *this;
+        }
+
+        HttpRequest &set_stream_id(const uint32_t id) noexcept {
+            return stream_id(id);
+        }
+
         // ── Accessors (CRTP Implementations) ────────────────────────────────
 
         [[nodiscard]] http::method method_type() const { return parsed_.method_type; }

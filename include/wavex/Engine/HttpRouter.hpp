@@ -18,6 +18,7 @@
 #include <wavex/protos/http/Methods.hpp>
 #include <wavex/protos/http/HttpRequest.hpp>
 #include <wavex/protos/http/HttpResponse.hpp>
+#include <wavex/protos/http/http2codec.hpp>
 
 #undef DELETE
 
@@ -340,4 +341,8 @@ namespace wavex::engine {
     /// Concrete default HTTP/1.x router type aliases
     using Http1Router = HttpRouter<protos::http::http1codec>;
     using http1router = Http1Router;
+
+    /// Concrete HTTP/2 router type aliases
+    using Http2Router = HttpRouter<protos::http::http2codec>;
+    using http2router = Http2Router;
 } // namespace wavex::engine

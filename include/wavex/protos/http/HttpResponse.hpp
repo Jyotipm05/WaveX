@@ -75,6 +75,23 @@ namespace wavex::protos::http {
             return *this;
         }
 
+        // ── Stream ID for HTTP/2 & Multiplexed Protocols ────────────────────
+        [[nodiscard]] uint32_t stream_id() const noexcept {
+            return stream_id_;
+        }
+
+        HttpResponse &stream_id(const uint32_t id) noexcept {
+            stream_id_ = id;
+            if constexpr (requires { parsed_.stream_id; }) {
+                parsed_.stream_id = id;
+            }
+            return *this;
+        }
+
+        HttpResponse &set_stream_id(const uint32_t id) noexcept {
+            return stream_id(id);
+        }
+
         HttpResponse() = default;
 
         explicit HttpResponse(asio::ip::tcp::socket *socket) : socket_(socket) {
@@ -89,6 +106,7 @@ namespace wavex::protos::http {
         HttpResponse(const HttpResponse &other)
             : base::Response(other),
               socket_(other.socket_),
+              stream_id_(other.stream_id_),
               buffer_owner_(other.buffer_owner_),
               dechunked_body_storage_(other.dechunked_body_storage_),
               parsed_(other.parsed_) {
@@ -110,15 +128,17 @@ namespace wavex::protos::http {
             // Rebase status_text_ and parsed_ views (all from buffer_owner_)
             if (buf_len > 0) {
                 status_text_ = rebase_buf(other.status_text_);
-                parsed_.status_text = rebase_buf(other.parsed_.status_text);
-                parsed_.body = rebase_buf(other.parsed_.body);
-                for (auto &h: parsed_.headers) {
-                    h.name = rebase_buf(h.name);
-                    h.value = rebase_buf(h.value);
+                if constexpr (std::is_same_v<Codec, wavex::protos::http::http1codec>) {
+                    parsed_.status_text = rebase_buf(other.parsed_.status_text);
+                    parsed_.body = rebase_buf(other.parsed_.body);
+                    for (auto &h: parsed_.headers) {
+                        h.name = rebase_buf(h.name);
+                        h.value = rebase_buf(h.value);
+                    }
                 }
             }
 
-            // Rebase body_view_ — may point into dechunked_body_storage_
+            // Rebase body_view_ — may point into dechunked_body_storage_ or body_
             if (!other.dechunked_body_storage_.empty()) {
                 const auto dk_base = other.dechunked_body_storage_.data();
                 const auto dk_len = other.dechunked_body_storage_.size();
@@ -129,15 +149,23 @@ namespace wavex::protos::http {
                         dechunked_body_storage_.data() + off,
                         other.body_view_.size()
                     };
+            } else if (!body_.empty() && (body_view_.data() == nullptr || body_view_ == other.body_)) {
+                body_view_ = body_;
             }
 
-            // Rebase headers_views_ (all from buffer_owner_)
+            // Rebase headers_views_ (all from buffer_owner_ if http1)
             headers_views_.reserve(other.headers_views_.size());
-            if (buf_len > 0) {
+            if (buf_len > 0 && std::is_same_v<Codec, wavex::protos::http::http1codec>) {
                 for (const auto &[k, v]: other.headers_views_)
                     headers_views_.emplace_back(rebase_buf(k), rebase_buf(v));
             } else {
-                headers_views_ = other.headers_views_;
+                if (!parsed_.headers.empty()) {
+                    for (const auto &h : parsed_.headers) {
+                        headers_views_.emplace_back(h.name, h.value);
+                    }
+                } else {
+                    headers_views_ = other.headers_views_;
+                }
             }
         }
 
@@ -182,6 +210,9 @@ namespace wavex::protos::http {
             for (const auto &[name, value]: parsed_.headers) {
                 headers_views_.emplace_back(name, value);
             }
+            if constexpr (requires { stream_id_ = parsed_.stream_id; }) {
+                stream_id_ = parsed_.stream_id;
+            }
             return true;
         }
 
@@ -204,6 +235,9 @@ namespace wavex::protos::http {
          */
         [[nodiscard]] std::string serialize_impl() const {
             response_type res;
+            if constexpr (requires { res.stream_id = stream_id_; }) {
+                res.stream_id = stream_id_;
+            }
             res.status_code = status_code_;
             res.status_text = (status_text_.empty() || (status_text_ == "OK" && status_code_ != 200))
                                   ? Codec::status_text_for(status_code_)
@@ -444,6 +478,9 @@ namespace wavex::protos::http {
 
         [[nodiscard]] std::string serialize_headers_only() const {
             response_type res;
+            if constexpr (requires { res.stream_id = stream_id_; }) {
+                res.stream_id = stream_id_;
+            }
             res.status_code = status_code_;
             res.status_text = (status_text_.empty() || (status_text_ == "OK" && status_code_ != 200))
                                   ? Codec::status_text_for(status_code_)
@@ -466,13 +503,14 @@ namespace wavex::protos::http {
         }
 
         asio::ip::tcp::socket *socket_ = nullptr;
-        std::string_view status_text_ = "OK";
+        uint32_t stream_id_{1};
+        std::string_view status_text_{"OK"};
         std::string buffer_owner_;
         std::string dechunked_body_storage_;
         std::string_view body_view_;
         response_type parsed_;
         std::vector<std::pair<std::string_view, std::string_view> > headers_views_;
-        bool is_headers_sent_ = false;
+        bool is_headers_sent_{false};
     };
 
     /// Concrete default HTTP/1.x response type aliases

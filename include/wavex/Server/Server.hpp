@@ -43,10 +43,12 @@
 
 #if WAVEX_HAS_SSL
 #include <asio/ssl.hpp>
+#include <openssl/ssl.h>  // For SSL_CTX_set_alpn_protos (ALPN negotiation)
 #endif
 
 #include <wavex/Engine/HttpRouter.hpp>
 #include <wavex/protos/http/http1codec.hpp>
+#include <wavex/protos/http/http2codec.hpp>
 #include <wavex/protos/http/HttpRequest.hpp>
 #include <wavex/protos/http/HttpResponse.hpp>
 #include <wavex/Server/ThreadPool.hpp>
@@ -279,6 +281,63 @@ namespace wavex::server {
             if (!tls_config_.dh_file.empty()) {
                 ssl_ctx_->use_tmp_dh_file(tls_config_.dh_file);
             }
+
+            // ── ALPN (Application-Layer Protocol Negotiation) ──────────────────────
+            // RFC 7301: ALPN is mandatory for HTTP/2 over TLS (RFC 7540 §3.3).
+            // IMPORTANT: SSL_CTX_set_alpn_protos() is CLIENT-SIDE only.
+            // Servers MUST use SSL_CTX_set_alpn_select_cb() to register a selection
+            // callback. Without it Chrome/Firefox see no negotiated protocol and refuse
+            // to upgrade to HTTP/2, causing immediate ERR_EMPTY_RESPONSE.
+            if constexpr (std::is_same_v<Codec, wavex::protos::http::http2codec>) {
+                // HTTP/2 server: prefer "h2", fall back to "http/1.1"
+                SSL_CTX_set_alpn_select_cb(
+                    ssl_ctx_->native_handle(),
+                    [](SSL *, const unsigned char **out, unsigned char *outlen,
+                       const unsigned char *in, unsigned int inlen, void *) -> int {
+                        // Walk the client's protocol list (each entry: 1-byte length + name)
+                        const unsigned char *p = in;
+                        const unsigned char *http11_start = nullptr;
+                        while (p < in + inlen) {
+                            const unsigned char len = *p++;
+                            if (len == 2 && p[0] == 'h' && p[1] == '2') {
+                                *out = p;
+                                *outlen = 2;
+                                return SSL_TLSEXT_ERR_OK;
+                            }
+                            if (len == 8 && std::memcmp(p, "http/1.1", 8) == 0) {
+                                http11_start = p; // Remember as fallback
+                            }
+                            p += len;
+                        }
+                        if (http11_start) {
+                            *out = http11_start;
+                            *outlen = 8;
+                            return SSL_TLSEXT_ERR_OK;
+                        }
+                        return SSL_TLSEXT_ERR_ALERT_FATAL;
+                    },
+                    nullptr);
+            } else {
+                // HTTP/1.1 TLS server: select "http/1.1"
+                SSL_CTX_set_alpn_select_cb(
+                    ssl_ctx_->native_handle(),
+                    [](SSL *, const unsigned char **out, unsigned char *outlen,
+                       const unsigned char *in, unsigned int inlen, void *) -> int {
+                        const unsigned char *p = in;
+                        while (p < in + inlen) {
+                            const unsigned char len = *p++;
+                            if (len == 8 && std::memcmp(p, "http/1.1", 8) == 0) {
+                                *out = p;
+                                *outlen = 8;
+                                return SSL_TLSEXT_ERR_OK;
+                            }
+                            p += len;
+                        }
+                        // No match — don't abort, just proceed without ALPN
+                        return SSL_TLSEXT_ERR_NOACK;
+                    },
+                    nullptr);
+            }
         }
 #endif
 
@@ -308,6 +367,49 @@ namespace wavex::server {
             std::string stream_buf;
             stream_buf.reserve(8192);
             auto executor = co_await asio::this_coro::executor;
+
+            // ── HTTP/2 Connection Preface (RFC 7540 §3.5) ─────────────────────────────
+            // For HTTP/2 (h2c), we must:
+            //   1. Read the 24-byte client connection preface (PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n).
+            //   2. Send our own server SETTINGS frame.
+            //   3. Send a SETTINGS ACK for the client's initial SETTINGS frame.
+            // Browsers will stall indefinitely if the server skips this exchange.
+            constexpr bool is_http2 = std::is_same_v<Codec, wavex::protos::http::http2codec>;
+            if constexpr (is_http2) {
+                // Read until we have at least the connection preface + one SETTINGS frame header
+                while (stream_buf.size() < wavex::protos::http::http2::CONNECTION_PREFACE.size() + 9) {
+                    char buf[4096];
+                    auto [ec, n] = co_await socket.async_read_some(
+                        asio::buffer(buf), asio::as_tuple(asio::use_awaitable));
+                    if (ec || n == 0) co_return;
+                    stream_buf.append(buf, n);
+                }
+
+                // Validate client connection preface
+                if (!stream_buf.starts_with(wavex::protos::http::http2::CONNECTION_PREFACE)) {
+                    co_return; // Not an HTTP/2 client
+                }
+
+                // Send server SETTINGS (empty — accept all defaults) + SETTINGS ACK
+                const std::string server_settings = wavex::protos::http::http2::encoder::serialize_settings({});
+                const std::string settings_ack = wavex::protos::http::http2::encoder::serialize_settings_ack();
+                std::string preface_response;
+                preface_response.reserve(server_settings.size() + settings_ack.size());
+                preface_response += server_settings;
+                preface_response += settings_ack;
+
+                asio::error_code write_ec;
+                co_await asio::async_write(
+                    socket, asio::buffer(preface_response),
+                    asio::redirect_error(asio::use_awaitable, write_ec));
+                if (write_ec) co_return;
+
+                // Strip the 24-byte preface from the buffer.
+                // The parser only expects raw HTTP/2 frames from here on.
+                // Remaining bytes (client SETTINGS, SETTINGS ACK, WINDOW_UPDATE, etc.)
+                // are handled by parse_request's frame-skipping logic.
+                stream_buf.erase(0, wavex::protos::http::http2::CONNECTION_PREFACE.size());
+            }
 
             try {
                 unsigned request_count = 0;
@@ -348,23 +450,36 @@ namespace wavex::server {
                     }
 
                     if (p_res != Codec::parser::result::success) {
-                        ResponseType err_res(&socket);
-                        err_res.set_keep_alive(false);
-                        err_res.status(400).send("Bad Request");
-                        std::string out = err_res.serialize();
-                        co_await asio::async_write(socket, asio::buffer(out), asio::use_awaitable);
+                        if constexpr (!is_http2) {
+                            ResponseType err_res(&socket);
+                            err_res.set_keep_alive(false);
+                            err_res.status(400).send("Bad Request");
+                            std::string out = err_res.serialize();
+                            co_await asio::async_write(socket, asio::buffer(out), asio::use_awaitable);
+                        }
                         co_return;
                     }
 
                     ++request_count;
-                    bool client_wants_keep_alive = req.should_keep_alive();
-                    bool keep_alive = client_wants_keep_alive && (request_count < max_keep_alive_requests_);
+
+                    // HTTP/2 connections are always persistent and multiplexed.
+                    // HTTP/1-style Connection/Keep-Alive headers are forbidden in HTTP/2 (RFC 7540 §8.1.2.2).
+                    const bool keep_alive = is_http2
+                                                ? true
+                                                : (req.should_keep_alive() && (
+                                                       request_count < max_keep_alive_requests_));
 
                     auto match = router_.resolve(req.method_type(), req.path());
                     if (!match) {
                         ResponseType not_found_res(&socket);
-                        not_found_res.set_keep_alive(keep_alive, static_cast<unsigned>(keep_alive_timeout_.count()),
-                                                     max_keep_alive_requests_ - request_count);
+                        if constexpr (requires { not_found_res.stream_id(req.stream_id()); }) {
+                            not_found_res.stream_id(req.stream_id());
+                        }
+                        if constexpr (!is_http2) {
+                            not_found_res.set_keep_alive(keep_alive,
+                                                         static_cast<unsigned>(keep_alive_timeout_.count()),
+                                                         max_keep_alive_requests_ - request_count);
+                        }
                         not_found_res.status(404);
 
                         if (server_not_found_handler_) {
@@ -377,14 +492,22 @@ namespace wavex::server {
                             std::string out = not_found_res.serialize();
                             co_await asio::async_write(socket, asio::buffer(out), asio::use_awaitable);
                         }
-                        if (!keep_alive || !not_found_res.should_keep_alive()) co_return;
+                        if constexpr (!is_http2) {
+                            if (!keep_alive || !not_found_res.should_keep_alive()) co_return;
+                        }
                         stream_buf.erase(0, req.consumed_bytes());
                         continue;
                     }
 
                     ResponseType res(&socket);
-                    res.set_keep_alive(keep_alive, static_cast<unsigned>(keep_alive_timeout_.count()),
-                                       max_keep_alive_requests_ - request_count);
+                    if constexpr (requires { res.stream_id(req.stream_id()); }) {
+                        res.stream_id(req.stream_id());
+                    }
+                    if constexpr (!is_http2) {
+                        res.set_keep_alive(keep_alive,
+                                           static_cast<unsigned>(keep_alive_timeout_.count()),
+                                           max_keep_alive_requests_ - request_count);
+                    }
 
                     if (match->middlewares.empty()) {
                         co_await match->handler(req, res);
@@ -399,8 +522,10 @@ namespace wavex::server {
 
                     stream_buf.erase(0, req.consumed_bytes());
 
-                    if (!keep_alive || !res.should_keep_alive()) {
-                        break;
+                    if constexpr (!is_http2) {
+                        if (!keep_alive || !res.should_keep_alive()) {
+                            break;
+                        }
                     }
                 }
             } catch (const std::exception &) {
@@ -425,6 +550,40 @@ namespace wavex::server {
             try {
                 unsigned request_count = 0;
                 co_await ssl_socket.async_handshake(asio::ssl::stream_base::server, asio::use_awaitable);
+
+                // ── HTTP/2 Connection Preface over TLS (RFC 7540 §3.5) ────────────────
+                // After TLS handshake, the client sends the 24-byte PRI preface + SETTINGS.
+                // We must reply with server SETTINGS + SETTINGS ACK before any responses.
+                constexpr bool is_http2 = std::is_same_v<Codec, wavex::protos::http::http2codec>;
+                if constexpr (is_http2) {
+                    while (stream_buf.size() < wavex::protos::http::http2::CONNECTION_PREFACE.size() + 9) {
+                        char buf[4096];
+                        auto [ec, n] = co_await ssl_socket.async_read_some(
+                            asio::buffer(buf), asio::as_tuple(asio::use_awaitable));
+                        if (ec || n == 0) co_return;
+                        stream_buf.append(buf, n);
+                    }
+
+                    if (!stream_buf.starts_with(wavex::protos::http::http2::CONNECTION_PREFACE)) {
+                        co_return;
+                    }
+
+                    const std::string server_settings = wavex::protos::http::http2::encoder::serialize_settings({});
+                    const std::string settings_ack = wavex::protos::http::http2::encoder::serialize_settings_ack();
+                    std::string preface_response;
+                    preface_response.reserve(server_settings.size() + settings_ack.size());
+                    preface_response += server_settings;
+                    preface_response += settings_ack;
+
+                    asio::error_code write_ec;
+                    co_await asio::async_write(
+                        ssl_socket, asio::buffer(preface_response),
+                        asio::redirect_error(asio::use_awaitable, write_ec));
+                    if (write_ec) co_return;
+
+                    // Strip the 24-byte preface — parser only expects raw HTTP/2 frames.
+                    stream_buf.erase(0, wavex::protos::http::http2::CONNECTION_PREFACE.size());
+                }
 
                 while (is_running_) {
                     RequestType req;
@@ -463,23 +622,36 @@ namespace wavex::server {
                     }
 
                     if (p_res != Codec::parser::result::success) {
-                        ResponseType err_res;
-                        err_res.set_keep_alive(false);
-                        err_res.status(400).send("Bad Request");
-                        std::string out = err_res.serialize();
-                        co_await asio::async_write(ssl_socket, asio::buffer(out), asio::use_awaitable);
+                        if constexpr (!is_http2) {
+                            ResponseType err_res;
+                            err_res.set_keep_alive(false);
+                            err_res.status(400).send("Bad Request");
+                            std::string out = err_res.serialize();
+                            co_await asio::async_write(ssl_socket, asio::buffer(out), asio::use_awaitable);
+                        }
                         co_return;
                     }
 
                     ++request_count;
-                    bool client_wants_keep_alive = req.should_keep_alive();
-                    bool keep_alive = client_wants_keep_alive && (request_count < max_keep_alive_requests_);
+
+                    // HTTP/2 connections are always persistent and multiplexed.
+                    // HTTP/1-style Connection/Keep-Alive headers are forbidden in HTTP/2 (RFC 7540 §8.1.2.2).
+                    const bool keep_alive = is_http2
+                                                ? true
+                                                : (req.should_keep_alive() && (
+                                                       request_count < max_keep_alive_requests_));
 
                     auto match = router_.resolve(req.method_type(), req.path());
                     if (!match) {
                         ResponseType not_found_res;
-                        not_found_res.set_keep_alive(keep_alive, static_cast<unsigned>(keep_alive_timeout_.count()),
-                                                     max_keep_alive_requests_ - request_count);
+                        if constexpr (requires { not_found_res.stream_id(req.stream_id()); }) {
+                            not_found_res.stream_id(req.stream_id());
+                        }
+                        if constexpr (!is_http2) {
+                            not_found_res.set_keep_alive(keep_alive,
+                                                         static_cast<unsigned>(keep_alive_timeout_.count()),
+                                                         max_keep_alive_requests_ - request_count);
+                        }
                         not_found_res.status(404);
 
                         if (server_not_found_handler_) {
@@ -488,16 +660,28 @@ namespace wavex::server {
                             co_await router_.not_found_handler()(req, not_found_res);
                         }
 
-                        std::string out = not_found_res.serialize();
-                        co_await asio::async_write(ssl_socket, asio::buffer(out), asio::use_awaitable);
-                        if (!keep_alive || !not_found_res.should_keep_alive()) co_return;
+                        // Always write via ssl_socket — TLS ResponseType has no socket ptr,
+                        // so send_impl() never actually sends even when is_sent_ becomes true.
+                        {
+                            std::string out = not_found_res.serialize();
+                            co_await asio::async_write(ssl_socket, asio::buffer(out), asio::use_awaitable);
+                        }
+                        if constexpr (!is_http2) {
+                            if (!keep_alive || !not_found_res.should_keep_alive()) co_return;
+                        }
                         stream_buf.erase(0, req.consumed_bytes());
                         continue;
                     }
 
                     ResponseType res;
-                    res.set_keep_alive(keep_alive, static_cast<unsigned>(keep_alive_timeout_.count()),
-                                       max_keep_alive_requests_ - request_count);
+                    if constexpr (requires { res.stream_id(req.stream_id()); }) {
+                        res.stream_id(req.stream_id());
+                    }
+                    if constexpr (!is_http2) {
+                        res.set_keep_alive(keep_alive,
+                                           static_cast<unsigned>(keep_alive_timeout_.count()),
+                                           max_keep_alive_requests_ - request_count);
+                    }
 
                     if (match->middlewares.empty()) {
                         co_await match->handler(req, res);
@@ -505,13 +689,20 @@ namespace wavex::server {
                         co_await run_chain(req, res, match->middlewares, match->handler);
                     }
 
-                    std::string response_bytes = res.serialize();
-                    co_await asio::async_write(ssl_socket, asio::buffer(response_bytes), asio::use_awaitable);
+                    // In the TLS handler, ResponseType is constructed without a socket pointer.
+                    // This means send()/json() → send_impl() sets is_sent_=true but cannot write to
+                    // the ssl_socket. We must always serialize and write here via ssl_socket.
+                    {
+                        std::string response_bytes = res.serialize();
+                        co_await asio::async_write(ssl_socket, asio::buffer(response_bytes), asio::use_awaitable);
+                    }
 
                     stream_buf.erase(0, req.consumed_bytes());
 
-                    if (!keep_alive || !res.should_keep_alive()) {
-                        break;
+                    if constexpr (!is_http2) {
+                        if (!keep_alive || !res.should_keep_alive()) {
+                            break;
+                        }
                     }
                 }
             } catch (const std::exception &) {
@@ -558,4 +749,8 @@ namespace wavex::server {
     /// Concrete default HTTP/1.x server type aliases
     using Http1Server = Server<wavex::protos::http::http1codec, wavex::engine::Http1Router>;
     using http1server = Http1Server;
+
+    /// Concrete HTTP/2 server type aliases
+    using Http2Server = Server<wavex::protos::http::http2codec, wavex::engine::Http2Router>;
+    using http2server = Http2Server;
 } // namespace wavex::server
