@@ -11,9 +11,6 @@
 
 module;
 
-#include <utility>
-#include <string_view>
-#include <concepts>
 #include <wavex/Base/Chainable.hpp>
 
 export module wavex:chainable;
@@ -21,4 +18,9 @@ export module wavex:chainable;
 export namespace wavex {
     using wavex::Chainable;
     using wavex::ChainableHandler;
+    using wavex::StaticChain;
+    using wavex::make_chain;
+    using wavex::ConditionalChainable;
+    using wavex::KeepAlivePolicy;
 }
+

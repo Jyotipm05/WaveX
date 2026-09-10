@@ -12,8 +12,7 @@
  *  7. Resolution failures for non-existent paths or mismatched methods
  */
 
-#include <wavex/Engine/Router.hpp>
-#include <wavex/Engine/HttpRouter.hpp>
+#include <wavex/wavex.hpp>
 
 #define ASIO_HAS_CO_AWAIT 1
 #include <asio/awaitable.hpp>
@@ -114,6 +113,11 @@ void test_static_routes() {
         co_return;
     });
 
+    router.query("/api/v1/resource", [](HttpRequest &, HttpResponse &res) -> asio::awaitable<void> {
+        res.status(200).send("QUERY_RESOURCE_BODY");
+        co_return;
+    });
+
     // Register distinct handlers for DIFFERENT PATHS under the same prefix
     router.get("/api/v1/health", [](HttpRequest &, HttpResponse &res) -> asio::awaitable<void> {
         res.status(200).send("HEALTH_OK_BODY");
@@ -129,19 +133,22 @@ void test_static_routes() {
     auto match_get = router.resolve(HTTP_Method::GET, "/api/v1/resource");
     check(match_get.has_value(), "GET /api/v1/resource resolves successfully");
     if (match_get) {
-        check(execute_handler(match_get->handler) == "GET_RESOURCE_BODY", "GET handler returns distinct body 'GET_RESOURCE_BODY'");
+        check(execute_handler(match_get->handler) == "GET_RESOURCE_BODY",
+              "GET handler returns distinct body 'GET_RESOURCE_BODY'");
     }
 
     auto match_post = router.resolve(HTTP_Method::POST, "/api/v1/resource");
     check(match_post.has_value(), "POST /api/v1/resource resolves successfully");
     if (match_post) {
-        check(execute_handler(match_post->handler) == "POST_RESOURCE_BODY", "POST handler returns distinct body 'POST_RESOURCE_BODY'");
+        check(execute_handler(match_post->handler) == "POST_RESOURCE_BODY",
+              "POST handler returns distinct body 'POST_RESOURCE_BODY'");
     }
 
     auto match_put = router.resolve(HTTP_Method::PUT, "/api/v1/resource");
     check(match_put.has_value(), "PUT /api/v1/resource resolves successfully");
     if (match_put) {
-        check(execute_handler(match_put->handler) == "PUT_RESOURCE_BODY", "PUT handler returns distinct body 'PUT_RESOURCE_BODY'");
+        check(execute_handler(match_put->handler) == "PUT_RESOURCE_BODY",
+              "PUT handler returns distinct body 'PUT_RESOURCE_BODY'");
     }
 
 #ifdef DELETE
@@ -150,26 +157,38 @@ void test_static_routes() {
     auto match_del = router.resolve((HTTP_Method::DELETE), "/api/v1/resource");
     check(match_del.has_value(), "DELETE /api/v1/resource resolves successfully");
     if (match_del) {
-        check(execute_handler(match_del->handler) == "DELETE_RESOURCE_BODY", "DELETE handler returns distinct body 'DELETE_RESOURCE_BODY'");
+        check(execute_handler(match_del->handler) == "DELETE_RESOURCE_BODY",
+              "DELETE handler returns distinct body 'DELETE_RESOURCE_BODY'");
     }
 
     auto match_patch = router.resolve(HTTP_Method::PATCH, "/api/v1/resource");
     check(match_patch.has_value(), "PATCH /api/v1/resource resolves successfully");
     if (match_patch) {
-        check(execute_handler(match_patch->handler) == "PATCH_RESOURCE_BODY", "PATCH handler returns distinct body 'PATCH_RESOURCE_BODY'");
+        check(execute_handler(match_patch->handler) == "PATCH_RESOURCE_BODY",
+              "PATCH handler returns distinct body 'PATCH_RESOURCE_BODY'");
     }
+
+    auto match_query = router.resolve(HTTP_Method::QUERY, "/api/v1/resource");
+    check(match_query.has_value(), "QUERY /api/v1/resource resolves successfully");
+    if (match_query) {
+        check(execute_handler(match_query->handler) == "QUERY_RESOURCE_BODY",
+              "QUERY handler returns distinct body 'QUERY_RESOURCE_BODY'");
+    }
+
 
     // 2. Verify path separation on the same method (GET)
     auto match_health = router.resolve(HTTP_Method::GET, "/api/v1/health");
     check(match_health.has_value(), "GET /api/v1/health resolves successfully");
     if (match_health) {
-        check(execute_handler(match_health->handler) == "HEALTH_OK_BODY", "Health handler returns distinct body 'HEALTH_OK_BODY'");
+        check(execute_handler(match_health->handler) == "HEALTH_OK_BODY",
+              "Health handler returns distinct body 'HEALTH_OK_BODY'");
     }
 
     auto match_users = router.resolve(HTTP_Method::GET, "/api/v1/users");
     check(match_users.has_value(), "GET /api/v1/users resolves successfully");
     if (match_users) {
-        check(execute_handler(match_users->handler) == "USERS_LIST_BODY", "Users handler returns distinct body 'USERS_LIST_BODY'");
+        check(execute_handler(match_users->handler) == "USERS_LIST_BODY",
+              "Users handler returns distinct body 'USERS_LIST_BODY'");
     }
 
     // 3. Verify non-existent method / path failures
@@ -184,7 +203,7 @@ void test_static_routes() {
 
 void test_singleton_instance() {
     std::cout << "\n[Test 2] Router singleton instance identity & handler execution\n";
-    
+
     auto &router1 = HttpRouter::instance();
     const auto &router2 = HttpRouter::instance();
 
@@ -199,7 +218,8 @@ void test_singleton_instance() {
     const auto match = router2.resolve(HTTP_Method::GET, "/singleton/test");
     check(match.has_value(), "Route registered via reference 1 resolves via reference 2");
     if (match) {
-        check(execute_handler(match->handler) == "SINGLETON_RESPONSE", "Singleton handler executes and produces 'SINGLETON_RESPONSE'");
+        check(execute_handler(match->handler) == "SINGLETON_RESPONSE",
+              "Singleton handler executes and produces 'SINGLETON_RESPONSE'");
     }
 
     router1.clear();
@@ -227,7 +247,8 @@ void test_path_parameters() {
     if (match) {
         check(match->params["id"] == "42", "Extracted parameter 'id' equals '42'");
         check(match->params["section"] == "settings", "Extracted parameter 'section' equals 'settings'");
-        check(execute_handler(match->handler) == "PROFILE_SECTION_OK", "Param route handler returns 'PROFILE_SECTION_OK'");
+        check(execute_handler(match->handler) == "PROFILE_SECTION_OK",
+              "Param route handler returns 'PROFILE_SECTION_OK'");
     }
 
     auto match_brace = router.resolve(HTTP_Method::GET, "/posts/tech/cxx20-modules");
@@ -235,7 +256,8 @@ void test_path_parameters() {
     if (match_brace) {
         check(match_brace->params["category"] == "tech", "Extracted parameter 'category' equals 'tech'");
         check(match_brace->params["slug"] == "cxx20-modules", "Extracted parameter 'slug' equals 'cxx20-modules'");
-        check(execute_handler(match_brace->handler) == "POST_CATEGORY_OK", "Brace param route handler returns 'POST_CATEGORY_OK'");
+        check(execute_handler(match_brace->handler) == "POST_CATEGORY_OK",
+              "Brace param route handler returns 'POST_CATEGORY_OK'");
     }
 }
 
@@ -254,7 +276,8 @@ void test_regex_constraints() {
     check(match_numeric.has_value(), "Numeric path matches regex constraint {id:\\d+}");
     if (match_numeric) {
         check(match_numeric->params["id"] == "12345", "Extracted regex parameter 'id' equals '12345'");
-        check(execute_handler(match_numeric->handler) == "NUMERIC_ITEM_OK", "Regex route handler returns 'NUMERIC_ITEM_OK'");
+        check(execute_handler(match_numeric->handler) == "NUMERIC_ITEM_OK",
+              "Regex route handler returns 'NUMERIC_ITEM_OK'");
     }
 
     const auto match_alpha = router.resolve(HTTP_Method::GET, "/items/abcde");
@@ -275,7 +298,8 @@ void test_wildcards() {
     auto match = router.resolve(HTTP_Method::GET, "/static/css/themes/dark.css");
     check(match.has_value(), "Wildcard path /static/*filepath resolves multi-segment path");
     if (match) {
-        check(match->params["filepath"] == "css/themes/dark.css", "Wildcard parameter 'filepath' captured 'css/themes/dark.css'");
+        check(match->params["filepath"] == "css/themes/dark.css",
+              "Wildcard parameter 'filepath' captured 'css/themes/dark.css'");
         check(execute_handler(match->handler) == "STATIC_FILE_OK", "Wildcard route handler returns 'STATIC_FILE_OK'");
     }
 }
@@ -301,7 +325,8 @@ void test_middleware_chain() {
     });
 
     // Per-route MW
-    HttpRouter::MiddlewareFn route_mw = [&order](HttpRequest &, HttpResponse &, const wavex::base::Next next) -> asio::awaitable<void> {
+    HttpRouter::MiddlewareFn route_mw = [&order](HttpRequest &, HttpResponse &,
+                                                 const wavex::base::Next next) -> asio::awaitable<void> {
         order.push_back("per_route");
         co_await next();
     };

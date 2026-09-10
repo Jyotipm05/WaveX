@@ -25,40 +25,42 @@ namespace wavex::base {
     };
 
     // Strictly sorted alphabetically by extension for std::lower_bound.
-    inline constexpr std::array<MimePair, 32> mime_map = {{
-        {"avif",  "image/avif"},
-        {"cs",    "text/plain; charset=utf-8"},
-        {"css",   "text/css; charset=utf-8"},
-        {"gif",   "image/gif"},
-        {"glb",   "model/gltf-binary"},
-        {"gltf",  "model/gltf+json"},
-        {"gz",    "application/gzip"},
-        {"gzip",  "application/gzip"},
-        {"htm",   "text/html; charset=utf-8"},
-        {"html",  "text/html; charset=utf-8"},
-        {"jpeg",  "image/jpeg"},
-        {"jpg",   "image/jpeg"},
-        {"js",    "text/javascript; charset=utf-8"},
-        {"json",  "application/json"},
-        {"mjs",   "text/javascript; charset=utf-8"},
-        {"mp3",   "audio/mpeg"},
-        {"mp4",   "video/mp4"},
-        {"obj",   "model/obj"},
-        {"otf",   "font/otf"},
-        {"pdf",   "application/pdf"},
-        {"png",   "image/png"},
-        {"rs",    "text/rust; charset=utf-8"},
-        {"svg",   "image/svg+xml"},
-        {"ttf",   "font/ttf"},
-        {"txt",   "text/plain; charset=utf-8"},
-        {"wasm",  "application/wasm"},
-        {"webm",  "video/webm"},
-        {"webp",  "image/webp"},
-        {"woff",  "font/woff"},
-        {"woff2", "font/woff2"},
-        {"xml",   "application/xml"},
-        {"zip",   "application/zip"}
-    }};
+    inline constexpr std::array<MimePair, 32> mime_map = {
+        {
+            {"avif", "image/avif"},
+            {"cs", "text/plain; charset=utf-8"},
+            {"css", "text/css; charset=utf-8"},
+            {"gif", "image/gif"},
+            {"glb", "model/gltf-binary"},
+            {"gltf", "model/gltf+json"},
+            {"gz", "application/gzip"},
+            {"gzip", "application/gzip"},
+            {"htm", "text/html; charset=utf-8"},
+            {"html", "text/html; charset=utf-8"},
+            {"jpeg", "image/jpeg"},
+            {"jpg", "image/jpeg"},
+            {"js", "text/javascript; charset=utf-8"},
+            {"json", "application/json"},
+            {"mjs", "text/javascript; charset=utf-8"},
+            {"mp3", "audio/mpeg"},
+            {"mp4", "video/mp4"},
+            {"obj", "model/obj"},
+            {"otf", "font/otf"},
+            {"pdf", "application/pdf"},
+            {"png", "image/png"},
+            {"rs", "text/rust; charset=utf-8"},
+            {"svg", "image/svg+xml"},
+            {"ttf", "font/ttf"},
+            {"txt", "text/plain; charset=utf-8"},
+            {"wasm", "application/wasm"},
+            {"webm", "video/webm"},
+            {"webp", "image/webp"},
+            {"woff", "font/woff"},
+            {"woff2", "font/woff2"},
+            {"xml", "application/xml"},
+            {"zip", "application/zip"}
+        }
+    };
 
     /**
      * @brief Resolves a file extension to its standard MIME Content-Type string.
@@ -80,9 +82,9 @@ namespace wavex::base {
 
         // O(log N) binary search
         const auto it = std::lower_bound(mime_map.begin(), mime_map.end(), e,
-            [](const MimePair& pair, const std::string_view target) {
-                return pair.ext < target;
-            });
+                                         [](const MimePair &pair, const std::string_view target) {
+                                             return pair.ext < target;
+                                         });
 
         if (it != mime_map.end() && it->ext == e) {
             return it->mime;
@@ -102,10 +104,10 @@ namespace wavex::base {
             return "application/octet-stream";
         }
         // Ensure dot is part of the filename segment (after last slash)
-        if (const std::size_t slash_pos = path.find_last_of("/\\"); slash_pos != std::string_view::npos && dot_pos < slash_pos) {
+        if (const std::size_t slash_pos = path.find_last_of("/\\");
+            slash_pos != std::string_view::npos && dot_pos < slash_pos) {
             return "application/octet-stream";
         }
         return mime_type_from_ext(path.substr(dot_pos));
     }
-
 } // namespace wavex::base

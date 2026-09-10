@@ -15,7 +15,7 @@ module;
 export module wavex:server_pool;
 
 export namespace wavex::server {
-    using wavex::server::ThreadPoolConfig;
-    using wavex::server::WorkerNode;
-    using wavex::server::ThreadPool;
+    using server::ThreadPoolConfig;
+    using server::WorkerNode;
+    using server::ThreadPool;
 }

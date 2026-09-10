@@ -3,9 +3,7 @@
  * @brief Unit & integration tests for HttpResponse, WorkStealingQueue, ThreadPool, and Server.
  */
 
-#include <wavex/protos/http/HttpResponse.hpp>
-#include <wavex/Server/WorkStealingQueue.hpp>
-#include <wavex/Server/ThreadPool.hpp>
+#include <wavex/wavex.hpp>
 
 #include <iostream>
 #include <string>
@@ -86,7 +84,7 @@ void test_work_stealing_queue() {
     auto drained = lq.drain_all();
     check(lq.empty(), "LocalQueue empty after drain_all()");
     check(drained.size() == 2, "Drained 2 remaining tasks (task2 + extra)");
-    for (auto &t : drained) t();
+    for (auto &t: drained) t();
     check(counter == 160, "Executed drained tasks (+20 +100 -> 160 total)");
 
     std::cout << "\n[Test 2b] InjectorQueue push / pop (global MPMC)\n";
@@ -115,7 +113,7 @@ void test_work_stealing_queue() {
 
     int batch_sum = 0;
     for (int i = 1; i <= 10; ++i) {
-        (void)victim_lq.push([&batch_sum, i] { batch_sum += i; });
+        (void) victim_lq.push([&batch_sum, i] { batch_sum += i; });
     }
     check(victim_lq.size() == 10, "Victim LocalQueue initialized with 10 tasks");
     check(thief_lq.empty(), "Thief LocalQueue starts empty");

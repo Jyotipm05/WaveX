@@ -157,7 +157,8 @@ namespace wavex::server {
 
             // Remaining (steal_count - 1) tasks are pushed into dest_queue (the thief's local queue)
             for (std::size_t i = 1; i < steal_count; ++i) {
-                if (Task remaining_task = std::move(slots_[(t + i) & MASK]); !dest_queue.push(std::move(remaining_task))) {
+                if (Task remaining_task = std::move(slots_[(t + i) & MASK]); !dest_queue.
+                    push(std::move(remaining_task))) {
                     // If thief's local queue overflows, remaining tasks are dropped/spilled
                     break;
                 }

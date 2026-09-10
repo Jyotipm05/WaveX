@@ -1,4 +1,4 @@
-#include <wavex/Base/Logger.hpp>
+#include <wavex/wavex.hpp>
 #include <iostream>
 #include <sstream>
 #include <cassert>
@@ -8,17 +8,19 @@ int main() {
     std::cout << "[Test] Running Modern Logger unit tests...\n";
 
     std::ostringstream oss;
-    auto& logger = wavex::base::Logger::instance();
+    auto &logger = wavex::base::Logger::instance();
     logger.set_output(oss);
     logger.set_colored(false); // disable ANSI for deterministic string testing
     logger.set_level(wavex::base::LogLevel::TRACE);
 
     // Test 1: Modern zero-macro functions with source location
-    wavex::log::trace("Trace message: {}", 42);
-    wavex::log::debug("Debug message: {}", "details");
-    wavex::log::info("Info message: status={}", 200);
-    wavex::log::warn("Warn message: disk space low");
-    wavex::log::error("Error message: code={}", 500);
+    // namespace wxlog = wavex::log;
+
+    wxlog::trace("Trace message: {}", 42);
+    wxlog::debug("Debug message: {}", "details");
+    wxlog::info("Info message: status={}", 200);
+    wxlog::warn("Warn message: disk space low");
+    wxlog::error("Error message: code={}", 500);
 
     std::string output = oss.str();
     std::cout << "--- Captured Log Output ---\n" << output << "---------------------------\n";
@@ -37,10 +39,10 @@ int main() {
     oss.clear();
     logger.set_level(wavex::base::LogLevel::WARN);
 
-    wavex::log::debug("Should NOT appear");
-    wavex::log::info("Should NOT appear");
-    wavex::log::warn("Should APPEAR");
-    wavex::log::error("Should ALSO APPEAR");
+    wxlog::debug("Should NOT appear");
+    wxlog::info("Should NOT appear");
+    wxlog::warn("Should APPEAR");
+    wxlog::error("Should ALSO APPEAR");
 
     std::string filtered = oss.str();
     assert(filtered.find("Should NOT appear") == std::string::npos);
@@ -61,7 +63,7 @@ int main() {
     logger.set_level(wavex::base::LogLevel::INFO);
 
     // Demonstration of colored output to stderr
-    wavex::log::info("Modern colorized logger initialized cleanly!");
+    wxlog::info("Modern colorized logger initialized cleanly!");
 
     std::cout << "[Test] Modern Logger tests PASSED successfully!\n";
     return 0;

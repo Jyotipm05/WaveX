@@ -14,8 +14,7 @@
 
 #pragma once
 
-#include <cstddef>
-#include <cstdint>
+
 #include <string>
 #include <string_view>
 #include <vector>
@@ -38,16 +37,49 @@ namespace wavex::base {
 
     public:
         /// Set the response status code
-        template <typename Self>
-        decltype(auto) status(this Self&& self, const unsigned int code) {
+        template<typename Self>
+        decltype(auto) status(this Self &&self, const unsigned int code) {
             self.status_code_ = code;
             return std::forward<Self>(self);
         }
 
-        /// Set a response header (appends; does not deduplicate)
-        template <typename Self>
-        decltype(auto) set(this Self&& self, const std::string_view name, const std::string_view value) {
+        /// Set a response header (updates if exists, otherwise appends)
+        template<typename Self>
+        decltype(auto) set(this Self &&self, const std::string_view name, const std::string_view value) {
+            for (auto &[k, v]: self.headers_) {
+                if (k.size() == name.size()) {
+                    bool match = true;
+                    for (size_t i = 0; i < k.size(); ++i) {
+                        if (std::tolower(static_cast<unsigned char>(k[i])) !=
+                            std::tolower(static_cast<unsigned char>(name[i]))) {
+                            match = false;
+                            break;
+                        }
+                    }
+                    if (match) {
+                        v = std::string(value);
+                        return std::forward<Self>(self);
+                    }
+                }
+            }
             self.headers_.emplace_back(std::string(name), std::string(value));
+            return std::forward<Self>(self);
+        }
+
+        /// Remove a header by name (case-insensitive)
+        template<typename Self>
+        decltype(auto) remove_header(this Self &&self, const std::string_view name) {
+            std::erase_if(self.headers_, [&](const auto &pair) {
+                const auto &k = pair.first;
+                if (k.size() != name.size()) return false;
+                for (size_t i = 0; i < k.size(); ++i) {
+                    if (std::tolower(static_cast<unsigned char>(k[i])) !=
+                        std::tolower(static_cast<unsigned char>(name[i]))) {
+                        return false;
+                    }
+                }
+                return true;
+            });
             return std::forward<Self>(self);
         }
 
@@ -55,21 +87,21 @@ namespace wavex::base {
         [[nodiscard]] bool is_sent() const { return is_sent_; }
 
         /// Set the response body as plain text and mark as sent
-        template <typename Self>
-        decltype(auto) send(this Self&& self, const std::string_view body) {
+        template<typename Self>
+        decltype(auto) send(this Self &&self, const std::string_view body) {
             return std::forward<Self>(self).send_impl(body);
         }
 
         /// Set the response body as JSON — sets Content-Type automatically
-        template <typename Self>
-        decltype(auto) json(this Self&& self, const nlohmann::json &j) {
+        template<typename Self>
+        decltype(auto) json(this Self &&self, const nlohmann::json &j) {
             self.set("Content-Type", "application/json");
             return std::forward<Self>(self).send(j.dump());
         }
 
         /// Serialize the response into the wire format (protocol-specific)
-        template <typename Self>
-        [[nodiscard]] decltype(auto) serialize(this Self&& self) {
+        template<typename Self>
+        [[nodiscard]] decltype(auto) serialize(this Self &&self) {
             return std::forward<Self>(self).serialize_impl();
         }
 
@@ -99,7 +131,7 @@ namespace wavex::base {
 
     protected:
         unsigned int status_code_ = 200;
-        std::vector<std::pair<std::string, std::string>> headers_;
+        std::vector<std::pair<std::string, std::string> > headers_;
         std::string body_;
         bool is_sent_ = false;
     };

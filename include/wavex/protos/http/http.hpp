@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2026 Jyotipriya Mondal
+// Copyright (c) 2026 Jyotipriya Mondal
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -15,16 +15,14 @@
 
 #include <string>
 #include <string_view>
-#include <vector>
-#include <optional>
 
-#include <wavex/protos/http/Methods.hpp>
 #include <wavex/protos/http/http1codec.hpp>
-#include <wavex/protos/http/HttpRequest.hpp>
+#include <wavex/protos/http/http2codec.hpp>
 #include <wavex/protos/http/HttpResponse.hpp>
 
-namespace wavex::protos::http {
+#include "HttpRequest.hpp"
 
+namespace wavex::protos::http {
     // ─── Codec-Templated Parser Methods ──────────────────────────────────────────
 
     /**
@@ -35,7 +33,7 @@ namespace wavex::protos::http {
      * @param bytes_consumed Output number of bytes parsed.
      * @return Codec parser result (success, incomplete, error).
      */
-    template <typename Codec = http1codec>
+    template<typename Codec = http1codec>
     [[nodiscard]] inline auto parse_request(
         const std::string_view buffer,
         typename Codec::request &req,
@@ -51,7 +49,7 @@ namespace wavex::protos::http {
      * @param bytes_consumed Output number of bytes parsed.
      * @return Codec parser result (success, incomplete, error).
      */
-    template <typename Codec = http1codec>
+    template<typename Codec = http1codec>
     [[nodiscard]] inline auto parse_response(
         const std::string_view buffer,
         typename Codec::response &res,
@@ -67,7 +65,7 @@ namespace wavex::protos::http {
      * @param req Request structure to serialize.
      * @return Serialized wire representation string.
      */
-    template <typename Codec = http1codec>
+    template<typename Codec = http1codec>
     [[nodiscard]] inline std::string serialize_request(const typename Codec::request &req) {
         return Codec::encoder::serialize_request(req);
     }
@@ -78,7 +76,7 @@ namespace wavex::protos::http {
      * @param res Response structure to serialize.
      * @return Serialized wire representation string.
      */
-    template <typename Codec = http1codec>
+    template<typename Codec = http1codec>
     [[nodiscard]] inline std::string serialize_response(const typename Codec::response &res) {
         return Codec::encoder::serialize(res);
     }
@@ -89,7 +87,7 @@ namespace wavex::protos::http {
      * @param data Payload bytes.
      * @return Wire formatted chunk.
      */
-    template <typename Codec = http1codec>
+    template<typename Codec = http1codec>
     [[nodiscard]] inline std::string format_chunk(const std::string_view data) {
         return Codec::encoder::format_chunk(data);
     }
@@ -99,8 +97,8 @@ namespace wavex::protos::http {
      * @tparam Codec Protocol codec (default `http1codec`).
      * @return Terminal chunk view (e.g. "0\r\n\r\n").
      */
-    template <typename Codec = http1codec>
-    [[nodiscard]] inline std::string_view format_terminal_chunk() {
+    template<typename Codec = http1codec>
+    [[nodiscard]] inline constexpr std::string_view format_terminal_chunk() noexcept {
         return Codec::encoder::format_terminal_chunk();
     }
 
@@ -114,7 +112,7 @@ namespace wavex::protos::http {
      * @param bytes_consumed Output consumed bytes.
      * @return Decode result.
      */
-    template <typename Codec = http1codec>
+    template<typename Codec = http1codec>
     [[nodiscard]] inline auto decode_response(
         const std::string_view buffer,
         typename Codec::response &res,
@@ -128,9 +126,14 @@ namespace wavex::protos::http {
      * @param chunked_raw Raw chunked payload.
      * @return Decoded unchunked body string.
      */
-    template <typename Codec = http1codec>
+    template<typename Codec = http1codec>
     [[nodiscard]] inline std::string dechunk(const std::string_view chunked_raw) {
         return Codec::decoder::dechunk(chunked_raw);
     }
 
+    // ─── HTTP/2 Type Aliases ──────────────────────────────────────────────────────
+    using Http2Request = HttpRequest<wavex::protos::http::http2codec>;
+    using http2request = Http2Request;
+    using Http2Response = HttpResponse<wavex::protos::http::http2codec>;
+    using http2response = Http2Response;
 } // namespace wavex::protos::http

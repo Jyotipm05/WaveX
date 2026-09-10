@@ -76,6 +76,38 @@
         }
       }
     }
+  ],
+  "buildPresets": [
+    {
+      "name": ".fast-build",
+      "displayName": "Fast Build",
+      "hidden": true,
+      "jobs": 10
+    },
+    {
+      "name": ".max-build",
+      "displayName": "Max Build",
+      "hidden": true,
+      "jobs": 0
+    },
+    {
+      "name": "fast-dev",
+      "displayName": "Fast Dev",
+      "inherits": ".fast-build",
+      "configurePreset": "test-profile"
+    },
+    {
+      "name": "max-dev",
+      "displayName": "Max Dev",
+      "inherits": ".max-build",
+      "configurePreset": "test-profile"
+    },
+    {
+      "name": "fast-release",
+      "displayName": "Fast Release",
+      "inherits": ".fast-build",
+      "configurePreset": "release"
+    }
   ]
 }
 

@@ -7,7 +7,6 @@
 #include <string>
 #include <vector>
 
-#include <wavex/Cli/Cli.hpp>
 #include <wavex/wavex.hpp>
 
 namespace {
@@ -32,7 +31,7 @@ void test_cli_flags() {
 
     wavex::cli::CliParser parser("test_app", "Test application for WaveX CLI");
     parser.add_flag("verbose", 'v', "Enable verbose output")
-          .add_flag("debug", "Enable debug mode");
+            .add_flag("debug", "Enable debug mode");
 
     // Default state before parsing
     check(!parser.has("verbose"), "Flag 'verbose' is false initially");
@@ -56,8 +55,8 @@ void test_cli_value_options() {
 
     wavex::cli::CliParser parser("wavex_server", "WaveX HTTP Server");
     parser.add_option("port", 'p', "Server port to listen on", "8080")
-          .add_option("host", 'h', "Server host address", "127.0.0.1")
-          .add_option("workers", 'w', "Thread pool worker count", "4");
+            .add_option("host", 'h', "Server host address", "127.0.0.1")
+            .add_option("workers", 'w', "Thread pool worker count", "4");
 
     std::vector<std::string_view> args = {"--port", "9090", "--host=0.0.0.0", "-w", "8"};
     auto res = parser.parse(args);
@@ -75,8 +74,8 @@ void test_cli_type_getters() {
 
     wavex::cli::CliParser parser;
     parser.add_option("int_val", "Integer value", "42")
-          .add_option("double_val", "Double value", "3.14159")
-          .add_option("invalid_int", "Invalid integer", "abc");
+            .add_option("double_val", "Double value", "3.14159")
+            .add_option("invalid_int", "Invalid integer", "abc");
 
     auto res = parser.parse({});
     check(res.ok(), "Empty parse using defaults succeeded");
@@ -94,8 +93,8 @@ void test_cli_positional_arguments() {
 
     wavex::cli::CliParser parser;
     parser.add_option("port", 'p', "Port", "8080")
-          .add_positional("config", "Config file path", true)
-          .add_positional("log_dir", "Log directory path", false);
+            .add_positional("config", "Config file path", true)
+            .add_positional("log_dir", "Log directory path", false);
 
     std::vector<std::string_view> args = {"-p", "3000", "/etc/wavex/app.json", "/var/log/wavex", "extra1", "extra2"};
     auto res = parser.parse(args);
@@ -119,7 +118,7 @@ void test_cli_required_validation() {
 
     wavex::cli::CliParser parser;
     parser.add_option("config", 'c', "Config file", "", true)
-          .add_positional("target", "Target server", true);
+            .add_positional("target", "Target server", true);
 
     // Test missing required option
     std::vector<std::string_view> args1 = {"myserver"};
@@ -141,8 +140,8 @@ void test_cli_help_message() {
 
     wavex::cli::CliParser parser("wavex_demo", "Interactive WaveX Demo Application");
     parser.add_flag("verbose", 'v', "Enable verbose output")
-          .add_option("port", 'p', "HTTP listen port", "8080")
-          .add_positional("input", "Input data file", true);
+            .add_option("port", 'p', "HTTP listen port", "8080")
+            .add_positional("input", "Input data file", true);
 
     std::vector<std::string_view> args = {"--help"};
     auto res = parser.parse(args);

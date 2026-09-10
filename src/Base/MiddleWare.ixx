@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2026 Jyotipriya Mondal
+// Copyright (c) 2026 Jyotipriya Mondal
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -25,14 +25,15 @@ module;
 #include <wavex/Base/MimeTypes.hpp>
 #include <wavex/Base/Request.hpp>
 #include <wavex/Base/Response.hpp>
+#include <wavex/Base/MiddleWare.hpp>
 
 export module wavex:middleware;
 
 export namespace wavex::base {
-    using wavex::base::Request;
-    using wavex::base::Response;
-    using wavex::base::mime_type_from_ext;
-    using wavex::base::mime_type_from_path;
+    using base::Request;
+    using base::Response;
+    using base::mime_type_from_ext;
+    using base::mime_type_from_path;
 
     /// Callable that invokes the next middleware or the final handler.
     using Next = std::function<asio::awaitable<void>()>;
@@ -40,6 +41,9 @@ export namespace wavex::base {
     /**
      * @brief Generic middleware function signature for CRTP Request and Response types.
      */
-    template <typename ReqT, typename ResT>
+    template<typename ReqT, typename ResT>
     using GenericMiddlewareFn = std::function<asio::awaitable<void>(ReqT &, ResT &, Next)>;
+
+    using base::keep_alive;
+    using base::sse_stay_active;
 } // export namespace wavex::base

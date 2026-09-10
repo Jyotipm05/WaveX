@@ -136,14 +136,21 @@ if (NOT re2_FOUND)
 endif ()
 
 # ---------------------------------------------------------------------------
-# OpenSSL
+# OpenSSL (TLS 1.3 Support)
 # ---------------------------------------------------------------------------
-find_package(OpenSSL QUIET)
-if (OpenSSL_FOUND)
-    message(STATUS "OpenSSL found: ${OPENSSL_VERSION}")
-    set(WAVEX_HAS_SSL ON)
+option(WAVEX_ENABLE_TLS "Enable TLS 1.3 support via OpenSSL" ON)
+
+if (WAVEX_ENABLE_TLS)
+    find_package(OpenSSL QUIET)
+    if (OpenSSL_FOUND)
+        message(STATUS "OpenSSL found: ${OPENSSL_VERSION}")
+        set(WAVEX_HAS_SSL ON)
+    else ()
+        message(WARNING "OpenSSL requested but not found — TLS features will be compiled out.")
+        set(WAVEX_HAS_SSL OFF)
+    endif ()
 else ()
-    message(WARNING "OpenSSL not found — TLS features will be compiled out.")
+    message(STATUS "WAVEX_ENABLE_TLS is OFF — compiling without TLS support.")
     set(WAVEX_HAS_SSL OFF)
 endif ()
 
@@ -200,13 +207,16 @@ target_sources(wavex
         include/wavex/Base/MimeTypes.hpp
         include/wavex/Engine/Router.hpp
         include/wavex/Engine/HttpRouter.hpp
+        include/wavex/protos/ProtocolTraits.hpp
         include/wavex/protos/http/Methods.hpp
         include/wavex/protos/http/http.hpp
         include/wavex/protos/http/http1codec.hpp
+        include/wavex/protos/http/http2codec.hpp
         include/wavex/protos/http/HttpRequest.hpp
         include/wavex/protos/http/HttpResponse.hpp
         include/wavex/Server/WorkStealingQueue.hpp
         include/wavex/Server/ThreadPool.hpp
+        include/wavex/Server/TlsConfig.hpp
         include/wavex/Server/Server.hpp
         include/wavex/Client/HttpClient.hpp
         include/wavex/Cli/Cli.hpp
@@ -224,6 +234,7 @@ target_sources(wavex
         src/protos/http/http.ixx
         src/protos/http/Methods.ixx
         src/protos/http/http1codec.ixx
+        src/protos/http/http2codec.ixx
         src/protos/http/HttpRequest.ixx
         src/protos/http/HttpResponse.ixx
         src/Engine/Router.ixx
@@ -338,7 +349,7 @@ if (WAVEX_TEST)
                 ENVIRONMENT  "${WAVEX_SAN_ENV}"
             )
         endif ()
-    endfunction()
+        endfunction()
 
     # -----------------------------------------------------------------------
     # Test registrations
@@ -354,8 +365,16 @@ if (WAVEX_TEST)
     wavex_add_test(wavex_cli_tests             tests/test_cli.cpp)
     wavex_add_test(wavex_chainable_tests       tests/test_chainable.cpp)
     wavex_add_test(wavex_logger_tests          tests/test_logger_modern.cpp)
+    wavex_add_test(wavex_server_keepalive_tests tests/test_server_keepalive.cpp)
+    wavex_add_test(wavex_not_found_tests        tests/test_not_found.cpp)
+    wavex_add_test(wavex_http2_codec_tests      tests/test_http2_codec.cpp)
 
-    # Interactive dev/Postman manual testing server (not a CTest target)
-    add_executable(wavex_postman_server tests/postman_demo_server.cpp)
-    target_link_libraries(wavex_postman_server PRIVATE wavex)
+    # Unified CLI-driven Postman Dev Servers (HTTP/1.1 and HTTP/2)
+    add_executable(wavex_postman_http1_server tests/postman_demo_http1_server.cpp)
+    target_link_libraries(wavex_postman_http1_server PRIVATE wavex)
+    target_compile_definitions(wavex_postman_http1_server PRIVATE PROJECT_DIR="${CMAKE_SOURCE_DIR}")
+
+    add_executable(wavex_postman_http2_server tests/postman_demo_http2_server.cpp)
+    target_link_libraries(wavex_postman_http2_server PRIVATE wavex)
+    target_compile_definitions(wavex_postman_http2_server PRIVATE PROJECT_DIR="${CMAKE_SOURCE_DIR}")
 endif ()

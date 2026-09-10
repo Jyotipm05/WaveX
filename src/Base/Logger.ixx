@@ -11,37 +11,26 @@
 
 module;
 
-#include <string>
-#include <string_view>
-#include <iostream>
-#include <fstream>
-#include <mutex>
-#include <optional>
-#include <format>
-#include <chrono>
-#include <thread>
-#include <source_location>
-#include <cstdlib>
-#include <filesystem>
-#include <type_traits>
 #include <wavex/Base/Logger.hpp>
 
 export module wavex:logger;
 
 export namespace wavex::base {
-    using wavex::base::LogLevel;
-    using wavex::base::log_level_tag;
-    using wavex::base::log_level_color;
-    using wavex::base::Logger;
+    using base::LogLevel;
+    using base::log_level_tag;
+    using base::log_level_color;
+    using base::Logger;
 }
 
 export namespace wavex::log {
-    using wavex::log::format_with_loc;
-    using wavex::log::msg_with_loc;
-    using wavex::log::trace;
-    using wavex::log::debug;
-    using wavex::log::info;
-    using wavex::log::warn;
-    using wavex::log::error;
-    using wavex::log::fatal;
+    using log::format_with_loc;
+    using log::msg_with_loc;
+    using log::trace;
+    using log::debug;
+    using log::info;
+    using log::warn;
+    using log::error;
+    using log::fatal;
 }
+
+export namespace wxlog = wavex::log;

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file test_client.cpp
  * @brief Unit & integration tests for HttpClient, HttpRequest (client), and HttpResponse (client).
  */
@@ -46,7 +46,7 @@ namespace {
     std::string strip_cr(const std::string_view sv) {
         std::string out;
         out.reserve(sv.size());
-        for (const char c : sv) {
+        for (const char c: sv) {
             if (c != '\r') out += c;
         }
         return out;
@@ -64,7 +64,7 @@ namespace {
         auto safe = [](const std::string_view sv) -> std::string {
             std::string out;
             out.reserve(sv.size());
-            for (unsigned char c : sv) {
+            for (unsigned char c: sv) {
                 if (c >= 0x20 && c <= 0x7e)
                     out += static_cast<char>(c);
                 else
@@ -81,7 +81,7 @@ namespace {
     void dump_to_file(const std::string &path, const std::string_view data) {
         std::ofstream ofs(path, std::ios::binary);
         if (!ofs) return;
-        for (const char c : data) {
+        for (const char c: data) {
             if (c != '\r') ofs.put(c);
         }
     }
@@ -90,7 +90,7 @@ namespace {
      * @brief Write parsed response summary to a file.
      */
     void dump_parsed_to_file(const std::string &path,
-                             const HttpResponse &res) {
+                             const wavex::client::ClientResponse &res) {
         std::ofstream ofs(path);
         if (!ofs) return;
         ofs << "Status: " << res.status_code() << " " << res.status_text() << "\n";
@@ -101,9 +101,9 @@ namespace {
         }
         ofs << "Body size: " << res.get_body().size() << " bytes\n";
         ofs << "Body starts with <!doctype: "
-            << res.get_body().starts_with("<!doctype html>") << "\n";
+                << res.get_body().starts_with("<!doctype html>") << "\n";
         ofs << "Body ends with </html>: "
-            << res.get_body().ends_with("</html>") << "\n";
+                << res.get_body().ends_with("</html>") << "\n";
     }
 }
 
@@ -122,7 +122,8 @@ void test_http_request_client_serialization() {
 
     std::string wire = req.serialize();
     check(wire.starts_with("GET /v1/users?page=2 HTTP/1.1\r\n"), "Request line matches GET /v1/users?page=2 HTTP/1.1");
-    check(wire.find("Authorization: Bearer token123\r\n") != std::string::npos, "Serialized wire contains Authorization header");
+    check(wire.find("Authorization: Bearer token123\r\n") != std::string::npos,
+          "Serialized wire contains Authorization header");
 }
 
 // ─── Test 2: HttpResponse Client Parsing & Socket-less Usage ───────────────
@@ -131,30 +132,30 @@ void test_http_response_client_parsing() {
     std::cout << "\n[Test 2] HttpResponse client parsing & chunked de-chunking\n";
 
     std::string raw_res =
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: application/json\r\n"
-        "Server: TestServer/1.0\r\n"
-        "Content-Length: 19\r\n"
-        "\r\n"
-        "{\"status\":\"active\"}";
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: application/json\r\n"
+            "Server: TestServer/1.0\r\n"
+            "Content-Length: 19\r\n"
+            "\r\n"
+            "{\"status\":\"active\"}";
 
     HttpResponse res;
     check(res.parse(raw_res), "HttpResponse parsed raw HTTP response");
     check(res.status_code() == 200, "Status code is 200");
     check(res.status_text() == "OK", "Status text is OK");
     check(res.header("Content-Type") == "application/json", "Content-Type is application/json");
-    check(res.get_body() == "{\"status\":\"active\"}", "Body equals JSON string");
+    check(res.get_body() == R"({"status":"active"})", "Body equals JSON string");
 
     // Chunked response parsing & auto-dechunking test (multi-chunk)
     std::string raw_chunked_res =
-        "HTTP/1.1 200 OK\r\n"
-        "Transfer-Encoding: chunked\r\n"
-        "\r\n"
-        "7\r\n"
-        "Mozilla\r\n"
-        "a\r\n"
-        " Developer\r\n"
-        "0\r\n\r\n";
+            "HTTP/1.1 200 OK\r\n"
+            "Transfer-Encoding: chunked\r\n"
+            "\r\n"
+            "7\r\n"
+            "Mozilla\r\n"
+            "a\r\n"
+            " Developer\r\n"
+            "0\r\n\r\n";
 
     HttpResponse chunked_res;
     check(chunked_res.parse(raw_chunked_res), "Chunked response parsed");
@@ -164,16 +165,16 @@ void test_http_response_client_parsing() {
     // Transfer-Encoding: chunked, single chunk, no Content-Length.
     // Body size is determined dynamically — no hardcoded byte count.
     constexpr std::string_view html_body =
-        "<!doctype html><html lang=\"en\"><head><title>Example Domain</title>"
-        "<link rel=\"icon\" href=\"data:,\"><meta name=\"viewport\" "
-        "content=\"width=device-width, initial-scale=1\"><style>"
-        "body{background:#eee;width:60vw;margin:15vh auto;font-family:"
-        "system-ui,sans-serif}h1{font-size:1.5em}div{opacity:0.8}"
-        "a:link,a:visited{color:#00f}a:hover{text-decoration:underline}"
-        "</style></head><body><div><h1>Example Domain</h1><p>"
-        "This domain is for use in illustrative examples in documents.</p>"
-        "<p>You may use this domain in literature without prior coordination."
-        "</p></div></body></html>";
+            "<!doctype html><html lang=\"en\"><head><title>Example Domain</title>"
+            "<link rel=\"icon\" href=\"data:,\"><meta name=\"viewport\" "
+            "content=\"width=device-width, initial-scale=1\"><style>"
+            "body{background:#eee;width:60vw;margin:15vh auto;font-family:"
+            "system-ui,sans-serif}h1{font-size:1.5em}div{opacity:0.8}"
+            "a:link,a:visited{color:#00f}a:hover{text-decoration:underline}"
+            "</style></head><body><div><h1>Example Domain</h1><p>"
+            "This domain is for use in illustrative examples in documents.</p>"
+            "<p>You may use this domain in literature without prior coordination."
+            "</p></div></body></html>";
 
     constexpr auto body_len = html_body.size();
 
@@ -184,22 +185,22 @@ void test_http_response_client_parsing() {
     chunk_size_line += "\r\n";
 
     std::string real_chunked_res =
-        "HTTP/1.1 200 OK\r\n"
-        "Date: Sat, 25 Jul 2026 08:21:32 GMT\r\n"
-        "Content-Type: text/html\r\n"
-        "Transfer-Encoding: chunked\r\n"
-        "Connection: close\r\n"
-        "Server: cloudflare\r\n"
-        "Last-Modified: Tue, 21 Jul 2026 07:16:00 GMT\r\n"
-        "Allow: GET, HEAD\r\n"
-        "Accept-Ranges: bytes\r\n"
-        "Age: 9311\r\n"
-        "cf-cache-status: HIT\r\n"
-        "CF-RAY: a209c0710de9c617-BOM\r\n"
-        "\r\n"
-        + chunk_size_line
-        + std::string(html_body) + "\r\n"
-        "0\r\n\r\n";
+            "HTTP/1.1 200 OK\r\n"
+            "Date: Sat, 25 Jul 2026 08:21:32 GMT\r\n"
+            "Content-Type: text/html\r\n"
+            "Transfer-Encoding: chunked\r\n"
+            "Connection: close\r\n"
+            "Server: cloudflare\r\n"
+            "Last-Modified: Tue, 21 Jul 2026 07:16:00 GMT\r\n"
+            "Allow: GET, HEAD\r\n"
+            "Accept-Ranges: bytes\r\n"
+            "Age: 9311\r\n"
+            "cf-cache-status: HIT\r\n"
+            "CF-RAY: a209c0710de9c617-BOM\r\n"
+            "\r\n"
+            + chunk_size_line
+            + std::string(html_body) + "\r\n"
+            "0\r\n\r\n";
 
     constexpr std::size_t expected_header_count = 11;
 
@@ -243,7 +244,10 @@ void test_http_response_client_parsing() {
     // Structural sanity: no header name should start with '<' (HTML leak)
     bool no_html_leak = true;
     for (const auto &k: real_res.header_views() | std::views::keys) {
-        if (!k.empty() && k[0] == '<') { no_html_leak = false; break; }
+        if (!k.empty() && k[0] == '<') {
+            no_html_leak = false;
+            break;
+        }
     }
     check(no_html_leak, "No header name starts with '<' (no HTML body leak)");
 
@@ -252,7 +256,7 @@ void test_http_response_client_parsing() {
     // Previously (default copy ctor), copying an HttpResponse left all
     // string_view members pointing at the SOURCE's buffer — a use-after-free.
     {
-        HttpResponse copy = real_res;   // copy ctor
+        HttpResponse copy = real_res; // copy ctor
         check(copy.status_code() == 200,
               "Copied response status code is 200");
         check(copy.status_text() == "OK",
@@ -363,8 +367,14 @@ void test_external_example_server() {
 
             // ── Programmatic assertions (no raw bytes on stdout) ─────────────
             std::cout << "  Raw response: " << res.raw_response().size()
-                      << (" bytes (see " PROJECT_DIR "/tmp/wavex_raw_response.txt)\n");
-            std::cout << "  Parsed summary: (see " PROJECT_DIR "/tmp/wavex_parsed_response.txt)\n";
+                    << (" bytes (see "
+            PROJECT_DIR
+            "/tmp/wavex_raw_response.txt)\n"
+            )
+            ;
+            std::cout << "  Parsed summary: (see "
+            PROJECT_DIR
+            "/tmp/wavex_parsed_response.txt)\n";
 
             const auto &hdrs = res.header_views();
 
@@ -446,6 +456,160 @@ void test_external_response_output() {
     client_ioc.run();
 }
 
+// ─── Test 6: Advanced HttpClient Features (IPv4/IPv6, Queries, Multi-Payload, h2c) ─
+
+void test_http_client_advanced_features() {
+    std::cout << "\n[Test 6] Advanced HttpClient features (IPv4/IPv6, queries, non-JSON payloads, h2c)\n";
+
+    // 1. IPv6 bracketed URL parsing check
+    {
+        const auto parsed_v6 = wavex::url::Url::parse("http://[::1]:8087/api/v6?filter=fast#sec");
+        check(parsed_v6.host == "::1", "IPv6 URL parses host without brackets");
+        check(parsed_v6.port == 8087, "IPv6 URL parses explicit port");
+        check(parsed_v6.query == "filter=fast", "IPv6 URL parses query string");
+    }
+
+    // 2. HTTP/1.1 Server with Queries and Non-JSON routes
+    auto &h1_router = HttpRouter::instance();
+
+    h1_router.get("/api/query_test", [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
+        std::string q;
+        for (const auto &[k, v]: req.query) {
+            if (!q.empty()) q += "&";
+            q += k + "=" + v;
+        }
+        res.status(200).send("Query: " + q);
+        co_return;
+    });
+
+    h1_router.post("/api/text_echo", [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
+        res.status(200).send(std::string("TextEcho: ") + std::string(req.body()));
+        co_return;
+    });
+
+    h1_router.put("/api/put_echo", [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
+        res.status(200).send(std::string("PutEcho: ") + std::string(req.body()));
+        co_return;
+    });
+
+    h1_router.del("/api/del_test", [](const HttpRequest &, HttpResponse &res) -> asio::awaitable<void> {
+        res.status(204).send("");
+        co_return;
+    });
+
+    h1_router.get("/api/ipv4_direct", [](const HttpRequest &, HttpResponse &res) -> asio::awaitable<void> {
+        res.status(200).send("IPv4 Direct OK");
+        co_return;
+    });
+
+    Server h1_server(h1_router, "127.0.0.1", 8087);
+    std::thread h1_thread([&h1_server] { h1_server.run(); });
+
+    // 3. HTTP/2 Server (h2c cleartext)
+    auto &h2_router = wavex::engine::Http2Router::instance();
+    h2_router.get("/api/h2_test", [](const wavex::protos::http::Http2Request &, wavex::protos::http::Http2Response &res) -> asio::awaitable<void> {
+        res.status(200).send("HTTP2 Direct h2c OK");
+        co_return;
+    });
+
+    wavex::server::Http2Server h2_server(h2_router, "127.0.0.1", 8088);
+    std::thread h2_thread([&h2_server] { h2_server.run(); });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    asio::io_context client_ioc;
+
+    bool query_direct_ok = false;
+    bool query_map_ok = false;
+    bool text_post_ok = false;
+    bool put_ok = false;
+    bool del_ok = false;
+    bool ipv4_direct_ok = false;
+    bool templated_h1_ok = false;
+    bool h2c_ok = false;
+    bool h2c_version_ok = false;
+
+    asio::co_spawn(client_ioc, [&]() -> asio::awaitable<void> {
+        // A. Direct query string in URL
+        auto q_res = co_await wavex::client::HttpClient::get("http://127.0.0.1:8087/api/query_test?mode=debug&page=1");
+        if (q_res.status_code() == 200 && q_res.get_body().find("mode=debug") != std::string::npos) {
+            query_direct_ok = true;
+        }
+
+        // B. Structured QueryParams map
+        auto q_map_res = co_await wavex::client::HttpClient::get(
+            "http://127.0.0.1:8087/api/query_test",
+            {{"search", "wavex"}, {"limit", "10"}});
+        if (q_map_res.status_code() == 200 && q_map_res.get_body().find("search=wavex") != std::string::npos) {
+            query_map_ok = true;
+        }
+
+        // C. Non-JSON Plain Text POST
+        auto text_res = co_await wavex::client::HttpClient::post(
+            "http://127.0.0.1:8087/api/text_echo", "custom plain text body", "text/plain");
+        if (text_res.status_code() == 200 && text_res.get_body().find("custom plain text body") != std::string::npos) {
+            text_post_ok = true;
+        }
+
+        // D. PUT request
+        auto put_res = co_await wavex::client::HttpClient::put(
+            "http://127.0.0.1:8087/api/put_echo", "updated put payload");
+        if (put_res.status_code() == 200 && put_res.get_body().find("updated put payload") != std::string::npos) {
+            put_ok = true;
+        }
+
+        // E. DELETE request
+        auto del_res = co_await wavex::client::HttpClient::del("http://127.0.0.1:8087/api/del_test");
+        if (del_res.status_code() == 204) {
+            del_ok = true;
+        }
+
+        // F. Domainless IPv4 direct endpoint
+        auto ip_res = co_await wavex::client::HttpClient::get("http://127.0.0.1:8087/api/ipv4_direct");
+        if (ip_res.status_code() == 200 && ip_res.get_body().find("IPv4 Direct OK") != std::string::npos) {
+            ipv4_direct_ok = true;
+        }
+
+        // G. Templated concrete Http1Response
+        auto h1_typed = co_await wavex::client::HttpClient::get<wavex::protos::http::Http1Response>("http://127.0.0.1:8087/api/ipv4_direct");
+        if (h1_typed.status_code() == 200 && h1_typed.get_body().find("IPv4 Direct OK") != std::string::npos) {
+            templated_h1_ok = true;
+        }
+
+        // H. HTTP/2 Cleartext (h2c) with prior knowledge
+        wavex::client::ClientOptions h2_opts{
+            .version = wavex::client::HttpVersion::Http2
+        };
+        auto h2_res = co_await wavex::client::HttpClient::get("http://127.0.0.1:8088/api/h2_test", h2_opts);
+        if (h2_res.status_code() == 200 && h2_res.get_body().find("HTTP2 Direct h2c OK") != std::string::npos) {
+            h2c_ok = true;
+        }
+        if (h2_res.http_version() == wavex::client::HttpVersion::Http2) {
+            h2c_version_ok = true;
+        }
+
+        co_return;
+    }, asio::detached);
+
+    client_ioc.run();
+
+    check(query_direct_ok, "HttpClient direct URL query parameter preservation");
+    check(query_map_ok, "HttpClient structured QueryParams encoding & transmission");
+    check(text_post_ok, "HttpClient non-JSON plain text POST request");
+    check(put_ok, "HttpClient PUT request with body payload");
+    check(del_ok, "HttpClient DELETE request");
+    check(ipv4_direct_ok, "HttpClient domainless IPv4 direct client request");
+    check(templated_h1_ok, "HttpClient templated get<Http1Response> returns concrete response");
+    check(h2c_ok, "HttpClient h2c cleartext prior-knowledge HTTP/2 request succeeds");
+    check(h2c_version_ok, "HttpClient h2c response reports HttpVersion::Http2");
+
+    h1_server.stop();
+    if (h1_thread.joinable()) h1_thread.join();
+
+    h2_server.stop();
+    if (h2_thread.joinable()) h2_thread.join();
+}
+
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -463,6 +627,7 @@ int main() {
     test_http_client_integration();
     test_external_example_server();
     test_external_response_output();
+    test_http_client_advanced_features();
 
     std::cout << "\n" << tests_passed << "/" << tests_run << " tests passed.\n";
     return tests_passed == tests_run ? 0 : 1;

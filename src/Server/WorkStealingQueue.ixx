@@ -20,7 +20,7 @@ module;
 export module wavex:server_queue;
 
 export namespace wavex::server {
-    using wavex::server::Task;
-    using wavex::server::LocalQueue;
-    using wavex::server::InjectorQueue;
+    using server::Task;
+    using server::LocalQueue;
+    using server::InjectorQueue;
 }

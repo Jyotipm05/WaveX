@@ -17,7 +17,6 @@
 
 #include <string>
 #include <string_view>
-#include <optional>
 #include <unordered_map>
 #include <utility>
 
@@ -35,20 +34,20 @@ namespace wavex::base {
 
     public:
         /// The request path/target, e.g. "/user/123"
-        template <typename Self>
-        [[nodiscard]] decltype(auto) path(this Self&& self) {
+        template<typename Self>
+        [[nodiscard]] decltype(auto) path(this Self &&self) {
             return std::forward<Self>(self).path_impl();
         }
 
         /// Retrieve a header by name (case-insensitive for HTTP)
-        template <typename Self>
-        [[nodiscard]] decltype(auto) header(this Self&& self, const std::string_view name) {
+        template<typename Self>
+        [[nodiscard]] decltype(auto) header(this Self &&self, const std::string_view name) {
             return std::forward<Self>(self).header_impl(name);
         }
 
         /// The request body
-        template <typename Self>
-        [[nodiscard]] decltype(auto) body(this Self&& self) {
+        template<typename Self>
+        [[nodiscard]] decltype(auto) body(this Self &&self) {
             return std::forward<Self>(self).body_impl();
         }
 

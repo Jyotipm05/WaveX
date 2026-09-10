@@ -29,13 +29,13 @@ namespace wavex::protos::http {
      * @brief HTTP request parameterized on Codec — supports both server-side parsing and client-side creation.
      * @tparam Codec Protocol codec defining parser, encoder, decoder, request, and response types.
      */
-    template <typename Codec = wavex::protos::http::http1codec>
+    template<typename Codec = http1codec>
     class HttpRequest final : public base::Request {
     public:
         using codec_type = Codec;
-        using parser_type = typename Codec::parser;
-        using encoder_type = typename Codec::encoder;
-        using request_type = typename Codec::request;
+        using parser_type = Codec::parser;
+        using encoder_type = Codec::encoder;
+        using request_type = Codec::request;
 
         using base::Request::query;
         using base::Request::params;
@@ -56,12 +56,48 @@ namespace wavex::protos::http {
 
         /// Parse the owned buffer (server side). Returns true on success.
         bool parse() {
-            size_t consumed = 0;
-            if (const auto result = parser_type::parse_request(buffer_, parsed_, consumed);
+            consumed_ = 0;
+            if (const auto result = parser_type::parse_request(buffer_, parsed_, consumed_);
                 result != parser_type::result::success)
                 return false;
 
             extract_path_query(parsed_.target);
+            return true;
+        }
+
+        /**
+         * @brief Parse directly from an external stream buffer view without copying.
+         * @param stream_buf Stream buffer view containing wire data.
+         * @return parser_type::result (success, incomplete, error).
+         */
+        parser_type::result parse_stream(const std::string_view stream_buf) {
+            consumed_ = 0;
+            const auto result = parser_type::parse_request(stream_buf, parsed_, consumed_);
+            if (result == parser_type::result::success) {
+                extract_path_query(parsed_.target);
+            }
+            return result;
+        }
+
+        /// Returns number of bytes consumed by the parser for this request
+        [[nodiscard]] size_t consumed_bytes() const noexcept { return consumed_; }
+
+        /// Checks if this HTTP request indicates the connection should stay active (Keep-Alive)
+        [[nodiscard]] bool should_keep_alive() const noexcept {
+            const auto conn = parsed_.get_header("Connection");
+            if (parsed_.version_major == 1 && parsed_.version_minor == 1) {
+                // In HTTP/1.1, connections are persistent by default unless "close" is specified.
+                if (conn && detail::is_equal(*conn, "close")) {
+                    return false;
+                }
+                return true;
+            } else if (parsed_.version_major == 1 && parsed_.version_minor == 0) {
+                // In HTTP/1.0, connections close by default unless "keep-alive" is specified.
+                if (conn && detail::is_equal(*conn, "keep-alive")) {
+                    return true;
+                }
+                return false;
+            }
             return true;
         }
 
@@ -88,6 +124,26 @@ namespace wavex::protos::http {
             body_owned_ = std::string(body);
             parsed_.body = body_owned_;
             return *this;
+        }
+
+        // ── Stream ID for HTTP/2 & Multiplexed Protocols ────────────────────
+        [[nodiscard]] uint32_t stream_id() const noexcept {
+            if constexpr (requires { parsed_.stream_id; }) {
+                return parsed_.stream_id;
+            } else {
+                return 0;
+            }
+        }
+
+        HttpRequest &stream_id(const uint32_t id) noexcept {
+            if constexpr (requires { parsed_.stream_id; }) {
+                parsed_.stream_id = id;
+            }
+            return *this;
+        }
+
+        HttpRequest &set_stream_id(const uint32_t id) noexcept {
+            return stream_id(id);
         }
 
         // ── Accessors (CRTP Implementations) ────────────────────────────────
@@ -155,13 +211,14 @@ namespace wavex::protos::http {
             }
         }
 
-        std::string buffer_;              ///< owned receive buffer (server)
-        request_type parsed_;             ///< zero-copy views
-        std::string path_;               ///< extracted path
-        std::string raw_target_owned_;   ///< owned full target string (client)
-        std::string path_target_owned_;  ///< owned path + query string (client)
-        std::string body_owned_;         ///< owned body string (client)
-        std::vector<std::pair<std::string, std::string>> headers_owned_; ///< owned headers (client)
+        std::string buffer_; ///< owned receive buffer (server)
+        size_t consumed_{0}; ///< byte count consumed by parser
+        request_type parsed_; ///< zero-copy views
+        std::string path_; ///< extracted path
+        std::string raw_target_owned_; ///< owned full target string (client)
+        std::string path_target_owned_; ///< owned path + query string (client)
+        std::string body_owned_; ///< owned body string (client)
+        std::vector<std::pair<std::string, std::string> > headers_owned_; ///< owned headers (client)
     };
 
     /// Concrete default HTTP/1.x request type aliases

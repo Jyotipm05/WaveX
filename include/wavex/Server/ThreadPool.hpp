@@ -46,7 +46,6 @@
 #include <wavex/Server/WorkStealingQueue.hpp>
 
 namespace wavex::server {
-
     // ─────────────────────────────────────────────────────────────────────────
     // ThreadPoolConfig
     // ─────────────────────────────────────────────────────────────────────────
@@ -102,7 +101,7 @@ namespace wavex::server {
     struct WorkerNode {
         std::size_t id = 0;
         std::shared_ptr<asio::io_context> io_ctx;
-        std::unique_ptr<LocalQueue> queue;   ///< Bounded 256-slot lock-free ring buffer
+        std::unique_ptr<LocalQueue> queue; ///< Bounded 256-slot lock-free ring buffer
         std::atomic<bool> is_retiring{false};
         std::atomic<bool> is_busy{false};
         std::atomic<bool> stop_requested{false};
@@ -111,7 +110,8 @@ namespace wavex::server {
         explicit WorkerNode(const std::size_t worker_id)
             : id(worker_id),
               io_ctx(std::make_shared<asio::io_context>()),
-              queue(std::make_unique<LocalQueue>()) {}
+              queue(std::make_unique<LocalQueue>()) {
+        }
     };
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -137,6 +137,7 @@ namespace wavex::server {
         }
 
         ThreadPool(const ThreadPool &) = delete;
+
         ThreadPool &operator=(const ThreadPool &) = delete;
 
         /**
@@ -162,7 +163,7 @@ namespace wavex::server {
         /**
          * @brief Spawn an Asio coroutine onto one of the worker io_contexts.
          */
-        template <typename Coro>
+        template<typename Coro>
         void spawn_coroutine(Coro coro) {
             std::lock_guard<std::mutex> lock(workers_mutex_);
             if (workers_.empty()) return;
@@ -190,8 +191,8 @@ namespace wavex::server {
     private:
         ThreadPoolConfig &config_;
         mutable std::mutex workers_mutex_;
-        std::vector<std::shared_ptr<WorkerNode>> workers_;
-        InjectorQueue injector_;          ///< Global overflow & external submission queue
+        std::vector<std::shared_ptr<WorkerNode> > workers_;
+        InjectorQueue injector_; ///< Global overflow & external submission queue
         std::atomic<bool> pool_stopping_{false};
         std::thread monitor_thread_;
         std::condition_variable cv_monitor_;
@@ -212,8 +213,7 @@ namespace wavex::server {
             monitor_thread_ = std::thread([this] { monitor_loop(); });
         }
 
-        void stop_pool() {
-            {
+        void stop_pool() { {
                 std::lock_guard<std::mutex> lock(monitor_mutex_);
                 pool_stopping_ = true;
             }
@@ -221,24 +221,22 @@ namespace wavex::server {
             if (monitor_thread_.joinable())
                 monitor_thread_.join();
 
-            std::vector<std::shared_ptr<WorkerNode>> to_join;
-            {
+            std::vector<std::shared_ptr<WorkerNode> > to_join; {
                 std::lock_guard<std::mutex> lock(workers_mutex_);
-                for (const auto &w : workers_) {
+                for (const auto &w: workers_) {
                     w->stop_requested = true;
                     if (w->io_ctx) w->io_ctx->stop();
                 }
                 to_join = std::move(workers_);
             }
 
-            for (auto &w : to_join) {
+            for (auto &w: to_join) {
                 if (w->thread.joinable())
                     w->thread.join();
             }
         }
 
-        void notify_monitor() {
-            {
+        void notify_monitor() { {
                 std::lock_guard<std::mutex> lock(monitor_mutex_);
                 monitor_signal_ = true;
             }
@@ -259,7 +257,6 @@ namespace wavex::server {
             std::mt19937 rng{std::random_device{}()};
 
             while (!w->stop_requested && !w->is_retiring) {
-
                 // ── 1. Pop from own LocalQueue (LIFO, cache-local) ──────────
                 if (auto task = w->queue->pop()) {
                     w->is_busy = true;
@@ -303,12 +300,12 @@ namespace wavex::server {
                 // ── 5. Yield — prevent tight CPU spin when fully idle ────────
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
-                next_iteration:;
+            next_iteration:;
             }
 
             // On thread exit (retire or stop), owner thread drains its local ring into global InjectorQueue
             auto remaining = w->queue->drain_all();
-            for (auto &task : remaining) {
+            for (auto &task: remaining) {
                 injector_.push(std::move(task));
             }
         }
@@ -330,28 +327,27 @@ namespace wavex::server {
         }
 
         void check_and_scale() {
-            std::shared_ptr<WorkerNode> retiring_worker = nullptr;
-
-            {
+            std::shared_ptr<WorkerNode> retiring_worker = nullptr; {
                 std::lock_guard<std::mutex> lock(workers_mutex_);
                 if (workers_.empty()) return;
 
                 std::size_t total_queue_depth = injector_.size();
                 std::size_t active_busy = 0;
 
-                for (const auto &w : workers_) {
+                for (const auto &w: workers_) {
                     total_queue_depth += w->queue->size();
                     if (w->is_busy) ++active_busy;
                 }
 
                 const std::size_t aggregate_load = total_queue_depth + active_busy;
-                const std::size_t current_count  = workers_.size();
+                const std::size_t current_count = workers_.size();
 
                 // ── 1. Scale UP (Proportional Step Scaling) ──────────────────
                 if (current_count < config_.max_workers) {
                     const std::size_t tidx = current_count - 1;
                     const std::size_t high_thresh = (tidx < config_.upper_thresholds.size())
-                        ? config_.upper_thresholds[tidx] : 50;
+                                                        ? config_.upper_thresholds[tidx]
+                                                        : 50;
 
                     if (aggregate_load > high_thresh) {
                         scale_down_cooldown_counter_ = 0;
@@ -361,7 +357,8 @@ namespace wavex::server {
                         for (std::size_t k = current_count + 1; k <= config_.max_workers; ++k) {
                             const std::size_t k_idx = k - 1;
                             const std::size_t k_thresh = (k_idx < config_.upper_thresholds.size())
-                                ? config_.upper_thresholds[k_idx] : (50 * k_idx);
+                                                             ? config_.upper_thresholds[k_idx]
+                                                             : (50 * k_idx);
                             if (aggregate_load > k_thresh) {
                                 target_workers = k;
                             } else {
@@ -369,7 +366,9 @@ namespace wavex::server {
                             }
                         }
 
-                        const std::size_t needed = (target_workers > current_count) ? (target_workers - current_count) : 1;
+                        const std::size_t needed = (target_workers > current_count)
+                                                       ? (target_workers - current_count)
+                                                       : 1;
                         const std::size_t divider = (config_.scale_up_divider > 0) ? config_.scale_up_divider : 1;
                         const std::size_t step = std::max<std::size_t>(1, needed / divider);
                         const std::size_t to_add = std::min(step, config_.max_workers - current_count);
@@ -385,7 +384,8 @@ namespace wavex::server {
                 if (current_count > config_.min_workers) {
                     const std::size_t tidx = current_count - 2;
                     const std::size_t low_thresh = (tidx < config_.lower_thresholds.size())
-                        ? config_.lower_thresholds[tidx] : 5;
+                                                       ? config_.lower_thresholds[tidx]
+                                                       : 5;
 
                     if (aggregate_load < low_thresh) {
                         ++scale_down_cooldown_counter_;
@@ -415,5 +415,4 @@ namespace wavex::server {
                 retiring->thread.join();
         }
     };
-
 } // namespace wavex::server
