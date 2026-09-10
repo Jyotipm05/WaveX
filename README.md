@@ -20,7 +20,7 @@ WaveX draws inspiration from **Rust's Actix Web** (hybrid radix-tree routing), *
 - **⚡ CRTP Zero-Vtable Architecture** — Static compile-time polymorphism (`Request<Derived>`, `Response<Derived>`) eliminating virtual function pointers (`vptr`), saving memory and enabling zero-overhead direct dispatch.
 - **🚀 Express.js-Style Linear Pipeline** — Iterative, non-recursive `run_chain()` middleware runner with immediate response dispatch (`res.send()` / `res.json()`), type-erased write sinks for transport-agnostic streaming (`start_chunked()`, `send_file()`), and short-circuit commitment tracking.
 - **🌳 Hybrid Radix-Tree Router** — High-performance radix-tree supporting static segments, dynamic parameters (`:id`), `{id:[0-9]+}` RE2 regex constraints, catch-all wildcards (`*filepath`), and RFC 9110 HTTP methods including `QUERY`.
-- **🌐 Async Coroutine HTTP Client** — Modern, coroutine-native HTTP/1.1 client (`HttpClient`) for non-blocking outbound requests (`get`, `post`, `send`) with connection reuse and optional TLS 1.3 encryption *(HTTP/2 client support to be released soon)*.
+- **🌐 Dual-Protocol Coroutine HTTP Client** — Asynchronous, coroutine-native client (`HttpClient`) supporting both HTTP/1.1 & HTTP/2 (RFC 7540), plain TCP and TLS 1.3 OpenSSL encryption, ALPN auto-negotiation (`h2`/`http/1.1`), prior-knowledge `h2c`, domainless IPv4/IPv6 direct endpoints, structured query parameter builders, and multi-payload posting (plain text, form-urlencoded, raw binary, and JSON).
 - **📦 Chunked Transfer-Encoding** — Full streaming support for HTTP/1.1 chunked request and response encoding & decoding.
 - **🗂 MIME Type Detection Engine** — Fast, built-in file extension to MIME content-type resolver (`MimeTypes.hpp`) supporting over 50+ common web media types.
 - **🛠 Modern CLI Engine** — High-performance CLI argument parser (`wavex::cli::CliParser`) supporting flags (`--verbose`, `-v`), key-value options (`--host`, `-p`), positional arguments, typed getters (`get_int`, `get_bool`), and automatic `--help` generation.
@@ -259,29 +259,43 @@ int main() {
 }
 ```
 
-### 7. Async HTTP Client
+### 7. Dual-Protocol Coroutine HTTP Client (HTTP/1.1 & HTTP/2)
 
-> [!NOTE]
-> `HttpClient` currently supports **HTTP/1.1** (with TLS 1.3). **HTTP/2** client support is planned for release soon.
+WaveX provides a protocol-agnostic, coroutine-native HTTP client (`HttpClient`) supporting ALPN auto-negotiation, cleartext `h2c`, TLS 1.3 `h2`, domainless IPv4/IPv6 endpoints, query parameter builders, and multi-payload posting:
 
 ```cpp
 #include <iostream>
 #include <asio.hpp>
-#include <wavex/Client/HttpClient.hpp>
+#include <wavex/wavex.hpp>
 
 using namespace wavex::client;
 
-asio::awaitable<void> fetch_data(asio::io_context &ioc) {
-    HttpClient client(ioc);
-    
-    // GET request (HTTP/1.1)
-    auto response = co_await client.get("http://httpbin.org/get");
-    std::cout << "Status: " << response.status_code() << "\n";
-    std::cout << "Body: " << response.body() << "\n";
+asio::awaitable<void> run_client_examples() {
+    // 1. GET with automatic protocol negotiation (ALPN h2 / http/1.1)
+    ClientResponse res = co_await HttpClient::get("https://api.github.com/zen");
+    std::cout << "Status: " << res.status_code() << "\n";
+    std::cout << "Protocol: " << (res.http_version() == HttpVersion::Http2 ? "HTTP/2" : "HTTP/1.1") << "\n";
+    std::cout << "Body: " << res.body() << "\n";
 
-    // POST request with JSON
-    auto post_res = co_await client.post("http://httpbin.org/post", "{\"framework\":\"wavex\"}", "application/json");
-    std::cout << "POST Response: " << post_res.body() << "\n";
+    // 2. Structured query parameters & non-JSON plain text POST
+    auto search_res = co_await HttpClient::get("http://127.0.0.1:8080/search", {{"q", "wavex"}, {"page", "1"}});
+
+    auto text_res = co_await HttpClient::post("http://127.0.0.1:8080/log", "Worker pool scaled to 8 threads", "text/plain");
+
+    // 3. JSON POST with automatic serialization
+    nlohmann::json payload = {{"service", "auth"}, {"status", "healthy"}};
+    auto json_res = co_await HttpClient::post("http://127.0.0.1:8080/api/status", payload);
+
+    // 4. Domainless IPv6 Endpoint
+    auto ipv6_res = co_await HttpClient::get("http://[::1]:8080/v1/health");
+
+    // 5. High-Performance Direct HTTP/2 (Prior Knowledge h2c)
+    ClientOptions h2c_opts{ .version = HttpVersion::Http2 };
+    auto rpc_res = co_await HttpClient::get("http://127.0.0.1:8082/rpc/status", h2c_opts);
+
+    // 6. Templated Concrete Response (Backward Compatible)
+    wavex::protos::http::Http1Response h1_res = 
+        co_await HttpClient::get<wavex::protos::http::Http1Response>("http://127.0.0.1:8080/api");
 }
 ```
 
@@ -625,7 +639,7 @@ flowchart TD
 | `protos/http/http2codec`   | ✅ Complete | Full RFC 7540 binary framing, RFC 7541 HPACK encoder/decoder, stream multiplexing & SETTINGS negotiation                  |
 | `protos/http/HttpRequest`  | ✅ Complete | HTTP/1.1 (`Http1Request`) & HTTP/2 (`Http2Request`) with zero-copy stream parsing & keep-alive detection                    |
 | `protos/http/HttpResponse` | ✅ Complete | HTTP/1.1 (`Http1Response`) & HTTP/2 (`Http2Response`) with injected write sink for streaming, commitment & fluent builder API |
-| `Client/HttpClient`        | ✅ Complete | Async coroutine HTTP/1.1 client (`get`, `post`, `send`) — *HTTP/2 client support to be released soon*                     |
+| `Client/HttpClient`        | ✅ Complete | Coroutine HTTP/1.1 & HTTP/2 client with plain/TLS 1.3, ALPN auto-negotiation, domainless IPv4/IPv6, query builder & multi-payload posting |
 | `Cli/Cli`                  | ✅ Complete | Type-safe CLI argument parser (`wavex::cli::CliParser`), flag validator, and option engine                                |
 
 ---

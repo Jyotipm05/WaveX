@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file test_client.cpp
  * @brief Unit & integration tests for HttpClient, HttpRequest (client), and HttpResponse (client).
  */
@@ -90,7 +90,7 @@ namespace {
      * @brief Write parsed response summary to a file.
      */
     void dump_parsed_to_file(const std::string &path,
-                             const HttpResponse &res) {
+                             const wavex::client::ClientResponse &res) {
         std::ofstream ofs(path);
         if (!ofs) return;
         ofs << "Status: " << res.status_code() << " " << res.status_text() << "\n";
@@ -456,6 +456,160 @@ void test_external_response_output() {
     client_ioc.run();
 }
 
+// ─── Test 6: Advanced HttpClient Features (IPv4/IPv6, Queries, Multi-Payload, h2c) ─
+
+void test_http_client_advanced_features() {
+    std::cout << "\n[Test 6] Advanced HttpClient features (IPv4/IPv6, queries, non-JSON payloads, h2c)\n";
+
+    // 1. IPv6 bracketed URL parsing check
+    {
+        const auto parsed_v6 = wavex::url::Url::parse("http://[::1]:8087/api/v6?filter=fast#sec");
+        check(parsed_v6.host == "::1", "IPv6 URL parses host without brackets");
+        check(parsed_v6.port == 8087, "IPv6 URL parses explicit port");
+        check(parsed_v6.query == "filter=fast", "IPv6 URL parses query string");
+    }
+
+    // 2. HTTP/1.1 Server with Queries and Non-JSON routes
+    auto &h1_router = HttpRouter::instance();
+
+    h1_router.get("/api/query_test", [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
+        std::string q;
+        for (const auto &[k, v]: req.query) {
+            if (!q.empty()) q += "&";
+            q += k + "=" + v;
+        }
+        res.status(200).send("Query: " + q);
+        co_return;
+    });
+
+    h1_router.post("/api/text_echo", [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
+        res.status(200).send(std::string("TextEcho: ") + std::string(req.body()));
+        co_return;
+    });
+
+    h1_router.put("/api/put_echo", [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
+        res.status(200).send(std::string("PutEcho: ") + std::string(req.body()));
+        co_return;
+    });
+
+    h1_router.del("/api/del_test", [](const HttpRequest &, HttpResponse &res) -> asio::awaitable<void> {
+        res.status(204).send("");
+        co_return;
+    });
+
+    h1_router.get("/api/ipv4_direct", [](const HttpRequest &, HttpResponse &res) -> asio::awaitable<void> {
+        res.status(200).send("IPv4 Direct OK");
+        co_return;
+    });
+
+    Server h1_server(h1_router, "127.0.0.1", 8087);
+    std::thread h1_thread([&h1_server] { h1_server.run(); });
+
+    // 3. HTTP/2 Server (h2c cleartext)
+    auto &h2_router = wavex::engine::Http2Router::instance();
+    h2_router.get("/api/h2_test", [](const wavex::protos::http::Http2Request &, wavex::protos::http::Http2Response &res) -> asio::awaitable<void> {
+        res.status(200).send("HTTP2 Direct h2c OK");
+        co_return;
+    });
+
+    wavex::server::Http2Server h2_server(h2_router, "127.0.0.1", 8088);
+    std::thread h2_thread([&h2_server] { h2_server.run(); });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    asio::io_context client_ioc;
+
+    bool query_direct_ok = false;
+    bool query_map_ok = false;
+    bool text_post_ok = false;
+    bool put_ok = false;
+    bool del_ok = false;
+    bool ipv4_direct_ok = false;
+    bool templated_h1_ok = false;
+    bool h2c_ok = false;
+    bool h2c_version_ok = false;
+
+    asio::co_spawn(client_ioc, [&]() -> asio::awaitable<void> {
+        // A. Direct query string in URL
+        auto q_res = co_await wavex::client::HttpClient::get("http://127.0.0.1:8087/api/query_test?mode=debug&page=1");
+        if (q_res.status_code() == 200 && q_res.get_body().find("mode=debug") != std::string::npos) {
+            query_direct_ok = true;
+        }
+
+        // B. Structured QueryParams map
+        auto q_map_res = co_await wavex::client::HttpClient::get(
+            "http://127.0.0.1:8087/api/query_test",
+            {{"search", "wavex"}, {"limit", "10"}});
+        if (q_map_res.status_code() == 200 && q_map_res.get_body().find("search=wavex") != std::string::npos) {
+            query_map_ok = true;
+        }
+
+        // C. Non-JSON Plain Text POST
+        auto text_res = co_await wavex::client::HttpClient::post(
+            "http://127.0.0.1:8087/api/text_echo", "custom plain text body", "text/plain");
+        if (text_res.status_code() == 200 && text_res.get_body().find("custom plain text body") != std::string::npos) {
+            text_post_ok = true;
+        }
+
+        // D. PUT request
+        auto put_res = co_await wavex::client::HttpClient::put(
+            "http://127.0.0.1:8087/api/put_echo", "updated put payload");
+        if (put_res.status_code() == 200 && put_res.get_body().find("updated put payload") != std::string::npos) {
+            put_ok = true;
+        }
+
+        // E. DELETE request
+        auto del_res = co_await wavex::client::HttpClient::del("http://127.0.0.1:8087/api/del_test");
+        if (del_res.status_code() == 204) {
+            del_ok = true;
+        }
+
+        // F. Domainless IPv4 direct endpoint
+        auto ip_res = co_await wavex::client::HttpClient::get("http://127.0.0.1:8087/api/ipv4_direct");
+        if (ip_res.status_code() == 200 && ip_res.get_body().find("IPv4 Direct OK") != std::string::npos) {
+            ipv4_direct_ok = true;
+        }
+
+        // G. Templated concrete Http1Response
+        auto h1_typed = co_await wavex::client::HttpClient::get<wavex::protos::http::Http1Response>("http://127.0.0.1:8087/api/ipv4_direct");
+        if (h1_typed.status_code() == 200 && h1_typed.get_body().find("IPv4 Direct OK") != std::string::npos) {
+            templated_h1_ok = true;
+        }
+
+        // H. HTTP/2 Cleartext (h2c) with prior knowledge
+        wavex::client::ClientOptions h2_opts{
+            .version = wavex::client::HttpVersion::Http2
+        };
+        auto h2_res = co_await wavex::client::HttpClient::get("http://127.0.0.1:8088/api/h2_test", h2_opts);
+        if (h2_res.status_code() == 200 && h2_res.get_body().find("HTTP2 Direct h2c OK") != std::string::npos) {
+            h2c_ok = true;
+        }
+        if (h2_res.http_version() == wavex::client::HttpVersion::Http2) {
+            h2c_version_ok = true;
+        }
+
+        co_return;
+    }, asio::detached);
+
+    client_ioc.run();
+
+    check(query_direct_ok, "HttpClient direct URL query parameter preservation");
+    check(query_map_ok, "HttpClient structured QueryParams encoding & transmission");
+    check(text_post_ok, "HttpClient non-JSON plain text POST request");
+    check(put_ok, "HttpClient PUT request with body payload");
+    check(del_ok, "HttpClient DELETE request");
+    check(ipv4_direct_ok, "HttpClient domainless IPv4 direct client request");
+    check(templated_h1_ok, "HttpClient templated get<Http1Response> returns concrete response");
+    check(h2c_ok, "HttpClient h2c cleartext prior-knowledge HTTP/2 request succeeds");
+    check(h2c_version_ok, "HttpClient h2c response reports HttpVersion::Http2");
+
+    h1_server.stop();
+    if (h1_thread.joinable()) h1_thread.join();
+
+    h2_server.stop();
+    if (h2_thread.joinable()) h2_thread.join();
+}
+
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -473,6 +627,7 @@ int main() {
     test_http_client_integration();
     test_external_example_server();
     test_external_response_output();
+    test_http_client_advanced_features();
 
     std::cout << "\n" << tests_passed << "/" << tests_run << " tests passed.\n";
     return tests_passed == tests_run ? 0 : 1;
