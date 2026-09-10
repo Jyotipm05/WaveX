@@ -22,15 +22,17 @@ This skill provides essential domain context for developing, extending, and debu
    - `HttpRouter.hpp`: HTTP-specific convenience wrapper (`get`, `post`, `put`, `del`, `patch`, `query`).
 
 3. **Server Subsystem (`include/wavex/Server/`)**:
-   - `Server.hpp`: Coroutine TCP & TLS 1.3 server with persistent stay-active loop and Asio steady timer timeouts.
+   - `Server.hpp`: Coroutine TCP & TLS 1.3 server (`Server<Codec, RouterType>`), completely protocol-agnostic. Employs the 3-Seam Architecture (Transport Seam via `handle_connection<Stream>`, Codec Seam via `parse_stream`/`serialize`, and Policy Seam via `protocol_traits`).
    - `TlsConfig.hpp`: TLS 1.3 configuration struct (`cert_file`, `key_file`, `key_password`, `dh_file`, `force_tls13`).
    - `ThreadPool.hpp`: Adaptive Tokio-style work-stealing thread pool with proportional hysteresis scaling.
    - `WorkStealingQueue.hpp`: Per-worker 256-slot ring buffer (`LocalQueue`) and global MPMC overflow queue (`InjectorQueue`).
 
-4. **Protocol Codecs (`include/wavex/protos/http/`)**:
-   - `http1codec.hpp`: Zero-copy HTTP/1.x parser, encoder, chunked decoder, and status text mapping.
-   - `HttpRequest.hpp`: Concrete request parsing from socket streams (`parse_stream`, `consumed_bytes`).
-   - `HttpResponse.hpp`: Concrete response with socket writing, chunked streaming, and keep-alive headers.
+4. **Protocol Codecs & Traits (`include/wavex/protos/`)**:
+   - `ProtocolTraits.hpp`: Protocol session policy seam (`protocol_traits<Codec>`) answering opening prefaces, persistence, response preparation, and ALPN registration.
+   - `http/http1codec.hpp`: Zero-copy HTTP/1.x parser, encoder, chunked decoder, and status text mapping.
+   - `http/http2codec.hpp`: RFC 7540 binary framing parser, encoder, and RFC 7541 HPACK compression engine.
+   - `http/HttpRequest.hpp`: Concrete request parsing from socket streams (`parse_stream`, `consumed_bytes`).
+   - `http/HttpResponse.hpp`: Concrete response with injected write sink for streaming (`write_chunk`, `send_file`), committed state (`is_sent`), and headers sent state (`is_headers_sent`).
 
 ## Common Pitfalls & Gotchas
 
@@ -45,3 +47,11 @@ This skill provides essential domain context for developing, extending, and debu
 
 4. **C++20 Module Export Mirroring**:
    - WaveX provides dual distribution (headers and modules). Any header change must be checked against `src/<Subsystem>/<Component>.ixx`.
+
+5. **Server Must Not Name Specific Codecs**:
+   - `Server.hpp` must remain protocol-agnostic. Never branch on `if constexpr (is_http2)` in `Server.hpp`; all protocol connection behavior must query `protocol_traits<Codec>`.
+
+6. **Future Protocols (GraphQL, HTTP/3 QUIC, WebSockets)**:
+   - Refer to `.agents/rules/future-protocols-architecture.md` for architectural blueprints.
+   - Do NOT implement these protocols right now; they are future additions. Maintain the 3-seam architecture so they can be integrated seamlessly when scheduled.
+

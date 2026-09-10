@@ -23,6 +23,7 @@
 #include <fstream>
 #include <filesystem>
 #include <system_error>
+#include <functional>
 #include <asio/ip/tcp.hpp>
 #include <asio/as_tuple.hpp>
 #include <asio/write.hpp>
@@ -92,6 +93,18 @@ namespace wavex::protos::http {
             return stream_id(id);
         }
 
+        using write_sink_fn = std::function<asio::awaitable<std::expected<void, std::error_code> >(
+            std::string_view, std::chrono::milliseconds)>;
+
+        /// Attach a type-erased write sink for stream output (chunked transfers & file streaming)
+        void set_write_sink(write_sink_fn sink) { write_sink_ = std::move(sink); }
+
+        /// Check if a write sink is attached
+        [[nodiscard]] bool has_write_sink() const noexcept { return static_cast<bool>(write_sink_); }
+
+        /// Check if headers or chunked stream have already been flushed to the wire
+        [[nodiscard]] bool is_headers_sent() const noexcept { return is_headers_sent_; }
+
         HttpResponse() = default;
 
         explicit HttpResponse(asio::ip::tcp::socket *socket) : socket_(socket) {
@@ -106,10 +119,12 @@ namespace wavex::protos::http {
         HttpResponse(const HttpResponse &other)
             : base::Response(other),
               socket_(other.socket_),
+              write_sink_(other.write_sink_),
               stream_id_(other.stream_id_),
               buffer_owner_(other.buffer_owner_),
               dechunked_body_storage_(other.dechunked_body_storage_),
-              parsed_(other.parsed_) {
+              parsed_(other.parsed_),
+              is_headers_sent_(other.is_headers_sent_) {
             const auto buf_base = other.buffer_owner_.data();
             const auto buf_len = other.buffer_owner_.size();
             const auto my_base = buffer_owner_.data();
@@ -216,16 +231,12 @@ namespace wavex::protos::http {
             return true;
         }
 
-        /// Immediate write serialized HTTP response to the socket if bound
+        /// Mark response as committed with body payload (Server owns network write)
         HttpResponse &send_impl(const std::string_view body) {
             if (is_sent_) return *this;
             body_ = std::string(body);
             body_view_ = body_;
             is_sent_ = true;
-            if (socket_) {
-                std::string serialized = serialize_impl();
-                asio::write(*socket_, asio::buffer(serialized));
-            }
             return *this;
         }
 
@@ -440,6 +451,9 @@ namespace wavex::protos::http {
         [[nodiscard]] asio::awaitable<std::expected<void, std::error_code> > async_write_with_timeout(
             const std::string_view data,
             const std::chrono::milliseconds timeout) const {
+            if (write_sink_) {
+                co_return co_await write_sink_(data, timeout);
+            }
             if (!socket_ || !socket_->is_open()) {
                 co_return std::unexpected(std::make_error_code(std::errc::not_connected));
             }
@@ -503,6 +517,7 @@ namespace wavex::protos::http {
         }
 
         asio::ip::tcp::socket *socket_ = nullptr;
+        write_sink_fn write_sink_{nullptr};
         uint32_t stream_id_{1};
         std::string_view status_text_{"OK"};
         std::string buffer_owner_;

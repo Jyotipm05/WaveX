@@ -207,6 +207,7 @@ target_sources(wavex
         include/wavex/Base/MimeTypes.hpp
         include/wavex/Engine/Router.hpp
         include/wavex/Engine/HttpRouter.hpp
+        include/wavex/protos/ProtocolTraits.hpp
         include/wavex/protos/http/Methods.hpp
         include/wavex/protos/http/http.hpp
         include/wavex/protos/http/http1codec.hpp

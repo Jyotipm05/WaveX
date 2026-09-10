@@ -19,6 +19,7 @@
 #include <wavex/Base/MimeTypes.hpp>
 #include <wavex/protos/protos.hpp>
 #include <wavex/protos/http/http.hpp>
+#include <wavex/protos/ProtocolTraits.hpp>
 #include <wavex/Engine/Router.hpp>
 #include <wavex/Engine/HttpRouter.hpp>
 #include <wavex/Server/Server.hpp>

@@ -15,10 +15,10 @@ WaveX draws inspiration from **Rust's Actix Web** (hybrid radix-tree routing), *
 
 - **⚡ Coroutine-Native Engine** — Async server handlers and client requests written with asio C++23 coroutines (`co_await`, `asio::awaitable<void>`), zero callback boilerplate.
 - **⚡ Native HTTP/2 (RFC 7540) & HPACK (RFC 7541)** — Full binary framing engine (`http2codec`), connection preface validation (`PRI * HTTP/2.0...`), client/server `SETTINGS` negotiation & ACK handshake, server-side ALPN selection (`h2` over TLS 1.3), stream multiplexing, and HPACK static/dynamic table compression.
-- **⚡ Dual-Protocol Server Architecture** — Extensible `Server<Codec, Router>` template providing dedicated first-class `Http1Server` and `Http2Server` specializations with zero runtime protocol switching overhead.
+- **⚡ 3-Seam Decoupled Server Architecture** — Completely protocol-agnostic `Server<Codec, Router>` template decoupled across three distinct seams: Transport Seam (`AsyncStream` over Plain TCP, TLS 1.3, or future QUIC), Codec Seam (`parse_stream`/`serialize`), and Policy Seam (`wavex::protos::protocol_traits<Codec>`) governing prefaces, keep-alive, response preparation, and ALPN negotiation.
 - **⚡ C++23 "Deducing This" Static Pipelines** — Zero-overhead static dispatch mixin (`wavex::Chainable`) enabling compile-time tuple pipelines (`wavex::StaticChain`), `make_chain` factory, and semi-static runtime toggles (`ConditionalChainable`), eliminating vtable and dynamic `std::function` heap allocation overhead.
 - **⚡ CRTP Zero-Vtable Architecture** — Static compile-time polymorphism (`Request<Derived>`, `Response<Derived>`) eliminating virtual function pointers (`vptr`), saving memory and enabling zero-overhead direct dispatch.
-- **🚀 Express.js-Style Linear Pipeline** — Iterative, non-recursive `run_chain()` middleware runner with immediate response dispatch (`res.send()` / `res.json()`) and zero-allocation socket pointer dispatch (`HttpResponse res(&socket)`).
+- **🚀 Express.js-Style Linear Pipeline** — Iterative, non-recursive `run_chain()` middleware runner with immediate response dispatch (`res.send()` / `res.json()`), type-erased write sinks for transport-agnostic streaming (`start_chunked()`, `send_file()`), and short-circuit commitment tracking.
 - **🌳 Hybrid Radix-Tree Router** — High-performance radix-tree supporting static segments, dynamic parameters (`:id`), `{id:[0-9]+}` RE2 regex constraints, catch-all wildcards (`*filepath`), and RFC 9110 HTTP methods including `QUERY`.
 - **🌐 Async Coroutine HTTP Client** — Modern, coroutine-native HTTP/1.1 client (`HttpClient`) for non-blocking outbound requests (`get`, `post`, `send`) with connection reuse and optional TLS 1.3 encryption *(HTTP/2 client support to be released soon)*.
 - **📦 Chunked Transfer-Encoding** — Full streaming support for HTTP/1.1 chunked request and response encoding & decoding.
@@ -620,10 +620,11 @@ flowchart TD
 | `Server/ThreadPool`        | ✅ Complete | Adaptive Tokio-style work-stealing thread pool with load hysteresis                                                       |
 | `Server/Server`            | ✅ Complete | Coroutine TCP & TLS 1.3 server (`Http1Server`, `Http2Server`) with master acceptor, worker pool, ALPN, Keep-Alive & 404   |
 | `Server/TlsConfig`         | ✅ Complete | TLS 1.3 server encryption config (`cert_file`, `key_file`, `key_password`, `dh_file`, `force_tls13`)                      |
+| `protos/ProtocolTraits`    | ✅ Complete | Protocol session traits (`protocol_traits<Codec>`) for prefaces, keep-alive, response prep & ALPN                         |
 | `protos/http/http1codec`   | ✅ Complete | Zero-copy HTTP/1.x parser, encoder, response decoder, chunked framing & stream pipelining                                 |
 | `protos/http/http2codec`   | ✅ Complete | Full RFC 7540 binary framing, RFC 7541 HPACK encoder/decoder, stream multiplexing & SETTINGS negotiation                  |
 | `protos/http/HttpRequest`  | ✅ Complete | HTTP/1.1 (`Http1Request`) & HTTP/2 (`Http2Request`) with zero-copy stream parsing & keep-alive detection                    |
-| `protos/http/HttpResponse` | ✅ Complete | HTTP/1.1 (`Http1Response`) & HTTP/2 (`Http2Response`) with zero-alloc socket writing & fluent builder API                 |
+| `protos/http/HttpResponse` | ✅ Complete | HTTP/1.1 (`Http1Response`) & HTTP/2 (`Http2Response`) with injected write sink for streaming, commitment & fluent builder API |
 | `Client/HttpClient`        | ✅ Complete | Async coroutine HTTP/1.1 client (`get`, `post`, `send`) — *HTTP/2 client support to be released soon*                     |
 | `Cli/Cli`                  | ✅ Complete | Type-safe CLI argument parser (`wavex::cli::CliParser`), flag validator, and option engine                                |
 
@@ -778,12 +779,14 @@ include/wavex/
 ├── Cli/
 │   └── Cli.hpp              ← Subcommand and CLI option parser
 └── protos/
+    ├── ProtocolTraits.hpp   ← Protocol session policy traits (prefaces, keep-alive, ALPN)
+    ├── protos.hpp           ← Protocol definitions and enums
     └── http/
         ├── Methods.hpp      ← HTTP method enum (GET, POST, PUT, DELETE, QUERY, etc.)
         ├── http1codec.hpp   ← Zero-copy HTTP/1.x parser + chunked encoder/decoder
         ├── http2codec.hpp   ← RFC 7540 binary frame parser & RFC 7541 HPACK codec
         ├── HttpRequest.hpp  ← Concrete HTTP request (Http1Request & Http2Request)
-        └── HttpResponse.hpp ← Concrete HTTP response (Http1Response & Http2Response)
+        └── HttpResponse.hpp ← Concrete HTTP response with injected write sink (Http1Response & Http2Response)
 
 src/                         ← Implementation + C++20 module partitions (.ixx)
 tests/                       ← Automated unit tests & interactive postman servers
@@ -792,6 +795,7 @@ cmake/                       ← CMake installation config
 
 ## Roadmap & Optional Future Features
 
+- 🔮 **Future Protocols (GraphQL, HTTP/3 QUIC, WebSockets)** — High-performance GraphQL query execution engine, native UDP-based HTTP/3 with QPACK and QUIC connection management, and RFC 6455 WebSocket upgrades cleanly layered onto the 3-Seam architecture.
 - 🛡 **DDoS Protection & OOM Backpressure Safeguard** — Optional network-level queue capacity watermarks (`max_injector_capacity`) that reject overload traffic with immediate HTTP `503 Service Unavailable` responses (`Retry-After: 5`) before allocation.
 - 🗜 **Zlib File Compression** — Optional Gzip / Brotli response compression choices in `send_file()`.
 - 🌐 **Compile-Time File Routing** — Build-time CMake directory scanner generating static route headers for static files (`StaticMount`) and C++ handler modules (`FolderMode`).
