@@ -168,6 +168,26 @@ namespace wavex::server {
             return max_keep_alive_requests_;
         }
 
+        /// Configure maximum incoming request payload size in bytes (0 for unlimited, default 100MB)
+        void set_max_request_size(size_t size) noexcept {
+            max_request_size_ = size;
+        }
+
+        /// Get maximum incoming request payload size in bytes
+        [[nodiscard]] size_t max_request_size() const noexcept {
+            return max_request_size_;
+        }
+
+        /// Configure threshold above which uploaded files are spooled to temporary files on disk (default 10MB)
+        void set_max_memory_buffer(size_t size) noexcept {
+            max_memory_buffer_ = size;
+        }
+
+        /// Get threshold above which uploaded files are spooled to temporary files on disk
+        [[nodiscard]] size_t max_memory_buffer() const noexcept {
+            return max_memory_buffer_;
+        }
+
         using NotFoundHandler = std::function<asio::awaitable<void>(RequestType &, ResponseType &)>;
 
         /**
@@ -225,6 +245,8 @@ namespace wavex::server {
         TlsConfig tls_config_;
         std::chrono::seconds keep_alive_timeout_{5};
         unsigned max_keep_alive_requests_{1000};
+        size_t max_request_size_{100 * 1024 * 1024};    ///< Default 100MB limit
+        size_t max_memory_buffer_{10 * 1024 * 1024};    ///< Default 10MB memory threshold
         std::optional<NotFoundHandler> server_not_found_handler_{std::nullopt};
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
@@ -360,6 +382,15 @@ namespace wavex::server {
                         if (read_ec || bytes_read == 0) co_return;
 
                         stream_buf.append(buffer, bytes_read);
+
+                        if (max_request_size_ > 0 && stream_buf.size() > max_request_size_) {
+                            ResponseType err_res;
+                            err_res.status(413).send("Payload Too Large");
+                            co_await asio::async_write(stream, asio::buffer(err_res.serialize()),
+                                                       asio::use_awaitable);
+                            co_return;
+                        }
+
                         p_res = req.parse_stream(stream_buf);
                     }
 

@@ -51,6 +51,12 @@ namespace wavex::base {
             return std::forward<Self>(self).body_impl();
         }
 
+        /// Check if request payload is multipart/form-data
+        template<typename Self>
+        [[nodiscard]] decltype(auto) is_multipart(this Self &&self) {
+            return std::forward<Self>(self).is_multipart_impl();
+        }
+
         /// Path parameters populated by the router (e.g. :id -> "123")
         std::unordered_map<std::string, std::string> params;
 

@@ -46,4 +46,5 @@ export namespace wavex::base {
 
     using base::keep_alive;
     using base::sse_stay_active;
+    using base::body_limit;
 } // export namespace wavex::base

@@ -4,7 +4,7 @@ A modern, high-performance C++23 backend framework built for coroutine-native HT
 
 WaveX draws inspiration from **Rust's Actix Web** (hybrid radix-tree routing), **Tokio** (hybrid work-stealing dual-queue runtime with hysteresis-based thread scaling), and **Express.js** (linear middleware chain with immediate response dispatching).
 
-[![Version: v0.3.0](https://img.shields.io/badge/Version-v0.3.0-orange.svg)](RELEASE_NOTES.md)
+[![Version: v0.4.0](https://img.shields.io/badge/Version-v0.4.0-orange.svg)](RELEASE_NOTES.md)
 [![License: MPL-2.0](https://img.shields.io/badge/License-MPL--2.0-blue.svg)](LICENSE)
 [![C++ Standard](https://img.shields.io/badge/C%2B%2B-23-blue.svg)](https://en.cppreference.com/w/cpp/23)
 [![CMake](https://img.shields.io/badge/CMake-4.0+-064F8C.svg)](https://cmake.org)
@@ -563,13 +563,13 @@ The following UML activity diagram illustrates the end-to-end lifecycle of an HT
 ```mermaid
 flowchart TD
     %% UML Activity Diagram - Request Lifecycle
-    Start([● Connection Accepted]) --> InitSession[Initialize Connection Session & Arm Inactivity Timer]
+    Start([&#9679 Connection Accepted]) --> InitSession[Initialize Connection Session & Arm Inactivity Timer]
     
     InitSession --> AwaitData[Wait for Incoming Data / async_read_some]
     
     AwaitData --> ReadCheck{"Data Received or Inactivity Timeout?"}
     ReadCheck -- "Inactivity Timeout / Client EOF" --> CloseSocket[Gracefully Close Socket]
-    CloseSocket --> Terminate([● End Session])
+    CloseSocket --> Terminate([&#9679 End Session])
     
     ReadCheck -- "Data Received" --> ParseCodec[Parse HTTP Request via http1codec]
     ParseCodec --> SyntaxCheck{"Valid HTTP Framing?"}
@@ -618,29 +618,29 @@ flowchart TD
 
 ## Component Status
 
-| Component                  | Status     | Description                                                                                                               |
-|:---------------------------|:-----------|:--------------------------------------------------------------------------------------------------------------------------|
-| `Base/Logger`              | ✅ Complete | Levelled logger (TRACE, DEBUG, INFO, WARN, ERROR, FATAL)                                                                  |
-| `Base/Uri` / `Base/Url`    | ✅ Complete | RFC 3986 URI encode/decode & URL query string parser                                                                      |
-| `Base/MimeTypes`           | ✅ Complete | Fast file extension to MIME type mappings (`mime_type_from_ext`)                                                          |
-| `Base/Chainable`           | ✅ Complete | C++23 "Deducing `this`" static pipeline dispatch (`StaticChain`, `make_chain`, `KeepAlivePolicy`, `ConditionalChainable`) |
-| `Base/Request`             | ✅ Complete | Protocol-agnostic CRTP request base (`Request<Derived>`, zero-vtable)                                                     |
-| `Base/Response`            | ✅ Complete | Protocol-agnostic CRTP response builder (`Response<Derived>`, zero-vtable, fluent API)                                    |
-| `Base/MiddleWare`          | ✅ Complete | Coroutine-aware middleware template (`GenericMiddlewareFn`), linear pipeline, `keep_alive` & `sse_stay_active`            |
-| `Engine/Router`            | ✅ Complete | Protocol-agnostic radix tree with RE2 regex, wildcard matching & configurable 404 handler                                 |
-| `Engine/HttpRouter`        | ✅ Complete | HTTP/1.1 (`Http1Router`) & HTTP/2 (`Http2Router`) method convenience routing (`get`, `post`, etc.) & 404 customization    |
-| `Server/LocalQueue`        | ✅ Complete | Per-worker 256-slot ring buffer for ultra-fast task stealing                                                              |
-| `Server/InjectorQueue`     | ✅ Complete | Global unbounded MPMC task overflow queue with atomic size tracking                                                       |
-| `Server/ThreadPool`        | ✅ Complete | Adaptive Tokio-style work-stealing thread pool with load hysteresis                                                       |
-| `Server/Server`            | ✅ Complete | Coroutine TCP & TLS 1.3 server (`Http1Server`, `Http2Server`) with master acceptor, worker pool, ALPN, Keep-Alive & 404   |
-| `Server/TlsConfig`         | ✅ Complete | TLS 1.3 server encryption config (`cert_file`, `key_file`, `key_password`, `dh_file`, `force_tls13`)                      |
-| `protos/ProtocolTraits`    | ✅ Complete | Protocol session traits (`protocol_traits<Codec>`) for prefaces, keep-alive, response prep & ALPN                         |
-| `protos/http/http1codec`   | ✅ Complete | Zero-copy HTTP/1.x parser, encoder, response decoder, chunked framing & stream pipelining                                 |
-| `protos/http/http2codec`   | ✅ Complete | Full RFC 7540 binary framing, RFC 7541 HPACK encoder/decoder, stream multiplexing & SETTINGS negotiation                  |
-| `protos/http/HttpRequest`  | ✅ Complete | HTTP/1.1 (`Http1Request`) & HTTP/2 (`Http2Request`) with zero-copy stream parsing & keep-alive detection                    |
-| `protos/http/HttpResponse` | ✅ Complete | HTTP/1.1 (`Http1Response`) & HTTP/2 (`Http2Response`) with injected write sink for streaming, commitment & fluent builder API |
+| Component                  | Status     | Description                                                                                                                               |
+|:---------------------------|:-----------|:------------------------------------------------------------------------------------------------------------------------------------------|
+| `Base/Logger`              | ✅ Complete | Levelled logger (TRACE, DEBUG, INFO, WARN, ERROR, FATAL)                                                                                  |
+| `Base/Uri` / `Base/Url`    | ✅ Complete | RFC 3986 URI encode/decode & URL query string parser                                                                                      |
+| `Base/MimeTypes`           | ✅ Complete | Fast file extension to MIME type mappings (`mime_type_from_ext`)                                                                          |
+| `Base/Chainable`           | ✅ Complete | C++23 "Deducing `this`" static pipeline dispatch (`StaticChain`, `make_chain`, `KeepAlivePolicy`, `ConditionalChainable`)                 |
+| `Base/Request`             | ✅ Complete | Protocol-agnostic CRTP request base (`Request<Derived>`, zero-vtable)                                                                     |
+| `Base/Response`            | ✅ Complete | Protocol-agnostic CRTP response builder (`Response<Derived>`, zero-vtable, fluent API)                                                    |
+| `Base/MiddleWare`          | ✅ Complete | Coroutine-aware middleware template (`GenericMiddlewareFn`), linear pipeline, `keep_alive` & `sse_stay_active`                            |
+| `Engine/Router`            | ✅ Complete | Protocol-agnostic radix tree with RE2 regex, wildcard matching & configurable 404 handler                                                 |
+| `Engine/HttpRouter`        | ✅ Complete | HTTP/1.1 (`Http1Router`) & HTTP/2 (`Http2Router`) method convenience routing (`get`, `post`, etc.) & 404 customization                    |
+| `Server/LocalQueue`        | ✅ Complete | Per-worker 256-slot ring buffer for ultra-fast task stealing                                                                              |
+| `Server/InjectorQueue`     | ✅ Complete | Global unbounded MPMC task overflow queue with atomic size tracking                                                                       |
+| `Server/ThreadPool`        | ✅ Complete | Adaptive Tokio-style work-stealing thread pool with load hysteresis                                                                       |
+| `Server/Server`            | ✅ Complete | Coroutine TCP & TLS 1.3 server (`Http1Server`, `Http2Server`) with master acceptor, worker pool, ALPN, Keep-Alive & 404                   |
+| `Server/TlsConfig`         | ✅ Complete | TLS 1.3 server encryption config (`cert_file`, `key_file`, `key_password`, `dh_file`, `force_tls13`)                                      |
+| `protos/ProtocolTraits`    | ✅ Complete | Protocol session traits (`protocol_traits<Codec>`) for prefaces, keep-alive, response prep & ALPN                                         |
+| `protos/http/http1codec`   | ✅ Complete | Zero-copy HTTP/1.x parser, encoder, response decoder, chunked framing & stream pipelining                                                 |
+| `protos/http/http2codec`   | ✅ Complete | Full RFC 7540 binary framing, RFC 7541 HPACK encoder/decoder, stream multiplexing & SETTINGS negotiation                                  |
+| `protos/http/HttpRequest`  | ✅ Complete | HTTP/1.1 (`Http1Request`) & HTTP/2 (`Http2Request`) with zero-copy stream parsing & keep-alive detection                                  |
+| `protos/http/HttpResponse` | ✅ Complete | HTTP/1.1 (`Http1Response`) & HTTP/2 (`Http2Response`) with injected write sink for streaming, commitment & fluent builder API             |
 | `Client/HttpClient`        | ✅ Complete | Coroutine HTTP/1.1 & HTTP/2 client with plain/TLS 1.3, ALPN auto-negotiation, domainless IPv4/IPv6, query builder & multi-payload posting |
-| `Cli/Cli`                  | ✅ Complete | Type-safe CLI argument parser (`wavex::cli::CliParser`), flag validator, and option engine                                |
+| `Cli/Cli`                  | ✅ Complete | Type-safe CLI argument parser (`wavex::cli::CliParser`), flag validator, and option engine                                                |
 
 ---
 
@@ -654,7 +654,7 @@ flowchart TD
 
 ### Build & Run with CMake Presets
 
-WaveX uses standard [CMake Presets](CMakePresets.json) for rapid Ninja-backed configuration, multi-core parallel builds, and automated CTest runs.
+WaveX uses standard [CMake Presets](CMakePresets.json) for rapid Ninja-backed configuration, multicore parallel builds, and automated CTest runs.
 
 #### 1. Configure
 ```bash
@@ -706,35 +706,40 @@ WaveX includes two pre-configured, CLI-driven interactive dev servers for manual
 
 #### Dev Server Executables
 
-| Executable | Protocol Modes | Default Ports | Source |
-|:---|:---|:---|:---|
-| `wavex_postman_http1_server` | Plain HTTP / HTTPS (TLS 1.3) | `8080` (plain), `8443` (`--tls`) | [tests/postman_demo_http1_server.cpp](tests/postman_demo_http1_server.cpp) |
+| Executable                   | Protocol Modes                           | Default Ports                        | Source                                                                     |
+|:-----------------------------|:-----------------------------------------|:-------------------------------------|:---------------------------------------------------------------------------|
+| `wavex_postman_http1_server` | Plain HTTP / HTTPS (TLS 1.3)             | `8080` (plain), `8443` (`--tls`)     | [tests/postman_demo_http1_server.cpp](tests/postman_demo_http1_server.cpp) |
 | `wavex_postman_http2_server` | Cleartext h2c / HTTP/2 over TLS 1.3 (h2) | `8082` (cleartext), `8444` (`--tls`) | [tests/postman_demo_http2_server.cpp](tests/postman_demo_http2_server.cpp) |
 
 #### Command-Line Options (Built-in CLI)
 
 Both servers support the following command-line flags:
 
-| Flag | Short | Default | Description |
-|:---|:---|:---|:---|
-| `--tls` | `-s` | disabled | Enable TLS 1.3 encryption (ALPN `http/1.1` or `h2`) |
-| `--port <num>` | `-p` | 8080/8082 (plain), 8443/8444 (TLS) | Port to listen on |
-| `--host <ip>` | `-H` | `127.0.0.1` | Host address to bind |
-| `--cert <path>` | `-c` | `ssl/test.crt` | Path to TLS certificate file |
-| `--key <path>` | `-k` | `ssl/test.key` | Path to TLS private key file |
-| `--help` | `-h` | — | Show CLI help and options |
+| Flag            | Short | Default                            | Description                                                                     |
+|:----------------|:------|:-----------------------------------|:--------------------------------------------------------------------------------|
+| `--tls`         | `-s`  | disabled                           | Enable TLS 1.3 encryption (ALPN `http/1.1` or `h2`)                             |
+| `--lan`         | `-l`  | disabled                           | Host on local area network (LAN) using current machine IP (e.g., `192.168.x.x`) |
+| `--port <num>`  | `-p`  | 8080/8082 (plain), 8443/8444 (TLS) | Port to listen on                                                               |
+| `--host <ip>`   | `-H`  | `127.0.0.1`                        | Host address to bind                                                            |
+| `--cert <path>` | `-c`  | `ssl/test.crt`                     | Path to TLS certificate file                                                    |
+| `--key <path>`  | `-k`  | `ssl/test.key`                     | Path to TLS private key file                                                    |
+| `--help`        | `-h`  | —                                  | Show CLI help and options                                                       |
 
 #### Launching the Servers
 
 ```bash
 # 1. HTTP/1.1 Server
 ./build/test-profile/wavex_postman_http1_server.exe                     # Plain HTTP on http://127.0.0.1:8080
+./build/test-profile/wavex_postman_http1_server.exe --lan               # Host on LAN using current machine IP
 ./build/test-profile/wavex_postman_http1_server.exe --tls               # HTTPS/TLS 1.3 on https://127.0.0.1:8443
+./build/test-profile/wavex_postman_http1_server.exe --tls --lan         # HTTPS/TLS 1.3 on LAN using current machine IP
 ./build/test-profile/wavex_postman_http1_server.exe -p 9000             # Custom port
 
 # 2. HTTP/2 Server
 ./build/test-profile/wavex_postman_http2_server.exe                     # Cleartext HTTP/2 (h2c) on http://127.0.0.1:8082
+./build/test-profile/wavex_postman_http2_server.exe --lan               # Cleartext HTTP/2 on LAN using current machine IP
 ./build/test-profile/wavex_postman_http2_server.exe --tls               # HTTP/2 over TLS 1.3 (h2) on https://127.0.0.1:8444
+./build/test-profile/wavex_postman_http2_server.exe --tls --lan         # HTTP/2 over TLS 1.3 on LAN using current machine IP
 ./build/test-profile/wavex_postman_http2_server.exe --tls -p 9444       # Custom port with TLS
 ```
 

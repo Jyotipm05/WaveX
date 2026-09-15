@@ -20,7 +20,8 @@
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "WAVEX_TEST": "OFF"
+        "WAVEX_TEST": "OFF",
+        "WAVEX_USE_LLD": "OFF"
       }
     },
     {
@@ -29,7 +30,8 @@
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "WAVEX_TEST": "ON"
+        "WAVEX_TEST": "ON",
+        "WAVEX_USE_LLD": "ON"
       }
     },
     {
@@ -38,7 +40,8 @@
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "WAVEX_TEST_TSAN": "ON"
+        "WAVEX_TEST_TSAN": "ON",
+        "WAVEX_USE_LLD": "ON"
       }
     },
     {
@@ -47,7 +50,8 @@
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "WAVEX_TEST_ASAN": "ON"
+        "WAVEX_TEST_ASAN": "ON",
+        "WAVEX_USE_LLD": "ON"
       }
     }
   ],

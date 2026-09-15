@@ -26,6 +26,7 @@ export import :http_router;
 export import :server;
 export import :client;
 export import :cli;
+export import :utils;
 
 
 export namespace wavex {

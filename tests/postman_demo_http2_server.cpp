@@ -6,7 +6,9 @@
  *
  * Usage examples:
  *   ./wavex_postman_http2_server                      # Cleartext HTTP/2 (h2c) on http://127.0.0.1:8082
+ *   ./wavex_postman_http2_server --lan                # Cleartext HTTP/2 on LAN (0.0.0.0:8082)
  *   ./wavex_postman_http2_server --tls                # HTTP/2 over TLS 1.3 (h2) on https://127.0.0.1:8444
+ *   ./wavex_postman_http2_server --tls --lan          # HTTP/2 over TLS 1.3 on LAN (0.0.0.0:8444)
  *   ./wavex_postman_http2_server -p 9082              # Custom port
  *   ./wavex_postman_http2_server --tls -p 4443 -c ssl/test.crt -k ssl/test.key
  *   ./wavex_postman_http2_server --help               # Show CLI usage and option details
@@ -24,11 +26,50 @@
 #include <string>
 #include <nlohmann/json.hpp>
 #include <wavex/wavex.hpp>
+#include <asio/ip/udp.hpp>
+#include <asio/ip/host_name.hpp>
 
 using namespace wavex;
 using HttpRequest = protos::http::Http2Request;
 using HttpResponse = protos::http::Http2Response;
 using HttpRouter = engine::Http2Router;
+
+// Helper to detect LAN IP address of current machine
+inline std::string get_lan_ip() {
+    // 1. Try querying outbound interface via UDP routing table lookup (no actual packet sent)
+    try {
+        asio::io_context ctx;
+        asio::ip::udp::socket sock(ctx);
+        sock.connect(asio::ip::udp::endpoint(asio::ip::make_address("8.8.8.8"), 53));
+        const auto addr = sock.local_endpoint().address();
+        if (addr.is_v4() && !addr.is_loopback()) {
+            return addr.to_string();
+        }
+    } catch (...) {
+    }
+
+    // 2. Fallback: resolve local hostname to discover network interface IPv4 addresses
+    try {
+        asio::io_context ctx;
+        asio::ip::tcp::resolver resolver(ctx);
+        asio::error_code ec;
+        const auto host = asio::ip::host_name(ec);
+        if (!ec && !host.empty()) {
+            const auto results = resolver.resolve(host, "", ec);
+            if (!ec) {
+                for (const auto &entry : results) {
+                    const auto addr = entry.endpoint().address();
+                    if (addr.is_v4() && !addr.is_loopback()) {
+                        return addr.to_string();
+                    }
+                }
+            }
+        }
+    } catch (...) {
+    }
+
+    return "";
+}
 
 // Global Logger Middleware for HTTP/2
 asio::awaitable<void> http2_logger_middleware(const HttpRequest &req, const HttpResponse &res, base::Next next) {
@@ -61,6 +102,7 @@ int main(int argc, char *argv[]) {
                           "WaveX HTTP/2 Interactive Dev & Postman Testing Server (RFC 7540 / RFC 7541)");
 
     parser.add_flag("tls", 's', "Enable HTTP/2 over TLS 1.3 [h2] (default: cleartext [h2c])")
+            .add_flag("lan", 'l', "Host server on local area network (LAN) using current machine IP")
             .add_option("port", 'p', "Port number to listen on (default: 8082 cleartext, 8444 with --tls)")
             .add_option("host", 'H', "Host IP address to bind to", "127.0.0.1")
             .add_option("cert", 'c', "Path to TLS certificate file", "ssl/test.crt")
@@ -78,7 +120,17 @@ int main(int argc, char *argv[]) {
     }
 
     const bool is_tls = parser.get_bool("tls");
-    const std::string host = parser.get_string("host");
+    const bool is_lan = parser.get_bool("lan");
+    std::string host = parser.get_string("host");
+    if (is_lan && !parser.has("host")) {
+        const std::string detected_ip = get_lan_ip();
+        if (!detected_ip.empty()) {
+            host = detected_ip;
+        } else {
+            std::cerr << "[Warning] Could not automatically detect LAN IP. Falling back to 127.0.0.1.\n";
+            host = "127.0.0.1";
+        }
+    }
     const std::string cert_file = parser.get_string("cert");
     const std::string key_file = parser.get_string("key");
 
@@ -95,7 +147,11 @@ int main(int argc, char *argv[]) {
     std::cout << "=========================================================================\n";
     std::cout << " Protocol : HTTP/2 (RFC 7540 / RFC 7541) "
             << (is_tls ? "[h2: TLS 1.3 Active]" : "[h2c: Cleartext TCP]") << "\n";
-    std::cout << " Bound To : " << base_url << "\n";
+    std::cout << " Bound To : " << host << ":" << port << (is_lan ? " [LAN Active - Current Machine IP]" : " [Loopback]") << "\n";
+    std::cout << " URL      : " << base_url << "\n";
+    if (is_lan) {
+        std::cout << " Note     : Hosted on LAN IP. Open " << base_url << " from any device on your network.\n";
+    }
     if (is_tls) {
         std::cout << " Cert File: " << cert_file << "\n";
         std::cout << " Key File : " << key_file << "\n";

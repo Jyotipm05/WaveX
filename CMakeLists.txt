@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 4.0)
-project(wavex VERSION 0.3.0 LANGUAGES CXX)
+project(wavex VERSION 0.4.0 LANGUAGES CXX)
 
 # ===========================================================================
 #  Header Configuration
@@ -16,6 +16,29 @@ configure_file(
 # ===========================================================================
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON) # Required for Clangd
 include(GNUInstallDirs)
+
+# ---------------------------------------------------------------------------
+# Linker Configuration (LLD via WAVEX_USE_LLD)
+# ---------------------------------------------------------------------------
+option(WAVEX_USE_LLD "Use LLVM lld linker (lld-link on Windows, ld.lld on Linux)" OFF)
+
+if (WAVEX_USE_LLD)
+    if (WIN32)
+        find_program(WAVEX_LLD_EXE NAMES lld-link)
+    else ()
+        find_program(WAVEX_LLD_EXE NAMES ld.lld lld)
+    endif ()
+
+    if (WAVEX_LLD_EXE)
+        set(CMAKE_LINKER_TYPE "LLD")
+        message(STATUS "LLD linker enabled: ${WAVEX_LLD_EXE}")
+    else ()
+        message(WARNING "WAVEX_USE_LLD is ON, but 'lld-link' (Windows) or 'ld.lld' (Unix) was not found in PATH. "
+                        "Falling back to default system linker.")
+        unset(CMAKE_LINKER_TYPE)
+        unset(CMAKE_LINKER_TYPE CACHE)
+    endif ()
+endif ()
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -193,6 +216,19 @@ else ()
     target_compile_definitions(wavex PUBLIC WAVEX_HAS_SSL=0)
 endif ()
 
+# ---------------------------------------------------------------------------
+# Optional zlib Compression Support
+# ---------------------------------------------------------------------------
+find_package(ZLIB QUIET)
+if (ZLIB_FOUND)
+    message(STATUS "Found ZLIB: ${ZLIB_VERSION}")
+    target_link_libraries(wavex PUBLIC ZLIB::ZLIB)
+    target_compile_definitions(wavex PUBLIC WAVEX_HAS_ZLIB=1)
+else ()
+    message(STATUS "ZLIB not found — optional compression falling back to uncompressed or disabled")
+    target_compile_definitions(wavex PUBLIC WAVEX_HAS_ZLIB=0)
+endif ()
+
 # ===========================================================================
 #  Clangd Header Registration
 # ===========================================================================
@@ -220,6 +256,10 @@ target_sources(wavex
         include/wavex/Server/Server.hpp
         include/wavex/Client/HttpClient.hpp
         include/wavex/Cli/Cli.hpp
+        include/wavex/Utils/Utils.hpp
+        include/wavex/Utils/TempFile.hpp
+        include/wavex/Utils/Compression.hpp
+        include/wavex/Utils/Multipart.hpp
 )
 
 # C++ Modules
@@ -245,6 +285,10 @@ target_sources(wavex
         src/Base/MiddleWare.ixx
         src/Client/HttpClient.ixx
         src/CLI/CLI.ixx
+        src/Utils/Utils.ixx
+        src/Utils/TempFile.ixx
+        src/Utils/Compression.ixx
+        src/Utils/Multipart.ixx
 )
 
 # ===========================================================================
@@ -368,6 +412,10 @@ if (WAVEX_TEST)
     wavex_add_test(wavex_server_keepalive_tests tests/test_server_keepalive.cpp)
     wavex_add_test(wavex_not_found_tests        tests/test_not_found.cpp)
     wavex_add_test(wavex_http2_codec_tests      tests/test_http2_codec.cpp)
+    wavex_add_test(wavex_temp_file_tests        tests/test_temp_file.cpp)
+    wavex_add_test(wavex_compression_tests      tests/test_compression.cpp)
+    wavex_add_test(wavex_multipart_tests        tests/test_multipart.cpp)
+    wavex_add_test(wavex_client_file_upload_tests tests/test_client_file_upload.cpp)
 
     # Unified CLI-driven Postman Dev Servers (HTTP/1.1 and HTTP/2)
     add_executable(wavex_postman_http1_server tests/postman_demo_http1_server.cpp)

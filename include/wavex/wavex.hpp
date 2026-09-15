@@ -24,6 +24,7 @@
 #include <wavex/Server/Server.hpp>
 #include <wavex/Client/HttpClient.hpp>
 #include <wavex/CLI/CLI.hpp>
+#include <wavex/Utils/Utils.hpp>
 
 /**
  * @brief Macro representing the current version of the WaveX framework.

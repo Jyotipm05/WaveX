@@ -29,9 +29,14 @@
 #include <asio/co_spawn.hpp>
 #include <nlohmann/json.hpp>
 
+#include <filesystem>
+#include <fstream>
+#include <wavex/Base/MimeTypes.hpp>
 #include <wavex/Base/Response.hpp>
 #include <wavex/Base/Uri.hpp>
 #include <wavex/Base/Url.hpp>
+#include <wavex/Utils/Multipart.hpp>
+#include <wavex/Utils/Compression.hpp>
 #include <wavex/protos/http/HttpRequest.hpp>
 #include <wavex/protos/http/HttpResponse.hpp>
 #include <wavex/protos/http/http.hpp>
@@ -189,6 +194,77 @@ namespace wavex::client {
 
         [[nodiscard]] const std::string &body() const noexcept { return body_; }
 
+        /// Attach a pre-composed multipart/form-data payload
+        ClientRequest &multipart(const utils::MultipartFormData &form) {
+            body_ = form.compose();
+            set_header("Content-Type", form.content_type_header());
+            return *this;
+        }
+
+        /// Add a form field to the multipart payload
+        ClientRequest &add_field(const std::string_view name, const std::string_view value) {
+            multipart_builder_.add_field(name, value);
+            return multipart(multipart_builder_);
+        }
+
+        /// Add an in-memory file to the multipart payload
+        ClientRequest &add_file(const std::string_view name,
+                                const std::string_view filename,
+                                const std::string_view data,
+                                const std::string_view content_type = "") {
+            std::string ct(content_type);
+            if (ct.empty()) {
+                ct = std::string(base::mime_type_from_path(filename));
+            }
+            multipart_builder_.add_file(name, filename, data, ct);
+            return multipart(multipart_builder_);
+        }
+
+        /// Add a file from disk to the multipart payload
+        ClientRequest &add_file_from_path(const std::string_view name,
+                                          const std::filesystem::path &filepath,
+                                          const std::string_view content_type = "") {
+            std::ifstream file(filepath, std::ios::binary);
+            if (file) {
+                std::string content((std::istreambuf_iterator<char>(file)),
+                                    std::istreambuf_iterator<char>());
+                std::string filename = filepath.filename().string();
+                std::string ct(content_type);
+                if (ct.empty()) {
+                    ct = std::string(base::mime_type_from_path(filepath.string()));
+                }
+                multipart_builder_.add_file(name, filename, content, ct);
+                multipart(multipart_builder_);
+            }
+            return *this;
+        }
+
+        /// Set raw binary body from a file on disk
+        ClientRequest &file_body(const std::filesystem::path &filepath,
+                                 const std::string_view content_type = "") {
+            std::ifstream file(filepath, std::ios::binary);
+            if (file) {
+                body_.assign((std::istreambuf_iterator<char>(file)),
+                             std::istreambuf_iterator<char>());
+                std::string ct(content_type);
+                if (ct.empty()) {
+                    ct = std::string(base::mime_type_from_path(filepath.string()));
+                }
+                set_header("Content-Type", ct);
+            }
+            return *this;
+        }
+
+        /// Compress request body using gzip or deflate
+        ClientRequest &compress(const utils::CompressionFormat format = utils::CompressionFormat::Gzip) {
+            if (auto compressed = utils::Compressor::compress(body_, format); compressed.has_value()) {
+                body_ = std::move(*compressed);
+                set_header("Content-Encoding",
+                           format == utils::CompressionFormat::Gzip ? "gzip" : "deflate");
+            }
+            return *this;
+        }
+
     private:
         static bool detail_case_equal(const std::string_view a, const std::string_view b) noexcept {
             if (a.size() != b.size()) return false;
@@ -206,6 +282,7 @@ namespace wavex::client {
         QueryParams queries_;
         std::vector<std::pair<std::string, std::string> > headers_;
         std::string body_;
+        utils::MultipartFormData multipart_builder_;
     };
 
     /**
@@ -297,6 +374,41 @@ namespace wavex::client {
 
         [[nodiscard]] nlohmann::json json() const {
             return nlohmann::json::parse(body_);
+        }
+
+        /**
+         * @brief Decompresses response body using Content-Encoding header or fallback format.
+         * @param format Default compression algorithm if Content-Encoding is unspecified.
+         */
+        [[nodiscard]] std::optional<std::string> decompressed_body(
+            const utils::CompressionFormat format = utils::CompressionFormat::Gzip) const {
+            auto decompress_helper = [](const std::string_view d, const utils::CompressionFormat fmt) -> std::optional<std::string> {
+                auto res = utils::Compressor::decompress(d, fmt);
+                if (res) return *res;
+                return std::nullopt;
+            };
+            const auto enc = header("Content-Encoding");
+            if (enc.has_value()) {
+                if (enc->find("gzip") != std::string_view::npos) {
+                    return decompress_helper(body_, utils::CompressionFormat::Gzip);
+                }
+                if (enc->find("deflate") != std::string_view::npos) {
+                    return decompress_helper(body_, utils::CompressionFormat::Deflate);
+                }
+            }
+            return decompress_helper(body_, format);
+        }
+
+        /**
+         * @brief Saves response body to a file on disk.
+         * @param dest_path Target file path.
+         * @return True if written successfully, false otherwise.
+         */
+        bool save_to_file(const std::filesystem::path &dest_path) const {
+            std::ofstream out(dest_path, std::ios::binary);
+            if (!out) return false;
+            out.write(body_.data(), static_cast<std::streamsize>(body_.size()));
+            return out.good();
         }
 
         // Implicit conversions for backward compatibility

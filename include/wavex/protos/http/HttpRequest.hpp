@@ -22,6 +22,8 @@
 #include <wavex/Base/Request.hpp>
 #include <wavex/Base/Url.hpp>
 #include <wavex/protos/http/http1codec.hpp>
+#include <wavex/Utils/Multipart.hpp>
+#include <wavex/Utils/Compression.hpp>
 
 namespace wavex::protos::http {
     /**
@@ -161,6 +163,81 @@ namespace wavex::protos::http {
         }
 
         [[nodiscard]] std::string_view body_impl() const { return parsed_.body; }
+
+        // ── Multipart & File Upload Accessors ──────────────────────────────
+
+        /**
+         * @brief Checks if request Content-Type is multipart/form-data.
+         */
+        [[nodiscard]] bool is_multipart_impl() const {
+            const auto ct = header_impl("Content-Type");
+            return ct.has_value() && ct->find("multipart/form-data") != std::string_view::npos;
+        }
+
+        [[nodiscard]] bool is_multipart() const {
+            return is_multipart_impl();
+        }
+
+        /**
+         * @brief Parses the multipart/form-data body according to RFC 7578.
+         * @param limits Size and count thresholds for memory buffering and spooling.
+         * @return Parsed MultipartFormData containing fields and uploaded files.
+         */
+        [[nodiscard]] utils::MultipartFormData multipart(const utils::MultipartLimits &limits = {}) const {
+            const auto ct = header_impl("Content-Type");
+            return utils::MultipartFormData::parse(body_impl(), ct.value_or(""), limits);
+        }
+
+        /**
+         * @brief Convenience helper to retrieve an uploaded file by form field name.
+         * @param name Name of the form file field.
+         */
+        [[nodiscard]] std::optional<utils::UploadedFile> file(const std::string_view name) const {
+            return multipart().file(name);
+        }
+
+        /**
+         * @brief Convenience helper to retrieve all uploaded files in the request.
+         */
+        [[nodiscard]] std::vector<utils::UploadedFile> files() const {
+            return multipart().files();
+        }
+
+        /**
+         * @brief Decompresses request body using Content-Encoding header or fallback format.
+         * @param format Default compression algorithm if Content-Encoding is unspecified.
+         */
+        [[nodiscard]] std::optional<std::string> decompressed_body(
+            const utils::CompressionFormat format = utils::CompressionFormat::Gzip) const {
+            auto decompress_helper = [](const std::string_view d, const utils::CompressionFormat fmt) -> std::optional<std::string> {
+                auto res = utils::Compressor::decompress(d, fmt);
+                if (res) return *res;
+                return std::nullopt;
+            };
+            const auto enc = header_impl("Content-Encoding");
+            if (enc.has_value()) {
+                if (enc->find("gzip") != std::string_view::npos) {
+                    return decompress_helper(body_impl(), utils::CompressionFormat::Gzip);
+                }
+                if (enc->find("deflate") != std::string_view::npos) {
+                    return decompress_helper(body_impl(), utils::CompressionFormat::Deflate);
+                }
+            }
+            return decompress_helper(body_impl(), format);
+        }
+
+        /**
+         * @brief Saves the raw request body to the specified file on disk.
+         * @param dest_path Target file path.
+         * @return True if saved successfully, false otherwise.
+         */
+        bool save_body_to_file(const std::filesystem::path &dest_path) const {
+            std::ofstream out(dest_path, std::ios::binary);
+            if (!out) return false;
+            const auto b = body_impl();
+            out.write(b.data(), static_cast<std::streamsize>(b.size()));
+            return out.good();
+        }
 
         /**
          * @brief Serialize this HTTP request into wire format via Codec::encoder.
