@@ -88,7 +88,7 @@ namespace wavex::base {
 
         /// Set the response body as plain text and mark as sent
         template<typename Self>
-        decltype(auto) send(this Self &&self, const std::string_view body) {
+        decltype(auto) send(this Self &&self, const std::string_view body = "") {
             return std::forward<Self>(self).send_impl(body);
         }
 
@@ -97,6 +97,40 @@ namespace wavex::base {
         decltype(auto) json(this Self &&self, const nlohmann::json &j) {
             self.set("Content-Type", "application/json");
             return std::forward<Self>(self).send(j.dump());
+        }
+
+        /// Issue a redirect response with target location and optional status code (default: 302 Found)
+        template<typename Self>
+        decltype(auto) redirect(this Self &&self,
+                                const std::string_view location,
+                                const unsigned int code = 302) {
+            self.status(code);
+            self.set("Location", location);
+            return std::forward<Self>(self).send();
+        }
+
+        /// Express/Fastify-style overload: res.redirect(code, url)
+        template<typename Self>
+        decltype(auto) redirect(this Self &&self,
+                                const unsigned int code,
+                                const std::string_view location) {
+            return std::forward<Self>(self).redirect(location, code);
+        }
+
+        /// Permanent redirect (default: 301 Moved Permanently; 308 Permanent Redirect if preserve_method = true)
+        template<typename Self>
+        decltype(auto) permanent_redirect(this Self &&self,
+                                          const std::string_view location,
+                                          const bool preserve_method = false) {
+            return std::forward<Self>(self).redirect(location, preserve_method ? 308 : 301);
+        }
+
+        /// Temporary redirect (default: 302 Found; 307 Temporary Redirect if preserve_method = true)
+        template<typename Self>
+        decltype(auto) temporary_redirect(this Self &&self,
+                                          const std::string_view location,
+                                          const bool preserve_method = false) {
+            return std::forward<Self>(self).redirect(location, preserve_method ? 307 : 302);
         }
 
         /// Serialize the response into the wire format (protocol-specific)

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file test_server.cpp
  * @brief Unit & integration tests for HttpResponse, WorkStealingQueue, ThreadPool, and Server.
  */
@@ -12,8 +12,8 @@
 #include <chrono>
 
 namespace {
-    int tests_run = 0;
-    int tests_passed = 0;
+    int tests_run{0};
+    int tests_passed{0};
 
     void check(const bool condition, const char *name) {
         ++tests_run;
@@ -51,6 +51,70 @@ void test_http_response_serialization() {
     std::string json_wire = json_res.serialize();
     check(json_res.status_code() == 201, "JSON response status is 201");
     check(json_wire.find("Content-Type: application/json\r\n") != std::string::npos, "JSON header set automatically");
+}
+
+// ─── Test 1b: HttpResponse Redirect API ───────────────────────────────────────
+
+void test_http_response_redirect() {
+    std::cout << "\n[Test 1b] HttpResponse redirect & fluent API\n";
+
+    // 1. Default redirect (302 Found)
+    wavex::protos::http::Http1Response res_default;
+    res_default.redirect("/dashboard");
+    check(res_default.status_code() == 302, "Default redirect status is 302");
+    check(res_default.is_sent(), "Default redirect marks response as sent");
+    check(res_default.get_body().empty(), "Default redirect has empty body");
+    std::string wire_default = res_default.serialize();
+    check(wire_default.starts_with("HTTP/1.1 302 Found\r\n"), "Serialized status line matches 302 Found");
+    check(wire_default.find("Location: /dashboard\r\n") != std::string::npos, "Location header present for /dashboard");
+
+    // 2. Custom status redirect (307 Temporary Redirect)
+    wavex::protos::http::Http1Response res_307;
+    res_307.redirect("/login", 307);
+    check(res_307.status_code() == 307, "Custom redirect status is 307");
+    std::string wire_307 = res_307.serialize();
+    check(wire_307.starts_with("HTTP/1.1 307 Temporary Redirect\r\n"), "Serialized status line matches 307 Temporary Redirect");
+    check(wire_307.find("Location: /login\r\n") != std::string::npos, "Location header present for /login");
+
+    // 3. Express/Fastify-style overload: redirect(code, url)
+    wavex::protos::http::Http1Response res_overload;
+    res_overload.redirect(303, "/other");
+    check(res_overload.status_code() == 303, "Reversed argument redirect status is 303");
+    std::string wire_303 = res_overload.serialize();
+    check(wire_303.starts_with("HTTP/1.1 303 See Other\r\n"), "Serialized status line matches 303 See Other");
+    check(wire_303.find("Location: /other\r\n") != std::string::npos, "Location header present for /other");
+
+    // 4. Permanent redirect (default: 301 Moved Permanently)
+    wavex::protos::http::Http1Response res_perm;
+    res_perm.permanent_redirect("/new-home");
+    check(res_perm.status_code() == 301, "permanent_redirect default status is 301");
+    std::string wire_perm = res_perm.serialize();
+    check(wire_perm.starts_with("HTTP/1.1 301 Moved Permanently\r\n"), "Serialized status line matches 301 Moved Permanently");
+    check(wire_perm.find("Location: /new-home\r\n") != std::string::npos, "Location header present for /new-home");
+
+    // 5. Permanent redirect with preserve_method = true (308 Permanent Redirect)
+    wavex::protos::http::Http1Response res_perm_preserve;
+    res_perm_preserve.permanent_redirect("/new-api", true);
+    check(res_perm_preserve.status_code() == 308, "permanent_redirect(true) status is 308");
+    std::string wire_308 = res_perm_preserve.serialize();
+    check(wire_308.starts_with("HTTP/1.1 308 Permanent Redirect\r\n"), "Serialized status line matches 308 Permanent Redirect");
+    check(wire_308.find("Location: /new-api\r\n") != std::string::npos, "Location header present for /new-api");
+
+    // 6. Temporary redirect (default: 302 Found)
+    wavex::protos::http::Http1Response res_temp;
+    res_temp.temporary_redirect("/temp-page");
+    check(res_temp.status_code() == 302, "temporary_redirect default status is 302");
+    std::string wire_temp = res_temp.serialize();
+    check(wire_temp.starts_with("HTTP/1.1 302 Found\r\n"), "Serialized status line matches 302 Found");
+    check(wire_temp.find("Location: /temp-page\r\n") != std::string::npos, "Location header present for /temp-page");
+
+    // 7. Temporary redirect with preserve_method = true (307 Temporary Redirect)
+    wavex::protos::http::Http1Response res_temp_preserve;
+    res_temp_preserve.temporary_redirect("/temp-post", true);
+    check(res_temp_preserve.status_code() == 307, "temporary_redirect(true) status is 307");
+    std::string wire_temp_307 = res_temp_preserve.serialize();
+    check(wire_temp_307.starts_with("HTTP/1.1 307 Temporary Redirect\r\n"), "Serialized status line matches 307 Temporary Redirect");
+    check(wire_temp_307.find("Location: /temp-post\r\n") != std::string::npos, "Location header present for /temp-post");
 }
 
 // ─── Test 2: LocalQueue & InjectorQueue Operations ───────────────────────────
@@ -266,6 +330,7 @@ int main() {
     std::cout << "=== WaveX Server, HttpResponse & ThreadPool Unit Tests ===\n";
 
     test_http_response_serialization();
+    test_http_response_redirect();
     test_work_stealing_queue();
     test_thread_pool_config_singleton();
     test_thread_pool_execution_and_scaling();

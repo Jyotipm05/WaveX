@@ -49,7 +49,7 @@ namespace wavex::utils {
 
         [[nodiscard]] std::size_t size() const noexcept {
             if (is_on_disk()) {
-                return static_cast<std::size_t>(temp_file->size());
+                return temp_file->size();
             }
             return data.size();
         }
@@ -133,7 +133,7 @@ namespace wavex::utils {
      * @brief Configurable size ceilings and disk spooling thresholds.
      */
     struct MultipartLimits {
-        std::size_t max_memory_buffer{10 * 1024 * 1024}; // 10 MB in RAM; above this spools to disk
+        std::size_t max_memory_buffer{10 * 1024 * 1024}; // 10 MB in RAM; above these spools to disk
         std::size_t max_file_size{500 * 1024 * 1024};     // 500 MB max per file
         std::size_t max_total_size{1024 * 1024 * 1024};   // 1 GB max request payload
         std::filesystem::path temp_dir;                   // Empty uses system temp directory
@@ -356,26 +356,37 @@ namespace wavex::utils {
                     std::chrono::high_resolution_clock::now().time_since_epoch().count());
             }
 
+            // Precompute exact buffer size to eliminate intermediate reallocations
+            std::size_t total_size = 6 + boundary_.size(); // Closing boundary: "--" + boundary_ + "--\r\n"
+            for (const auto &f : fields_) {
+                total_size += 49 + boundary_.size() + f.name.size() + f.value.size();
+            }
+            for (const auto &cf : client_files_) {
+                total_size += 78 + boundary_.size() + cf.name.size() + cf.filename.size() + cf.content_type.size() + cf.content.size();
+            }
+
             std::string body;
-            const std::string crlf = "\r\n";
+            body.reserve(total_size);
+            constexpr std::string_view crlf = "\r\n";
 
             // 1. Write text fields
             for (const auto &f : fields_) {
-                body += "--" + boundary_ + crlf;
-                body += "Content-Disposition: form-data; name=\"" + f.name + "\"" + crlf + crlf;
-                body += f.value + crlf;
+                body.append("--").append(boundary_).append(crlf);
+                body.append("Content-Disposition: form-data; name=\"").append(f.name).append("\"").append(crlf).append(crlf);
+                body.append(f.value).append(crlf);
             }
 
             // 2. Write client-attached files
             for (const auto &cf : client_files_) {
-                body += "--" + boundary_ + crlf;
-                body += "Content-Disposition: form-data; name=\"" + cf.name + "\"; filename=\"" + cf.filename + "\"" + crlf;
-                body += "Content-Type: " + cf.content_type + crlf + crlf;
-                body += cf.content + crlf;
+                body.append("--").append(boundary_).append(crlf);
+                body.append("Content-Disposition: form-data; name=\"").append(cf.name)
+                    .append("\"; filename=\"").append(cf.filename).append("\"").append(crlf);
+                body.append("Content-Type: ").append(cf.content_type).append(crlf).append(crlf);
+                body.append(cf.content).append(crlf);
             }
 
             // 3. Final closing boundary
-            body += "--" + boundary_ + "--" + crlf;
+            body.append("--").append(boundary_).append("--").append(crlf);
 
             return body;
         }
@@ -456,7 +467,7 @@ namespace wavex::utils {
         static std::string_view extract_header_value(const std::string_view headers, const std::string_view name) {
             std::size_t pos = 0;
             while (pos < headers.size()) {
-                auto line_end = headers.find("\n", pos);
+                auto line_end = headers.find('\n', pos);
                 if (line_end == std::string_view::npos) line_end = headers.size();
 
                 std::string_view line = headers.substr(pos, line_end - pos);

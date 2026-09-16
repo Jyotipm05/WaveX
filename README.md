@@ -22,6 +22,10 @@ WaveX draws inspiration from **Rust's Actix Web** (hybrid radix-tree routing), *
 - **🌳 Hybrid Radix-Tree Router** — High-performance radix-tree supporting static segments, dynamic parameters (`:id`), `{id:[0-9]+}` RE2 regex constraints, catch-all wildcards (`*filepath`), and RFC 9110 HTTP methods including `QUERY`.
 - **🌐 Dual-Protocol Coroutine HTTP Client** — Asynchronous, coroutine-native client (`HttpClient`) supporting both HTTP/1.1 & HTTP/2 (RFC 7540), plain TCP and TLS 1.3 OpenSSL encryption, ALPN auto-negotiation (`h2`/`http/1.1`), prior-knowledge `h2c`, domainless IPv4/IPv6 direct endpoints, structured query parameter builders, and multi-payload posting (plain text, form-urlencoded, raw binary, and JSON).
 - **📦 Chunked Transfer-Encoding** — Full streaming support for HTTP/1.1 chunked request and response encoding & decoding.
+- **📁 RFC 7578 Multipart/Form-Data & Disk Spooling** — Complete multipart parsing and building (`MultipartFormData`, `UploadedFile`, `FormField`) with automatic in-memory buffering and configurable disk spooling (`TempFileGuard`) above memory thresholds (`max_memory_buffer`).
+- **🗜️ Zero-Overhead Payload Compression** — Gzip and Deflate compression and decompression (`Compressor`, `CompressionFormat`) with transparent request decoding (`req.decompressed_body()`), client payload compression (`req.compress()`), and client response decompression (`res.decompressed_body()`).
+- **🔀 Fluent Redirection Engine** — Express- & Fastify-compatible redirection (`res.redirect()`, `res.permanent_redirect()`, `res.temporary_redirect()`) with automatic RFC 9110 status code and `Location` header synchronization.
+- **🛡️ Request Body Size Limits & 413 Protection** — Configurable payload ceilings on `Server` (`max_request_size`, `max_memory_buffer`) and dedicated middleware (`wavex::base::body_limit`) immediately returning HTTP 413 Payload Too Large on oversized bodies.
 - **🗂 MIME Type Detection Engine** — Fast, built-in file extension to MIME content-type resolver (`MimeTypes.hpp`) supporting over 50+ common web media types.
 - **🛠 Modern CLI Engine** — High-performance CLI argument parser (`wavex::cli::CliParser`) supporting flags (`--verbose`, `-v`), key-value options (`--host`, `-p`), positional arguments, typed getters (`get_int`, `get_bool`), and automatic `--help` generation.
 - **🔒 TLS 1.3 OpenSSL Encryption Engine** — Strict, native TLS 1.3 server encryption (`enable_tls()`, `wavex::server::TlsConfig`) supporting custom PEM certificate chains (`cert_file`), private key passphrases (`key_password`), DH parameters (`dh_file`), ALPN protocol negotiation (`http/1.1`, `h2`), and strict legacy SSL/TLS protocol disabling (`force_tls13`).
@@ -33,7 +37,6 @@ WaveX draws inspiration from **Rust's Actix Web** (hybrid radix-tree routing), *
   - **Zero Request Loss on Scale-Down**: Retiring workers safely drain their remaining local ring tasks back into `InjectorQueue` on thread exit.
 - **🛡 Pipeline Short-Circuiting** — Middleware rejection (e.g. `401 Unauthorized`) immediately sends the response while skipping downstream middlewares and route handlers.
 - **🧪 Interactive Postman Dev Servers** — Pre-configured CLI-driven testing servers for HTTP/1.1 ([tests/postman_demo_http1_server.cpp](tests/postman_demo_http1_server.cpp)) and HTTP/2 ([tests/postman_demo_http2_server.cpp](tests/postman_demo_http2_server.cpp)) supporting plain and TLS 1.3 modes via WaveX's built-in CLI parser.
-
 
 ---
 
@@ -475,6 +478,129 @@ int main() {
 }
 ```
 
+### 13. Fluent HTTP Redirections
+
+Express- and Fastify-compatible redirections with zero boilerplate:
+
+```cpp
+#include <wavex/wavex.hpp>
+
+int main() {
+    auto &router = wavex::engine::HttpRouter::instance();
+
+    // 1. Default temporary redirect (302 Found)
+    router.get("/old-docs", [](auto &, auto &res) -> asio::awaitable<void> {
+        res.redirect("/docs/v2");
+        co_return;
+    });
+
+    // 2. Custom status redirect (e.g. 307 Temporary Redirect, or 303 See Other)
+    router.post("/login", [](auto &, auto &res) -> asio::awaitable<void> {
+        res.redirect("/dashboard", 307);
+        // Equivalent: res.redirect(307, "/dashboard");
+        co_return;
+    });
+
+    // 3. Permanent redirect (301 Moved Permanently; pass true for 308)
+    router.get("/legacy-api", [](auto &, auto &res) -> asio::awaitable<void> {
+        res.permanent_redirect("/api/v1");
+        co_return;
+    });
+
+    // 4. Temporary redirect helper (302 Found; pass true for 307)
+    router.get("/profile", [](auto &, auto &res) -> asio::awaitable<void> {
+        res.temporary_redirect("/user/profile");
+        co_return;
+    });
+
+    wavex::server::Server server(router, "127.0.0.1", 8080);
+    server.run();
+}
+```
+
+### 14. Multipart/Form-Data & File Upload Handling (RFC 7578)
+
+Parse uploaded files and form fields with transparent in-memory and disk spooling thresholds:
+
+```cpp
+#include <wavex/wavex.hpp>
+
+int main() {
+    auto &router = wavex::engine::HttpRouter::instance();
+
+    router.post("/upload", [](auto &req, auto &res) -> asio::awaitable<void> {
+        if (!req.is_multipart()) {
+            res.status(400).send("Expected multipart/form-data");
+            co_return;
+        }
+
+        // Configure thresholds (files > 5MB are automatically spooled to disk!)
+        wavex::utils::MultipartLimits limits;
+        limits.max_memory_buffer = 5 * 1024 * 1024; // 5MB RAM ceiling
+
+        auto form = req.multipart(limits);
+
+        // Read text fields
+        std::string_view user_id = form.field("user_id").value_or("anonymous");
+
+        // Retrieve uploaded file
+        if (auto avatar = req.file("avatar"); avatar.has_value()) {
+            wavex::log::info("Uploaded file: {} ({} bytes, on disk: {})",
+                             avatar->filename, avatar->size(), avatar->is_on_disk());
+
+            // Save file directly or atomically move spooled temp file to destination
+            bool saved = avatar->save_to("./uploads/" + avatar->filename);
+            if (!saved) {
+                res.status(500).send("Failed to save file");
+                co_return;
+            }
+        }
+
+        res.status(200).json({{"status", "uploaded"}, {"user", std::string(user_id)}});
+        co_return;
+    });
+
+    wavex::server::Server server(router, "127.0.0.1", 8080);
+    // Enforce overall request payload limit (50MB) and RAM buffer ceiling (10MB)
+    server.max_request_size(50 * 1024 * 1024);
+    server.max_memory_buffer(10 * 1024 * 1024);
+    server.run();
+}
+```
+
+### 15. Client File Uploads & Payload Compression
+
+Compose multipart files, compress client payloads, and save binary responses to disk:
+
+```cpp
+#include <wavex/Client/HttpClient.hpp>
+#include <wavex/Utils/Utils.hpp>
+
+asio::awaitable<void> upload_file() {
+    wavex::client::HttpClient client;
+
+    // 1. Build multipart request with files and fields
+    wavex::client::ClientRequest req(wavex::protos::http::method::POST, "http://127.0.0.1:8080/upload");
+    req.add_field("user_id", "42")
+       .add_file("document", "report.pdf", "%PDF-1.4...", "application/pdf")
+       .add_file_from_path("avatar", "./assets/photo.png");
+
+    auto res = co_await client.send(req);
+    wavex::log::info("Upload response: {}", res.status_code());
+
+    // 2. Raw binary compressed upload
+    wavex::client::ClientRequest binary_req(wavex::protos::http::method::PUT, "http://127.0.0.1:8080/raw");
+    binary_req.set_body("Large data payload...")
+              .compress(wavex::utils::CompressionFormat::Gzip);
+
+    auto binary_res = co_await client.send(binary_req);
+
+    // 3. Save response directly to disk
+    binary_res.save_to_file("./downloaded_file.bin");
+    co_return;
+}
+```
+
 ---
 
 ## Architecture
@@ -519,12 +645,22 @@ graph LR
         HRes --> Server
     end
 
+    subgraph "Utils"
+        Multipart["MultipartFormData<br/><small>RFC 7578 + disk spooler</small>"]
+        Compression["Compressor<br/><small>Gzip / Deflate</small>"]
+        TempFile["TempFileGuard<br/><small>RAII temp file</small>"]
+    end
+
     subgraph "CLI"
         CLIApp["Cli::CliParser<br/><small>options, flags & positionals</small>"]
     end
 
     Req --> HReq
     Res --> HRes
+    Multipart --> HReq
+    Multipart --> Client
+    Compression --> HReq
+    Compression --> Client
     Chainable --> Http1Router
     Chainable --> Http2Router
     Http1Router --> Server
@@ -624,22 +760,26 @@ flowchart TD
 | `Base/Uri` / `Base/Url`    | ✅ Complete | RFC 3986 URI encode/decode & URL query string parser                                                                                      |
 | `Base/MimeTypes`           | ✅ Complete | Fast file extension to MIME type mappings (`mime_type_from_ext`)                                                                          |
 | `Base/Chainable`           | ✅ Complete | C++23 "Deducing `this`" static pipeline dispatch (`StaticChain`, `make_chain`, `KeepAlivePolicy`, `ConditionalChainable`)                 |
-| `Base/Request`             | ✅ Complete | Protocol-agnostic CRTP request base (`Request<Derived>`, zero-vtable)                                                                     |
-| `Base/Response`            | ✅ Complete | Protocol-agnostic CRTP response builder (`Response<Derived>`, zero-vtable, fluent API)                                                    |
-| `Base/MiddleWare`          | ✅ Complete | Coroutine-aware middleware template (`GenericMiddlewareFn`), linear pipeline, `keep_alive` & `sse_stay_active`                            |
+| `Base/Request`             | ✅ Complete | Protocol-agnostic CRTP request base (`Request<Derived>`, zero-vtable, multipart & query accessors)                                       |
+| `Base/Response`            | ✅ Complete | Protocol-agnostic CRTP response builder (`Response<Derived>`, zero-vtable, fluent API & `redirect` helpers)                               |
+| `Base/MiddleWare`          | ✅ Complete | Coroutine-aware middleware template (`GenericMiddlewareFn`), linear pipeline, `keep_alive`, `sse_stay_active` & `body_limit`               |
 | `Engine/Router`            | ✅ Complete | Protocol-agnostic radix tree with RE2 regex, wildcard matching & configurable 404 handler                                                 |
 | `Engine/HttpRouter`        | ✅ Complete | HTTP/1.1 (`Http1Router`) & HTTP/2 (`Http2Router`) method convenience routing (`get`, `post`, etc.) & 404 customization                    |
 | `Server/LocalQueue`        | ✅ Complete | Per-worker 256-slot ring buffer for ultra-fast task stealing                                                                              |
 | `Server/InjectorQueue`     | ✅ Complete | Global unbounded MPMC task overflow queue with atomic size tracking                                                                       |
 | `Server/ThreadPool`        | ✅ Complete | Adaptive Tokio-style work-stealing thread pool with load hysteresis                                                                       |
-| `Server/Server`            | ✅ Complete | Coroutine TCP & TLS 1.3 server (`Http1Server`, `Http2Server`) with master acceptor, worker pool, ALPN, Keep-Alive & 404                   |
+| `Server/Server`            | ✅ Complete | Coroutine TCP & TLS 1.3 server with master acceptor, worker pool, ALPN, Keep-Alive, 404, payload limit & memory spooling                   |
 | `Server/TlsConfig`         | ✅ Complete | TLS 1.3 server encryption config (`cert_file`, `key_file`, `key_password`, `dh_file`, `force_tls13`)                                      |
 | `protos/ProtocolTraits`    | ✅ Complete | Protocol session traits (`protocol_traits<Codec>`) for prefaces, keep-alive, response prep & ALPN                                         |
-| `protos/http/http1codec`   | ✅ Complete | Zero-copy HTTP/1.x parser, encoder, response decoder, chunked framing & stream pipelining                                                 |
+| `protos/http/http1codec`   | ✅ Complete | Zero-copy HTTP/1.x parser, encoder, response decoder, chunked framing, status text & stream pipelining                                     |
 | `protos/http/http2codec`   | ✅ Complete | Full RFC 7540 binary framing, RFC 7541 HPACK encoder/decoder, stream multiplexing & SETTINGS negotiation                                  |
-| `protos/http/HttpRequest`  | ✅ Complete | HTTP/1.1 (`Http1Request`) & HTTP/2 (`Http2Request`) with zero-copy stream parsing & keep-alive detection                                  |
-| `protos/http/HttpResponse` | ✅ Complete | HTTP/1.1 (`Http1Response`) & HTTP/2 (`Http2Response`) with injected write sink for streaming, commitment & fluent builder API             |
-| `Client/HttpClient`        | ✅ Complete | Coroutine HTTP/1.1 & HTTP/2 client with plain/TLS 1.3, ALPN auto-negotiation, domainless IPv4/IPv6, query builder & multi-payload posting |
+| `protos/http/HttpRequest`  | ✅ Complete | HTTP/1.1 & HTTP/2 with zero-copy stream parsing, keep-alive, multipart form parsing, decompressed body & file save                         |
+| `protos/http/HttpResponse` | ✅ Complete | HTTP/1.1 & HTTP/2 with injected write sink for streaming, commitment & fluent builder API                                                 |
+| `Client/HttpClient`        | ✅ Complete | Coroutine HTTP/1.1 & HTTP/2 client with plain/TLS 1.3, multipart form upload, payload compression, and file saving                         |
+| `Utils/TempFile`           | ✅ Complete | RAII temporary file management (`TempFileGuard`) with atomic move/cleanup and custom directory support                                     |
+| `Utils/Compression`        | ✅ Complete | Zero-overhead Gzip & Deflate compression/decompression (`Compressor`, `CompressionFormat`) via CMake-controlled zlib integration          |
+| `Utils/Multipart`          | ✅ Complete | RFC 7578 multipart/form-data parser, builder, in-memory buffering & disk spooling thresholds (`MultipartFormData`)                       |
+| `Utils/Utils`              | ✅ Complete | Umbrella utilities module (`wavex:utils`) and header (`Utils.hpp`) bundling TempFile, Compression, and Multipart                         |
 | `Cli/Cli`                  | ✅ Complete | Type-safe CLI argument parser (`wavex::cli::CliParser`), flag validator, and option engine                                                |
 
 ---
@@ -657,6 +797,7 @@ flowchart TD
 WaveX uses standard [CMake Presets](CMakePresets.json) for rapid Ninja-backed configuration, multicore parallel builds, and automated CTest runs.
 
 #### 1. Configure
+
 ```bash
 # Clone the repository
 git clone https://github.com/Jyotipm05/WaveX.git
@@ -674,6 +815,7 @@ cmake --preset tsan   # Thread Sanitizer
 ```
 
 #### 2. Build
+
 ```bash
 # Fast build (10 parallel jobs)
 cmake --build --preset fast-dev
@@ -686,6 +828,7 @@ cmake --build --preset fast-release
 ```
 
 #### 3. Run Tests
+
 ```bash
 # Run all automated tests via test preset
 ctest --preset run-tests --output-on-failure
@@ -732,14 +875,12 @@ Both servers support the following command-line flags:
 ./build/test-profile/wavex_postman_http1_server.exe                     # Plain HTTP on http://127.0.0.1:8080
 ./build/test-profile/wavex_postman_http1_server.exe --lan               # Host on LAN using current machine IP
 ./build/test-profile/wavex_postman_http1_server.exe --tls               # HTTPS/TLS 1.3 on https://127.0.0.1:8443
-./build/test-profile/wavex_postman_http1_server.exe --tls --lan         # HTTPS/TLS 1.3 on LAN using current machine IP
 ./build/test-profile/wavex_postman_http1_server.exe -p 9000             # Custom port
 
 # 2. HTTP/2 Server
 ./build/test-profile/wavex_postman_http2_server.exe                     # Cleartext HTTP/2 (h2c) on http://127.0.0.1:8082
 ./build/test-profile/wavex_postman_http2_server.exe --lan               # Cleartext HTTP/2 on LAN using current machine IP
 ./build/test-profile/wavex_postman_http2_server.exe --tls               # HTTP/2 over TLS 1.3 (h2) on https://127.0.0.1:8444
-./build/test-profile/wavex_postman_http2_server.exe --tls --lan         # HTTP/2 over TLS 1.3 on LAN using current machine IP
 ./build/test-profile/wavex_postman_http2_server.exe --tls -p 9444       # Custom port with TLS
 ```
 
@@ -768,6 +909,7 @@ curl -k --http2 -H "Authorization: Bearer secret123" https://127.0.0.1:8444/api/
 | [nlohmann/json](https://github.com/nlohmann/json) | Modern C++ JSON parsing & serialization         | MIT          |
 | [Google RE2](https://github.com/google/re2)       | Linear-time regex for route pattern constraints | BSD 3-Clause |
 | [OpenSSL](https://www.openssl.org/)               | TLS 1.3 encryption & ALPN negotiation           | Apache-2.0   |
+| [Zlib](https://zlib.net/) *(optional)*            | Payload & body compression (Gzip / Deflate)     | Zlib         |
 
 ---
 
@@ -780,8 +922,8 @@ include/wavex/
 │   ├── Chainable.hpp        ← C++23 Deducing-this static dispatch & StaticChain
 │   ├── Logger.hpp           ← Levelled logger
 │   ├── Request.hpp          ← Abstract request base
-│   ├── Response.hpp         ← Abstract response + fluent API
-│   ├── MiddleWare.hpp       ← Middleware definition
+│   ├── Response.hpp         ← Abstract response + fluent API & redirects
+│   ├── MiddleWare.hpp       ← Middleware definitions (keep_alive, body_limit)
 │   ├── MimeTypes.hpp        ← File extension to MIME type resolver
 │   ├── Uri.hpp              ← RFC 3986 URI utilities
 │   └── Url.hpp              ← URL & query string parser
@@ -794,7 +936,12 @@ include/wavex/
 │   ├── Server.hpp           ← Coroutine TCP & TLS 1.3 server (Http1Server & Http2Server)
 │   └── TlsConfig.hpp        ← TLS 1.3 encryption configuration
 ├── Client/
-│   └── HttpClient.hpp       ← Async coroutine HTTP client
+│   └── HttpClient.hpp       ← Async coroutine HTTP client with multipart & compression
+├── Utils/
+│   ├── Utils.hpp            ← Umbrella header for utilities
+│   ├── TempFile.hpp         ← RAII temporary file guard & atomic file mover
+│   ├── Compression.hpp      ← Zero-overhead Gzip & Deflate compressor
+│   └── Multipart.hpp        ← RFC 7578 multipart parser, builder & disk spooler
 ├── Cli/
 │   └── Cli.hpp              ← Subcommand and CLI option parser
 └── protos/
