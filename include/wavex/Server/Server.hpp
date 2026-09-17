@@ -49,12 +49,12 @@
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
 #include <asio/ssl.hpp>
-#include <openssl/ssl.h>
 #endif
 
 #include <wavex/Engine/HttpRouter.hpp>
 #include <wavex/Server/ThreadPool.hpp>
 #include <wavex/Server/TlsConfig.hpp>
+#include <wavex/Base/Memory.hpp>
 
 namespace wavex::server {
     /**
@@ -65,13 +65,13 @@ namespace wavex::server {
      * @tparam RouterType Router specialization (default `engine::HttpRouter<Codec>`).
      */
     template<typename Codec = wavex::protos::http::http1codec,
-             typename RouterType = wavex::engine::HttpRouter<Codec> >
+        typename RouterType = wavex::engine::HttpRouter<Codec> >
     class Server {
     public:
         using codec_type = Codec;
-        using traits = wavex::protos::protocol_traits<Codec>;
-        using RequestType = typename RouterType::RequestType;
-        using ResponseType = typename RouterType::ResponseType;
+        using traits = protos::protocol_traits<Codec>;
+        using RequestType = RouterType::RequestType;
+        using ResponseType = RouterType::ResponseType;
 
         /**
          * @brief Constructs a Server listening on the specified address and port.
@@ -91,6 +91,7 @@ namespace wavex::server {
         }
 
         Server(const Server &) = delete;
+
         Server &operator=(const Server &) = delete;
 
         /**
@@ -134,6 +135,8 @@ namespace wavex::server {
                 return;
             }
             is_running_ = true;
+            // Pre-compile all middleware chains for zero-allocation resolve() hot path
+            router_.freeze();
             asio::co_spawn(master_io_, accept_loop(), asio::detached);
             master_io_.run();
         }
@@ -188,6 +191,38 @@ namespace wavex::server {
             return max_memory_buffer_;
         }
 
+        /// Configure maximum number of query parameters per request (default: 64, hard cap → 431)
+        void set_max_query_params(std::size_t max) noexcept {
+            max_query_params_ = max;
+        }
+
+        /// Get configured maximum query parameters per request
+        [[nodiscard]] std::size_t max_query_params() const noexcept {
+            return max_query_params_;
+        }
+
+        /// Configure maximum number of HTTP headers per request (default: 100, hard cap → 431)
+        void set_max_headers(std::size_t max) noexcept {
+            max_headers_ = max;
+        }
+
+        /// Get configured maximum number of HTTP headers per request
+        [[nodiscard]] std::size_t max_headers() const noexcept {
+            return max_headers_;
+        }
+
+        /**
+         * @brief Post pool.release() to all worker threads to trim idle slab memory.
+         *
+         * Each worker thread's thread_local pool retains slab memory after burst traffic.
+         * Calling trim_memory() reclaims that memory back to the OS on the next idle cycle.
+         * Useful in container deployments where RSS is visible, and you want predictable
+         * memory footprint after traffic subsides.
+         */
+        void trim_memory() {
+            pool_.post_all([] { wavex::memory::get_thread_local_pool().release(); });
+        }
+
         using NotFoundHandler = std::function<asio::awaitable<void>(RequestType &, ResponseType &)>;
 
         /**
@@ -206,13 +241,13 @@ namespace wavex::server {
         void set_not_found(std::string body, std::string content_type = "text/plain") {
             server_not_found_handler_ = [b = std::move(body), ct = std::move(content_type)](
                 RequestType &, ResponseType &res) -> asio::awaitable<void> {
-                    res.status(404);
-                    if (!ct.empty()) {
-                        res.set("Content-Type", ct);
-                    }
-                    res.send(b);
-                    co_return;
-                };
+                        res.status(404);
+                        if (!ct.empty()) {
+                            res.set("Content-Type", ct);
+                        }
+                        res.send(b);
+                        co_return;
+                    };
         }
 
         /**
@@ -245,8 +280,10 @@ namespace wavex::server {
         TlsConfig tls_config_;
         std::chrono::seconds keep_alive_timeout_{5};
         unsigned max_keep_alive_requests_{1000};
-        size_t max_request_size_{100 * 1024 * 1024};    ///< Default 100MB limit
-        size_t max_memory_buffer_{10 * 1024 * 1024};    ///< Default 10MB memory threshold
+        size_t max_request_size_{100 * 1024 * 1024}; ///< Default 100MB limit
+        size_t max_memory_buffer_{10 * 1024 * 1024}; ///< Default 10MB memory threshold
+        std::size_t max_query_params_{64}; ///< Max query params per request (hard cap → 431)
+        std::size_t max_headers_{100}; ///< Max headers per request (hard cap → 431)
         std::optional<NotFoundHandler> server_not_found_handler_{std::nullopt};
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
@@ -341,7 +378,10 @@ namespace wavex::server {
             try {
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
                 // Asynchronously perform TLS handshake on worker thread if SSL stream
-                if constexpr (requires { stream.async_handshake(asio::ssl::stream_base::server, asio::use_awaitable); }) {
+                if constexpr (requires
+                {
+                    stream.async_handshake(asio::ssl::stream_base::server, asio::use_awaitable);
+                }) {
                     asio::error_code hec;
                     co_await stream.async_handshake(
                         asio::ssl::stream_base::server,
@@ -405,7 +445,19 @@ namespace wavex::server {
                     ++request_count;
                     const bool keep = traits::keep_alive(req, request_count, max_keep_alive_requests_);
                     const unsigned remaining =
-                        request_count < max_keep_alive_requests_ ? max_keep_alive_requests_ - request_count : 0;
+                            request_count < max_keep_alive_requests_ ? max_keep_alive_requests_ - request_count : 0;
+
+                    // Hard cap: reject requests that overflow query param or header limits
+                    if (req.has_query_param_overflow()) {
+                        ResponseType err_res;
+                        traits::prepare_response(req, err_res, false, 0, 0);
+                        err_res.status(431).send("Request Header Fields Too Large");
+                        co_await asio::async_write(stream, asio::buffer(err_res.serialize()),
+                                                   asio::use_awaitable);
+                        stream_buf.erase(0, req.consumed_bytes());
+                        if (!keep) break;
+                        continue;
+                    }
 
                     auto match = router_.resolve(req.method_type(), req.path());
 
@@ -414,36 +466,43 @@ namespace wavex::server {
                         res.stream_id(req.stream_id());
                     }
 
+                    // Copy route params from RouteMatch into the request
+                    if (match) {
+                        for (const auto &[k, v]: match->params) {
+                            req.params.insert_or_assign(k, v);
+                        }
+                    }
+
                     // Inject per-connection write sink for streaming transfers (chunked, send_file)
                     if constexpr (requires { res.set_write_sink({}); }) {
                         res.set_write_sink([&stream](const std::string_view data,
                                                      const std::chrono::milliseconds timeout)
-                            -> asio::awaitable<std::expected<void, std::error_code> > {
-                            auto ex = co_await asio::this_coro::executor;
-                            asio::steady_timer timer(ex, timeout);
-                            bool timed_out = false;
-                            timer.async_wait([&](const std::error_code ec) {
-                                if (!ec) {
-                                    timed_out = true;
-                                    std::error_code cancel_ec;
-                                    std::ignore = stream.lowest_layer().cancel(cancel_ec);
+                        -> asio::awaitable<std::expected<void, std::error_code> > {
+                                auto ex = co_await asio::this_coro::executor;
+                                asio::steady_timer timer(ex, timeout);
+                                bool timed_out = false;
+                                timer.async_wait([&](const std::error_code ec) {
+                                    if (!ec) {
+                                        timed_out = true;
+                                        std::error_code cancel_ec;
+                                        std::ignore = stream.lowest_layer().cancel(cancel_ec);
+                                    }
+                                });
+
+                                auto [write_ec, bytes_written] = co_await asio::async_write(
+                                    stream, asio::buffer(data), asio::as_tuple(asio::use_awaitable));
+                                (void) timer.cancel();
+
+                                if (timed_out || write_ec == asio::error::operation_aborted) {
+                                    std::error_code close_ec;
+                                    std::ignore = stream.lowest_layer().close(close_ec);
+                                    co_return std::unexpected(std::make_error_code(std::errc::timed_out));
                                 }
+                                if (write_ec) {
+                                    co_return std::unexpected(write_ec);
+                                }
+                                co_return std::expected<void, std::error_code>{};
                             });
-
-                            auto [write_ec, bytes_written] = co_await asio::async_write(
-                                stream, asio::buffer(data), asio::as_tuple(asio::use_awaitable));
-                            (void) timer.cancel();
-
-                            if (timed_out || write_ec == asio::error::operation_aborted) {
-                                std::error_code close_ec;
-                                std::ignore = stream.lowest_layer().close(close_ec);
-                                co_return std::unexpected(std::make_error_code(std::errc::timed_out));
-                            }
-                            if (write_ec) {
-                                co_return std::unexpected(write_ec);
-                            }
-                            co_return std::expected<void, std::error_code>{};
-                        });
                     }
 
                     traits::prepare_response(req, res, keep,
@@ -469,6 +528,13 @@ namespace wavex::server {
                     }
 
                     stream_buf.erase(0, req.consumed_bytes());
+
+                    // Trim stream_buf RSS if it has grown large and is now empty
+                    if (stream_buf.capacity() > 64 * 1024 && stream_buf.empty()) {
+                        stream_buf.shrink_to_fit();
+                        stream_buf.reserve(8192); // restore working reservation
+                    }
+
                     if (!keep) break;
                 }
             } catch (const std::exception &) {

@@ -24,6 +24,7 @@
 #include <filesystem>
 #include <system_error>
 #include <functional>
+#include <memory_resource>
 #include <asio/ip/tcp.hpp>
 #include <asio/as_tuple.hpp>
 #include <asio/write.hpp>
@@ -117,13 +118,17 @@ namespace wavex::protos::http {
          *        string_view members so they point into THIS object's buffers.
          */
         HttpResponse(const HttpResponse &other)
-            : base::Response(other),
+            : Response(other),
               socket_(other.socket_),
               write_sink_(other.write_sink_),
               stream_id_(other.stream_id_),
+              status_text_(other.status_text_),
               buffer_owner_(other.buffer_owner_),
               dechunked_body_storage_(other.dechunked_body_storage_),
+              body_view_(other.body_view_),
               parsed_(other.parsed_),
+              headers_views_(other.headers_views_),
+              header_store_(other.header_store_),
               is_headers_sent_(other.is_headers_sent_) {
             const auto buf_base = other.buffer_owner_.data();
             const auto buf_len = other.buffer_owner_.size();
@@ -169,19 +174,131 @@ namespace wavex::protos::http {
             }
 
             // Rebase headers_views_ (all from buffer_owner_ if http1)
+            headers_views_.clear();
             headers_views_.reserve(other.headers_views_.size());
             if (buf_len > 0 && std::is_same_v<Codec, wavex::protos::http::http1codec>) {
-                for (const auto &[k, v]: other.headers_views_)
-                    headers_views_.emplace_back(rebase_buf(k), rebase_buf(v));
+                headers_.clear();
+                for (const auto &[k, v]: other.headers_views_) {
+                    const auto rk = rebase_buf(k);
+                    const auto rv = rebase_buf(v);
+                    headers_views_.emplace_back(rk, rv);
+                    headers_.insert_or_assign_ci(rk, rv);
+                }
             } else {
                 if (!parsed_.headers.empty()) {
-                    for (const auto &h : parsed_.headers) {
+                    for (const auto &h: parsed_.headers) {
                         headers_views_.emplace_back(h.name, h.value);
                     }
                 } else {
                     headers_views_ = other.headers_views_;
                 }
             }
+
+            // Rebuild base headers_ FlatMap and headers_views_ so views point into THIS object's header_store_
+            if (!header_store_.empty()) {
+                headers_.clear();
+                headers_views_.clear();
+                for (const auto &[k, v]: header_store_) {
+                    headers_.insert_or_assign_ci(std::string_view(k), std::string_view(v));
+                    headers_views_.emplace_back(std::string_view(k), std::string_view(v));
+                }
+            }
+        }
+
+        HttpResponse &operator=(const HttpResponse &other) {
+            if (this != &other) {
+                base::Response::operator=(other);
+                socket_ = other.socket_;
+                write_sink_ = other.write_sink_;
+                stream_id_ = other.stream_id_;
+                status_text_ = other.status_text_;
+                buffer_owner_ = other.buffer_owner_;
+                dechunked_body_storage_ = other.dechunked_body_storage_;
+                body_view_ = other.body_view_;
+                parsed_ = other.parsed_;
+                headers_views_ = other.headers_views_;
+                header_store_ = other.header_store_;
+                is_headers_sent_ = other.is_headers_sent_;
+                body_ = other.body_;
+                status_code_ = other.status_code_;
+                if (!header_store_.empty()) {
+                    headers_.clear();
+                    headers_views_.clear();
+                    for (const auto &[k, v]: header_store_) {
+                        headers_.insert_or_assign_ci(std::string_view(k), std::string_view(v));
+                        headers_views_.emplace_back(std::string_view(k), std::string_view(v));
+                    }
+                } else if (!buffer_owner_.empty() && std::is_same_v<Codec, wavex::protos::http::http1codec>) {
+                    const auto buf_base = other.buffer_owner_.data();
+                    const auto buf_len = other.buffer_owner_.size();
+                    const auto my_base = buffer_owner_.data();
+                    auto rebase_buf = [buf_base, buf_len, my_base](const std::string_view sv) -> std::string_view {
+                        if (sv.data() == nullptr) return {};
+                        const auto off = static_cast<std::size_t>(sv.data() - buf_base);
+                        if (off < buf_len && off + sv.size() <= buf_len)
+                            return {my_base + off, sv.size()};
+                        return sv;
+                    };
+                    headers_views_.clear();
+                    headers_.clear();
+                    for (const auto &[k, v]: other.headers_views_) {
+                        const auto rk = rebase_buf(k);
+                        const auto rv = rebase_buf(v);
+                        headers_views_.emplace_back(rk, rv);
+                        headers_.insert_or_assign_ci(rk, rv);
+                    }
+                }
+            }
+            return *this;
+        }
+
+        HttpResponse(HttpResponse &&other) noexcept
+            : base::Response(std::move(other)),
+              socket_(other.socket_),
+              write_sink_(std::move(other.write_sink_)),
+              stream_id_(other.stream_id_),
+              status_text_(other.status_text_),
+              buffer_owner_(std::move(other.buffer_owner_)),
+              dechunked_body_storage_(std::move(other.dechunked_body_storage_)),
+              body_view_(other.body_view_),
+              parsed_(std::move(other.parsed_)),
+              headers_views_(std::move(other.headers_views_)),
+              header_store_(std::move(other.header_store_)),
+              is_headers_sent_(other.is_headers_sent_) {
+            if (!header_store_.empty()) {
+                headers_.clear();
+                headers_views_.clear();
+                for (const auto &[k, v]: header_store_) {
+                    headers_.insert_or_assign_ci(std::string_view(k), std::string_view(v));
+                    headers_views_.emplace_back(std::string_view(k), std::string_view(v));
+                }
+            }
+        }
+
+        HttpResponse &operator=(HttpResponse &&other) noexcept {
+            if (this != &other) {
+                base::Response::operator=(std::move(other));
+                socket_ = other.socket_;
+                write_sink_ = std::move(other.write_sink_);
+                stream_id_ = other.stream_id_;
+                status_text_ = other.status_text_;
+                buffer_owner_ = std::move(other.buffer_owner_);
+                dechunked_body_storage_ = std::move(other.dechunked_body_storage_);
+                body_view_ = other.body_view_;
+                parsed_ = std::move(other.parsed_);
+                headers_views_ = std::move(other.headers_views_);
+                header_store_ = std::move(other.header_store_);
+                is_headers_sent_ = other.is_headers_sent_;
+                if (!header_store_.empty()) {
+                    headers_.clear();
+                    headers_views_.clear();
+                    for (const auto &[k, v]: header_store_) {
+                        headers_.insert_or_assign_ci(std::string_view(k), std::string_view(v));
+                        headers_views_.emplace_back(std::string_view(k), std::string_view(v));
+                    }
+                }
+            }
+            return *this;
         }
 
         /// Attach or update the target socket for immediate response writing
@@ -222,8 +339,11 @@ namespace wavex::protos::http {
 
             headers_views_.clear();
             headers_views_.reserve(parsed_.headers.size());
+            headers_.clear();
+            header_store_.clear();
             for (const auto &[name, value]: parsed_.headers) {
                 headers_views_.emplace_back(name, value);
+                headers_.insert_or_assign_ci(name, value);
             }
             if constexpr (requires { stream_id_ = parsed_.stream_id; }) {
                 stream_id_ = parsed_.stream_id;
@@ -241,6 +361,75 @@ namespace wavex::protos::http {
         }
 
         /**
+         * @brief Set a response header — owns the string storage, stores string_view in base FlatMap.
+         *
+         * Uses case-insensitive update to avoid duplicate headers (RFC 7230 §3.2).
+         * Names and values are copied into header_store_ (owned strings) so that
+         * the string_views stored in headers_ FlatMap remain valid for the Response lifetime.
+         */
+        HttpResponse &set_impl(const std::string_view name, const std::string_view value) {
+            for (auto &[k, v]: header_store_) {
+                if (detail::is_equal(k, name)) {
+                    v = std::string(value);
+                    headers_.insert_or_assign_ci(std::string_view(k), std::string_view(v));
+                    for (auto &hv: headers_views_) {
+                        if (detail::is_equal(hv.first, name)) {
+                            hv.second = std::string_view(v);
+                            return *this;
+                        }
+                    }
+                    headers_views_.emplace_back(std::string_view(k), std::string_view(v));
+                    return *this;
+                }
+            }
+            header_store_.emplace_back(std::string(name), std::string(value));
+            headers_.clear();
+            headers_views_.clear();
+            for (const auto &[k, v]: header_store_) {
+                headers_.insert_or_assign_ci(std::string_view(k), std::string_view(v));
+                headers_views_.emplace_back(std::string_view(k), std::string_view(v));
+            }
+            return *this;
+        }
+
+        /**
+         * @brief Remove a header by name (case-insensitive).
+         *
+         * Removes the entry from both header_store_ and the base FlatMap headers_.
+         * Rebuilds the FlatMap from the remaining store entries to maintain consistency.
+         */
+        HttpResponse &remove_header_impl(const std::string_view name) {
+            auto it = std::ranges::find_if(header_store_, [&](const auto &pair) {
+                return detail::is_equal(pair.first, name);
+            });
+            if (it != header_store_.end()) {
+                header_store_.erase(it);
+            }
+            headers_.clear();
+            headers_views_.clear();
+            for (const auto &[k, v]: header_store_) {
+                headers_.insert_or_assign_ci(std::string_view(k), std::string_view(v));
+                headers_views_.emplace_back(std::string_view(k), std::string_view(v));
+            }
+            return *this;
+        }
+
+        /**
+         * @brief Serialize the HTTP response directly into a PMR/arena-backed string.
+         *
+         * Writes the wire HTTP representation (status line + headers + body) into
+         * an existing pmr::string to avoid a separate heap allocation.
+         * Use this overload in Server::handle_connection() to serialize into the
+         * request arena buffer.
+         *
+         * @param out  Output string to append the serialized response into.
+         */
+        void serialize_to(std::pmr::string &out) const {
+            const std::string wire = serialize_impl();
+            out.append(wire.data(), wire.size());
+        }
+
+        /**
          * @brief Serialize the HTTP response into wire format via Codec::encoder.
          * @return Serialized HTTP response string ready to be transmitted over the socket.
          */
@@ -255,14 +444,14 @@ namespace wavex::protos::http {
                                   : status_text_;
             res.body = body_view_.empty() ? std::string_view(body_) : body_view_;
 
-            if (!headers_views_.empty()) {
-                res.headers.reserve(headers_views_.size());
-                for (const auto &[name, value]: headers_views_) {
-                    res.headers.emplace_back(name, value);
-                }
-            } else {
+            if (!headers_.empty()) {
                 res.headers.reserve(headers_.size());
                 for (const auto &[name, value]: headers_) {
+                    res.headers.emplace_back(name, value);
+                }
+            } else if (!headers_views_.empty()) {
+                res.headers.reserve(headers_views_.size());
+                for (const auto &[name, value]: headers_views_) {
                     res.headers.emplace_back(name, value);
                 }
             }
@@ -275,14 +464,12 @@ namespace wavex::protos::http {
 
         /// Retrieve a header value by name (zero-copy std::string_view)
         [[nodiscard]] std::optional<std::string_view> header(const std::string_view name) const {
-            if (!headers_views_.empty()) {
-                for (const auto &[k, v]: headers_views_) {
-                    if (detail::is_equal(k, name)) return v;
-                }
-            } else {
-                for (const auto &[k, v]: headers_) {
-                    if (detail::is_equal(k, name)) return v;
-                }
+            const auto it = headers_.find_ci(name);
+            if (it != headers_.end()) {
+                return it->second;
+            }
+            for (const auto &[k, v]: headers_views_) {
+                if (detail::is_equal(k, name)) return v;
             }
             return std::nullopt;
         }
@@ -501,14 +688,14 @@ namespace wavex::protos::http {
                                   : status_text_;
             res.body = "";
 
-            if (!headers_views_.empty()) {
-                res.headers.reserve(headers_views_.size());
-                for (const auto &[name, value]: headers_views_) {
-                    res.headers.emplace_back(name, value);
-                }
-            } else {
+            if (!headers_.empty()) {
                 res.headers.reserve(headers_.size());
                 for (const auto &[name, value]: headers_) {
+                    res.headers.emplace_back(name, value);
+                }
+            } else if (!headers_views_.empty()) {
+                res.headers.reserve(headers_views_.size());
+                for (const auto &[name, value]: headers_views_) {
                     res.headers.emplace_back(name, value);
                 }
             }
@@ -525,6 +712,10 @@ namespace wavex::protos::http {
         std::string_view body_view_;
         response_type parsed_;
         std::vector<std::pair<std::string_view, std::string_view> > headers_views_;
+        /// Owned string storage for server-built response headers.
+        /// std::vector backed storage with safe post-insertion view synchronization.
+        /// string_views in headers_views_ and base headers_ FlatMap point into these owned strings.
+        std::vector<std::pair<std::string, std::string> > header_store_;
         bool is_headers_sent_{false};
     };
 

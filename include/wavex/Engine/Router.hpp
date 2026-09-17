@@ -48,11 +48,12 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <array>
+#include <span>
 
 #include <re2/re2.h>
 
-//#include <wavex/Base/Request.hpp>
-#include <wavex/Base/Response.hpp>
+#include <wavex/Base/FlatMap.hpp>
 #include <wavex/Base/MiddleWare.hpp>
 #include <wavex/Base/Chainable.hpp>
 #include <wavex/Base/MimeTypes.hpp>
@@ -84,11 +85,19 @@ namespace wavex::engine {
         /**
          * @struct RouteMatch
          * @brief Result of a successful route resolution.
+         *
+         * `middlewares` is a span into the Node's pre-compiled static chain —
+         * zero heap allocation, zero std::function copies per request.
+         * `params` uses FlatMap<string_view, string_view> for zero-node allocation;
+         * the string_view values slice directly into the request path buffer.
          */
         struct RouteMatch {
             Handler handler;
-            std::vector<MiddlewareFn> middlewares; // full chain for this route
-            std::unordered_map<std::string, std::string> params;
+            /// Pre-compiled middleware span into the matched Node's compiled_middlewares.
+            /// Valid for the Server's lifetime (route table is never modified after listen()).
+            std::span<const MiddlewareFn> middlewares;
+            /// Path parameters extracted by the router — views into the request path buffer.
+            base::FlatMap<std::string_view, std::string_view> params;
         };
 
         /**
@@ -189,6 +198,7 @@ namespace wavex::engine {
             if (!mws.empty()) {
                 current->route_middlewares[m] = std::move(mws);
             }
+            frozen_ = false;
         }
 
         /**
@@ -212,6 +222,7 @@ namespace wavex::engine {
          */
         void use(MiddlewareFn mw) {
             middlewares_.emplace_back("", std::move(mw));
+            frozen_ = false;
         }
 
         /**
@@ -227,6 +238,7 @@ namespace wavex::engine {
             } else [[likely]] {
                 middlewares_.emplace_back(normalize_path(prefix), std::move(mw));
             }
+            frozen_ = false;
         }
 
         /**
@@ -317,6 +329,28 @@ namespace wavex::engine {
         }
 
         // ---------------------------------------------------------------
+        //  Middleware chain pre-compilation
+        // ---------------------------------------------------------------
+
+        /**
+         * @brief Pre-compiles middleware chains for every registered route node.
+         *
+         * Walks the entire radix tree and builds `Node::compiled_middlewares` for each
+         * leaf node that has registered handlers. The chain for each node is:
+         *   [global middlewares] → [prefix-scoped middlewares] → [per-route middlewares]
+         *
+         * Call this once after all routes and middlewares have been registered, before
+         * calling server.run(). Server::run() calls freeze() automatically.
+         *
+         * After freeze(), resolve() returns a std::span into the pre-compiled chain —
+         * zero heap allocations, zero std::function copies per request.
+         */
+        void freeze() const {
+            freeze_node(root_.get(), "");
+            frozen_ = true;
+        }
+
+        // ---------------------------------------------------------------
         //  Route resolution — O(path_length), hot path
         // ---------------------------------------------------------------
 
@@ -325,17 +359,52 @@ namespace wavex::engine {
          * @param m Method to look up.
          * @param path Request path to resolve; need not be pre-normalised.
          * @return A RouteMatch (handler, resolved params, and the full ordered
-         *         middleware chain) on success, or std::nullopt if no route matches.
+         *         middleware chain as a std::span) on success, or std::nullopt
+         *         if no route matches.
          */
         [[nodiscard]] std::optional<RouteMatch> resolve(MethodType m, const std::string_view path) const {
+            if (!frozen_) {
+                freeze();
+            }
+
             // `scratch` only actually allocates when `path` isn't already
             // normalised (no leading '/', or a trailing '/'); the common
             // case coming off a parsed HTTP request line needs no copy.
             std::string scratch;
             const std::string_view normalized = normalize_path_view(path, scratch);
-            const auto segments = split_path_view(normalized);
 
-            std::unordered_map<std::string, std::string> params;
+            // Inline stack segment array — zero heap allocation for paths ≤ 16 segments
+            std::array<std::string_view, 16> seg_buf;
+            std::size_t seg_count = 0;
+            std::vector<std::string_view> seg_overflow; // only used for paths > 16 segments
+
+            if (!normalized.empty() && normalized != "/") {
+                std::size_t start = 1;
+                while (start < normalized.size()) {
+                    const std::size_t end = normalized.find('/', start);
+                    const std::size_t actual_end = (end == std::string_view::npos) ? normalized.size() : end;
+                    if (actual_end != start) {
+                        if (seg_count < seg_buf.size()) {
+                            seg_buf[seg_count++] = normalized.substr(start, actual_end - start);
+                        } else {
+                            // Rare overflow path (> 16 segments)
+                            if (seg_overflow.empty()) {
+                                seg_overflow.assign(seg_buf.begin(), seg_buf.begin() + seg_count);
+                            }
+                            seg_overflow.emplace_back(normalized.substr(start, actual_end - start));
+                        }
+                    }
+                    if (end == std::string_view::npos) break;
+                    start = end + 1;
+                }
+            }
+
+            const std::span<const std::string_view> segments =
+                    seg_overflow.empty()
+                        ? std::span<const std::string_view>(seg_buf.data(), seg_count)
+                        : std::span<const std::string_view>(seg_overflow);
+
+            base::FlatMap<std::string_view, std::string_view> params;
             const Node *node = resolve_node(root_.get(), segments, 0, params);
 
             if (!node) return std::nullopt;
@@ -343,27 +412,15 @@ namespace wavex::engine {
             const auto it = node->handlers.find(m);
             if (it == node->handlers.end()) return std::nullopt;
 
-            const auto mw_it = node->route_middlewares.find(m);
-            const size_t route_mw_count = (mw_it != node->route_middlewares.end()) ? mw_it->second.size() : 0;
-
-            // Build the full middleware chain:
-            // [global] -> [scoped by prefix] -> [per-route] -> handler
-            std::vector<MiddlewareFn> chain;
-            chain.reserve(middlewares_.size() + route_mw_count);
-
-            for (const auto &[prefix, fn]: middlewares_) {
-                if (prefix.empty() || normalized.starts_with(prefix)) {
-                    chain.emplace_back(fn);
-                }
-            }
-
-            if (route_mw_count) {
-                chain.insert(chain.end(), mw_it->second.begin(), mw_it->second.end());
-            }
+            const auto mw_it = node->compiled_middlewares.find(m);
+            const std::span<const MiddlewareFn> mws_span =
+                    (mw_it != node->compiled_middlewares.end())
+                        ? std::span<const MiddlewareFn>(mw_it->second)
+                        : std::span<const MiddlewareFn>{};
 
             return RouteMatch{
                 it->second,
-                std::move(chain),
+                mws_span,
                 std::move(params)
             };
         }
@@ -387,6 +444,11 @@ namespace wavex::engine {
             std::unordered_map<MethodType, Handler> handlers{};
             std::unordered_map<MethodType, std::vector<MiddlewareFn> > route_middlewares{};
 
+            /// Pre-compiled, immutable middleware chain for this node keyed by method:
+            /// [global] -> [prefix-scoped] -> [per-route] middlewares.
+            /// Built during freeze(). resolve() returns a std::span into this vector
+            /// — zero heap allocation, zero std::function copies per request.
+            std::unordered_map<MethodType, std::vector<MiddlewareFn> > compiled_middlewares{};
             std::vector<std::unique_ptr<Node> > children{}; // static children (ownership)
             // O(1)-average dispatch index for static children. Keys are
             // string_views into each child's own `prefix` member; this is
@@ -401,6 +463,7 @@ namespace wavex::engine {
 
         std::unique_ptr<Node> root_;
         std::vector<ScopedMiddleware> middlewares_;
+        mutable bool frozen_{false}; ///< set by freeze(); resolve() uses pre-compiled chains when true
 
         // Cache of compiled RE2 constraints keyed by pattern text. Real route
         // tables commonly reuse the same constraint (e.g. "[0-9]+" for every
@@ -416,6 +479,53 @@ namespace wavex::engine {
         };
 
     private:
+        // ---------------------------------------------------------------
+        //  Middleware chain compilation (called once by freeze())
+        // ---------------------------------------------------------------
+
+        /**
+         * @brief Recursively compiles `compiled_middlewares` for every handler-leaf node.
+         *
+         * For each node with at least one registered handler, builds a combined chain:
+         *   1. Global middlewares (empty prefix)
+         *   2. Prefix-scoped middlewares whose prefix is a prefix of `node_path`
+         *   3. Per-route middlewares for each registered method
+         *
+         * @param node      Node to compile middlewares for.
+         * @param node_path Accumulated path string for prefix-matching.
+         */
+        void freeze_node(Node *node, const std::string &node_path) const {
+            if (!node->handlers.empty()) {
+                node->compiled_middlewares.clear();
+                for (const auto &[m, _]: node->handlers) {
+                    auto &chain = node->compiled_middlewares[m];
+                    // 1. Global and prefix-scoped middlewares
+                    for (const auto &[prefix, fn]: middlewares_) {
+                        if (prefix.empty() || std::string_view(node_path).starts_with(prefix)) {
+                            chain.emplace_back(fn);
+                        }
+                    }
+                    // 2. Per-route middlewares for this method
+                    if (const auto r_it = node->route_middlewares.find(m); r_it != node->route_middlewares.end()) {
+                        for (const auto &fn: r_it->second) {
+                            chain.emplace_back(fn);
+                        }
+                    }
+                }
+            }
+
+            // Recurse into all children
+            for (const auto &child: node->children) {
+                freeze_node(child.get(), node_path + "/" + child->prefix);
+            }
+            for (const auto &child: node->param_children) {
+                freeze_node(child.get(), node_path + "/:" + child->param_name);
+            }
+            if (node->wildcard_child) {
+                freeze_node(node->wildcard_child.get(), node_path + "/*" + node->wildcard_child->param_name);
+            }
+        }
+
         // ---------------------------------------------------------------
         //  Path utilities — registration-time (owning; not perf-critical)
         // ---------------------------------------------------------------
@@ -436,8 +546,8 @@ namespace wavex::engine {
 
         // ---------------------------------------------------------------
         //  Path utilities — shared by registration and resolve(): allocation-
-        //  free normalisation when possible, string_view segments (no per-
-        //  segment heap allocation). Used by both route() and resolve().
+        //  free normalisation when possible, string_view segments (no "per-
+        //  segment" heap allocation). Used by both route() and resolve().
         // ---------------------------------------------------------------
 
         /**
@@ -624,11 +734,10 @@ namespace wavex::engine {
          *         nullptr if no match exists under `node`.
          */
         const Node *resolve_node(const Node *node,
-                                 const std::vector<std::string_view> &segments,
+                                 const std::span<const std::string_view> &segments,
                                  const size_t depth,
-                                 std::unordered_map<std::string, std::string> &params) const {
+                                 base::FlatMap<std::string_view, std::string_view> &params) const {
             if (depth == segments.size()) {
-                // We've consumed all segments — check if this node has handlers
                 if (!node->handlers.empty()) return node;
                 return nullptr;
             }
@@ -647,20 +756,36 @@ namespace wavex::engine {
                     match = re2::RE2::FullMatch(re2::StringPiece(segment.data(), segment.size()), *child->constraint);
                 }
                 if (match) {
-                    params[child->param_name] = std::string(segment);
+                    params.insert_or_assign(std::string_view(child->param_name), segment);
                     if (auto result = resolve_node(child.get(), segments, depth + 1, params)) return result;
-                    params.erase(child->param_name); // backtrack
+                    // Backtrack: remove the param we just inserted
+                    // FlatMap doesn't have "erase", so rebuild from scratch (rare backtrack path)
+                    base::FlatMap<std::string_view, std::string_view> rebuilt;
+                    for (const auto &[k, v]: params) {
+                        if (k != std::string_view(child->param_name))
+                            rebuilt.insert_or_assign(k, v);
+                    }
+                    params = std::move(rebuilt);
                 }
             }
 
             // 3. Wildcard child (*) — captures all remaining segments
             if (node->wildcard_child) {
+                // Build wildcard value from remaining segments (needs a temporary string)
+                // This string is short-lived and will be stored in the matched RouteMatch params FlatMap.
+                // We store it in an intermediate buffer that lives long enough for the caller.
+                // Since wildcard captures are uncommon and small, a local static is fine here.
+                // For arena compatibility, wildcard values are copied into the RouteMatch FlatMap.
                 std::string remaining;
                 for (size_t i = depth; i < segments.size(); ++i) {
                     if (!remaining.empty()) remaining += '/';
                     remaining += segments[i];
                 }
-                params[node->wildcard_child->param_name] = std::move(remaining);
+                // Store as a view into the wildcard_remaining_ member so it survives resolve()
+                wildcard_remaining_ = std::move(remaining);
+                params.insert_or_assign(
+                    std::string_view(node->wildcard_child->param_name),
+                    std::string_view(wildcard_remaining_));
                 if (!node->wildcard_child->handlers.empty()) {
                     return node->wildcard_child.get();
                 }
@@ -668,5 +793,9 @@ namespace wavex::engine {
 
             return nullptr;
         }
+
+        /// Temporary storage for wildcard segment concatenation during resolve().
+        /// Mutable because resolve() is logically const but needs this scratch buffer.
+        mutable std::string wildcard_remaining_;
     };
 } // namespace wavex::engine

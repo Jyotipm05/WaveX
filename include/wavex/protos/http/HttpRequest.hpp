@@ -16,11 +16,14 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <array>
 #include <utility>
 #include <optional>
 
 #include <wavex/Base/Request.hpp>
 #include <wavex/Base/Url.hpp>
+#include <wavex/Base/Uri.hpp>
+
 #include <wavex/protos/http/http1codec.hpp>
 #include <wavex/Utils/Multipart.hpp>
 #include <wavex/Utils/Compression.hpp>
@@ -41,6 +44,8 @@ namespace wavex::protos::http {
 
         using base::Request::query;
         using base::Request::params;
+        using base::Request::param;
+        using base::Request::query_param;
 
         HttpRequest() = default;
 
@@ -54,6 +59,74 @@ namespace wavex::protos::http {
             parsed_.method_type = m;
             raw_target_owned_ = std::string(target);
             extract_path_query(raw_target_owned_);
+        }
+
+        HttpRequest(const HttpRequest &other)
+            : base::Request(other),
+              buffer_(other.buffer_),
+              consumed_(other.consumed_),
+              parsed_(other.parsed_),
+              path_(other.path_),
+              raw_target_owned_(other.raw_target_owned_),
+              path_target_owned_(other.path_target_owned_),
+              body_owned_(other.body_owned_),
+              headers_owned_(other.headers_owned_),
+              query_decoded_buf_(other.query_decoded_buf_),
+              query_param_overflow_(other.query_param_overflow_) {
+            rebase_query_views(other.query_decoded_buf_.data(), other.query_decoded_buf_.size());
+        }
+
+        HttpRequest &operator=(const HttpRequest &other) {
+            if (this != &other) {
+                base::Request::operator=(other);
+                buffer_ = other.buffer_;
+                consumed_ = other.consumed_;
+                parsed_ = other.parsed_;
+                path_ = other.path_;
+                raw_target_owned_ = other.raw_target_owned_;
+                path_target_owned_ = other.path_target_owned_;
+                body_owned_ = other.body_owned_;
+                headers_owned_ = other.headers_owned_;
+                query_decoded_buf_ = other.query_decoded_buf_;
+                query_param_overflow_ = other.query_param_overflow_;
+                rebase_query_views(other.query_decoded_buf_.data(), other.query_decoded_buf_.size());
+            }
+            return *this;
+        }
+
+        HttpRequest(HttpRequest &&other) noexcept
+            : base::Request(std::move(other)),
+              buffer_(std::move(other.buffer_)),
+              consumed_(other.consumed_),
+              parsed_(std::move(other.parsed_)),
+              path_(std::move(other.path_)),
+              raw_target_owned_(std::move(other.raw_target_owned_)),
+              path_target_owned_(std::move(other.path_target_owned_)),
+              body_owned_(std::move(other.body_owned_)),
+              headers_owned_(std::move(other.headers_owned_)),
+              query_decoded_buf_(std::move(other.query_decoded_buf_)),
+              query_param_overflow_(other.query_param_overflow_) {
+            rebase_query_views(other.query_decoded_buf_.data(), query_decoded_buf_.size());
+        }
+
+        HttpRequest &operator=(HttpRequest &&other) noexcept {
+            if (this != &other) {
+                const char *old_base = other.query_decoded_buf_.data();
+                const size_t old_len = other.query_decoded_buf_.size();
+                base::Request::operator=(std::move(other));
+                buffer_ = std::move(other.buffer_);
+                consumed_ = other.consumed_;
+                parsed_ = std::move(other.parsed_);
+                path_ = std::move(other.path_);
+                raw_target_owned_ = std::move(other.raw_target_owned_);
+                path_target_owned_ = std::move(other.path_target_owned_);
+                body_owned_ = std::move(other.body_owned_);
+                headers_owned_ = std::move(other.headers_owned_);
+                query_decoded_buf_ = std::move(other.query_decoded_buf_);
+                query_param_overflow_ = other.query_param_overflow_;
+                rebase_query_views(old_base, old_len);
+            }
+            return *this;
         }
 
         /// Parse the owned buffer (server side). Returns true on success.
@@ -83,6 +156,12 @@ namespace wavex::protos::http {
 
         /// Returns number of bytes consumed by the parser for this request
         [[nodiscard]] size_t consumed_bytes() const noexcept { return consumed_; }
+
+        /**
+         * @brief Returns true if the request's query string exceeded the hard cap (kMaxQueryParams).
+         * Server::handle_connection checks this to emit a 431 response before routing.
+         */
+        [[nodiscard]] bool has_query_param_overflow() const noexcept { return query_param_overflow_; }
 
         /// Checks if this HTTP request indicates the connection should stay active (Keep-Alive)
         [[nodiscard]] bool should_keep_alive() const noexcept {
@@ -209,9 +288,9 @@ namespace wavex::protos::http {
          */
         [[nodiscard]] std::optional<std::string> decompressed_body(
             const utils::CompressionFormat format = utils::CompressionFormat::Gzip) const {
-            auto decompress_helper = [](const std::string_view d, const utils::CompressionFormat fmt) -> std::optional<std::string> {
-                auto res = utils::Compressor::decompress(d, fmt);
-                if (res) return *res;
+            auto decompress_helper = [](const std::string_view d,
+                                        const utils::CompressionFormat fmt) -> std::optional<std::string> {
+                if (auto res = utils::Compressor::decompress(d, fmt)) return *res;
                 return std::nullopt;
             };
             const auto enc = header_impl("Content-Encoding");
@@ -253,6 +332,20 @@ namespace wavex::protos::http {
         [[nodiscard]] request_type &raw() { return parsed_; }
 
     private:
+        /**
+         * @brief Extract path and query parameters from the full request target.
+         *
+         * Strips any scheme+authority prefix (for absolute-form targets), then
+         * splits at the first '?' to separate path from query. The path is stored
+         * as an owned string (path_) and also sets parsed_.target. Query string
+         * parameters are percent-decoded and inserted into the FlatMap `query`.
+         *
+         * Hard cap: if the query string contains more than kMaxQueryParams pairs,
+         * the overflow is silently discarded. The Server enforces a 431 rejection
+         * before routing when this flag is set.
+         *
+         * @param full_target  The raw request target (e.g. "/user/123?page=2").
+         */
         void extract_path_query(const std::string_view full_target) {
             std::string_view path_and_query = full_target;
             if (const size_t scheme_pos = full_target.find("://"); scheme_pos != std::string_view::npos) {
@@ -264,20 +357,96 @@ namespace wavex::protos::http {
                 }
             }
 
-            std::string local_path;
-            std::unordered_map<std::string, std::string> local_query;
-
             if (const size_t q = path_and_query.find('?'); q != std::string_view::npos) {
-                local_path = std::string(path_and_query.substr(0, q));
-                local_query = url::parse_query(path_and_query.substr(q + 1));
-            } else {
-                local_path = std::string(path_and_query);
-            }
+                // Path: store as owned string, then point path_ at it
+                path_target_owned_ = std::string(path_and_query);
+                parsed_.target = path_target_owned_;
+                path_ = std::string(path_and_query.substr(0, q));
 
-            path_target_owned_ = std::string(path_and_query);
-            parsed_.target = path_target_owned_;
-            path_ = std::move(local_path);
-            query = std::move(local_query);
+                // Query: parse key=value pairs into FlatMap via contiguous linear buffer
+                std::string_view qs = path_and_query.substr(q + 1);
+                query.clear();
+                query_decoded_buf_.clear();
+                query_decoded_buf_.reserve(qs.size() + 16);
+
+                struct QuerySlice {
+                    size_t k_start{0}, k_len{0};
+                    size_t v_start{0}, v_len{0};
+                    bool has_val{false};
+                };
+                std::array<QuerySlice, kMaxQueryParams> slices{};
+                std::size_t param_count = 0;
+
+                while (!qs.empty() && param_count < kMaxQueryParams) {
+                    const size_t amp = qs.find('&');
+                    const std::string_view pair = (amp != std::string_view::npos)
+                                                      ? qs.substr(0, amp)
+                                                      : qs;
+
+                    if (!pair.empty()) {
+                        const size_t eq = pair.find('=');
+                        const size_t k_start = query_decoded_buf_.size();
+                        query_decoded_buf_ += wavex::uri::decode(pair.substr(0, eq));
+                        const size_t k_len = query_decoded_buf_.size() - k_start;
+
+                        size_t v_start = query_decoded_buf_.size();
+                        size_t v_len = 0;
+                        const bool has_val = (eq != std::string_view::npos);
+                        if (has_val) {
+                            query_decoded_buf_ += wavex::uri::decode(pair.substr(eq + 1));
+                            v_len = query_decoded_buf_.size() - v_start;
+                        }
+
+                        slices[param_count] = QuerySlice{k_start, k_len, v_start, v_len, has_val};
+                        ++param_count;
+                    }
+
+                    if (amp == std::string_view::npos) break;
+                    qs = qs.substr(amp + 1);
+                }
+
+                for (size_t i = 0; i < param_count; ++i) {
+                    const auto &sl = slices[i];
+                    const std::string_view k(query_decoded_buf_.data() + sl.k_start, sl.k_len);
+                    const std::string_view v = sl.has_val
+                                                   ? std::string_view(query_decoded_buf_.data() + sl.v_start, sl.v_len)
+                                                   : std::string_view{};
+                    query.insert_or_assign(k, v);
+                }
+                query_param_overflow_ = (param_count >= kMaxQueryParams && !qs.empty());
+            } else {
+                // No query string — path only
+                path_target_owned_ = std::string(path_and_query);
+                parsed_.target = path_target_owned_;
+                path_ = std::string(path_and_query);
+                query.clear();
+                query_decoded_buf_.clear();
+                query_param_overflow_ = false;
+            }
+        }
+
+        void rebase_query_views(const char *src_base, const size_t src_len) {
+            if (src_base == nullptr || src_len == 0 || query_decoded_buf_.empty()) {
+                if (query_decoded_buf_.empty()) query.clear();
+                return;
+            }
+            const char *dst_base = query_decoded_buf_.data();
+            if (src_base == dst_base) {
+                return;
+            }
+            base::FlatMap<std::string_view, std::string_view> updated;
+            for (const auto &[k, v]: query) {
+                std::string_view new_k = k;
+                std::string_view new_v = v;
+                if (k.data() >= src_base && k.data() < src_base + src_len) {
+                    new_k = std::string_view(dst_base + (k.data() - src_base), k.size());
+                }
+                if (v.data() >= src_base && v.data() < src_base + src_len) {
+                    new_v = std::string_view(dst_base + (v.data() - src_base), v.size());
+                }
+                updated.insert_or_assign(new_k, new_v);
+            }
+            query = std::move(updated);
         }
 
         void rebuild_headers_views() {
@@ -293,9 +462,17 @@ namespace wavex::protos::http {
         request_type parsed_; ///< zero-copy views
         std::string path_; ///< extracted path
         std::string raw_target_owned_; ///< owned full target string (client)
-        std::string path_target_owned_; ///< owned path + query string (client)
+        std::string path_target_owned_; ///< owned path + query string
         std::string body_owned_; ///< owned body string (client)
         std::vector<std::pair<std::string, std::string> > headers_owned_; ///< owned headers (client)
+        /// Contiguous linear buffer owning all decoded query key-value characters.
+        /// FlatMap `query` holds string_views slicing directly into this buffer.
+        std::string query_decoded_buf_;
+        bool query_param_overflow_{false}; ///< set when >kMaxQueryParams were present
+
+        /// Maximum query parameters accepted per request (hard cap).
+        /// Requests exceeding this are rejected with 431 in Server::handle_connection.
+        static constexpr std::size_t kMaxQueryParams = 64;
     };
 
     /// Concrete default HTTP/1.x request type aliases

@@ -25,7 +25,6 @@
 #include <algorithm>
 
 namespace wavex::server {
-
     /**
      * @class BlockingTask
      * @brief Type-erased, move-only callable container for blocking task dispatch.
@@ -34,13 +33,17 @@ namespace wavex::server {
     class BlockingTask {
         struct Concept {
             virtual ~Concept() = default;
+
             virtual void invoke() = 0;
         };
 
-        template <typename F>
+        template<typename F>
         struct Model final : Concept {
             F fn;
-            explicit Model(F &&f) : fn(std::forward<F>(f)) {}
+
+            explicit Model(F &&f) : fn(std::forward<F>(f)) {
+            }
+
             void invoke() override { fn(); }
         };
 
@@ -49,13 +52,17 @@ namespace wavex::server {
     public:
         BlockingTask() = default;
 
-        template <typename F>
+        template<typename F>
             requires (!std::is_same_v<std::decay_t<F>, BlockingTask> && std::is_invocable_v<F>)
-        BlockingTask(F &&f) : self_(std::make_unique<Model<std::decay_t<F>>>(std::forward<F>(f))) {}
+        BlockingTask(F &&f) : self_(std::make_unique<Model<std::decay_t<F> > >(std::forward<F>(f))) {
+        }
 
         BlockingTask(BlockingTask &&) noexcept = default;
+
         BlockingTask &operator=(BlockingTask &&) noexcept = default;
+
         BlockingTask(const BlockingTask &) = delete;
+
         BlockingTask &operator=(const BlockingTask &) = delete;
 
         explicit operator bool() const noexcept { return static_cast<bool>(self_); }
@@ -71,7 +78,7 @@ namespace wavex::server {
      *        Pre-allocates slots and operates with O(1) push/pop and zero heap
      *        allocations during steady-state execution.
      */
-    template <typename T>
+    template<typename T>
     class RingQueue {
     public:
         explicit RingQueue(std::size_t initial_capacity = 256)
@@ -192,8 +199,11 @@ namespace wavex::server {
         }
 
         BlockingThreadPool(const BlockingThreadPool &) = delete;
+
         BlockingThreadPool &operator=(const BlockingThreadPool &) = delete;
+
         BlockingThreadPool(BlockingThreadPool &&) = delete;
+
         BlockingThreadPool &operator=(BlockingThreadPool &&) = delete;
 
         /**
@@ -245,8 +255,7 @@ namespace wavex::server {
         /**
          * @brief Shuts down the thread pool and joins all worker threads.
          */
-        void shutdown() {
-            {
+        void shutdown() { {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (stopping_) {
                     return;
@@ -255,7 +264,7 @@ namespace wavex::server {
             }
             cv_.notify_all();
 
-            for (auto &t : threads_) {
+            for (auto &t: threads_) {
                 if (t.joinable()) {
                     t.join();
                 }
@@ -278,8 +287,7 @@ namespace wavex::server {
 
         void worker_loop() {
             while (true) {
-                Task task;
-                {
+                Task task; {
                     std::unique_lock<std::mutex> lock(mutex_);
                     ++idle_count_;
 
@@ -333,5 +341,4 @@ namespace wavex::server {
         std::size_t idle_count_{0};
         bool stopping_{false};
     };
-
 } // namespace wavex::server

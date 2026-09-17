@@ -26,40 +26,40 @@
 #include <wavex/Async/SpawnBlocking.hpp>
 
 namespace wavex::fs {
-
     /**
      * @brief Asynchronously reads the entire contents of a file into a std::string.
      * @param path The file path to read.
      * @return asio::awaitable yielding std::expected<std::string, std::error_code>.
      */
-    inline asio::awaitable<std::expected<std::string, std::error_code>> read_file(
+    inline asio::awaitable<std::expected<std::string, std::error_code> > read_file(
         std::filesystem::path path) {
-        auto res = co_await wavex::spawn_blocking([p = std::move(path)]() -> std::expected<std::string, std::error_code> {
-            std::error_code ec;
-            if (!std::filesystem::exists(p, ec) || ec) {
-                return std::unexpected(ec ? ec : std::make_error_code(std::errc::no_such_file_or_directory));
-            }
+        auto res = co_await wavex::spawn_blocking(
+            [p = std::move(path)]() -> std::expected<std::string, std::error_code> {
+                std::error_code ec;
+                if (!std::filesystem::exists(p, ec) || ec) {
+                    return std::unexpected(ec ? ec : std::make_error_code(std::errc::no_such_file_or_directory));
+                }
 
-            std::ifstream file(p, std::ios::binary | std::ios::ate);
-            if (!file.is_open()) {
-                return std::unexpected(std::make_error_code(std::errc::permission_denied));
-            }
+                std::ifstream file(p, std::ios::binary | std::ios::ate);
+                if (!file.is_open()) {
+                    return std::unexpected(std::make_error_code(std::errc::permission_denied));
+                }
 
-            const auto size = file.tellg();
-            if (size < 0) {
-                return std::unexpected(std::make_error_code(std::errc::io_error));
-            }
-
-            std::string content;
-            content.resize(static_cast<std::size_t>(size));
-            file.seekg(0, std::ios::beg);
-            if (!file.read(content.data(), static_cast<std::streamsize>(size))) {
-                if (size > 0) {
+                const auto size = file.tellg();
+                if (size < 0) {
                     return std::unexpected(std::make_error_code(std::errc::io_error));
                 }
-            }
-            return content;
-        });
+
+                std::string content;
+                content.resize(static_cast<std::size_t>(size));
+                file.seekg(0, std::ios::beg);
+                if (!file.read(content.data(), static_cast<std::streamsize>(size))) {
+                    if (size > 0) {
+                        return std::unexpected(std::make_error_code(std::errc::io_error));
+                    }
+                }
+                return content;
+            });
         co_return res;
     }
 
@@ -68,33 +68,34 @@ namespace wavex::fs {
      * @param path The file path to read.
      * @return asio::awaitable yielding std::expected<std::vector<char>, std::error_code>.
      */
-    inline asio::awaitable<std::expected<std::vector<char>, std::error_code>> read_bytes(
+    inline asio::awaitable<std::expected<std::vector<char>, std::error_code> > read_bytes(
         std::filesystem::path path) {
-        auto res = co_await wavex::spawn_blocking([p = std::move(path)]() -> std::expected<std::vector<char>, std::error_code> {
-            std::error_code ec;
-            if (!std::filesystem::exists(p, ec) || ec) {
-                return std::unexpected(ec ? ec : std::make_error_code(std::errc::no_such_file_or_directory));
-            }
+        auto res = co_await wavex::spawn_blocking(
+            [p = std::move(path)]() -> std::expected<std::vector<char>, std::error_code> {
+                std::error_code ec;
+                if (!std::filesystem::exists(p, ec) || ec) {
+                    return std::unexpected(ec ? ec : std::make_error_code(std::errc::no_such_file_or_directory));
+                }
 
-            std::ifstream file(p, std::ios::binary | std::ios::ate);
-            if (!file.is_open()) {
-                return std::unexpected(std::make_error_code(std::errc::permission_denied));
-            }
+                std::ifstream file(p, std::ios::binary | std::ios::ate);
+                if (!file.is_open()) {
+                    return std::unexpected(std::make_error_code(std::errc::permission_denied));
+                }
 
-            const auto size = file.tellg();
-            if (size < 0) {
-                return std::unexpected(std::make_error_code(std::errc::io_error));
-            }
-
-            std::vector<char> content(static_cast<std::size_t>(size));
-            file.seekg(0, std::ios::beg);
-            if (!file.read(content.data(), static_cast<std::streamsize>(size))) {
-                if (size > 0) {
+                const auto size = file.tellg();
+                if (size < 0) {
                     return std::unexpected(std::make_error_code(std::errc::io_error));
                 }
-            }
-            return content;
-        });
+
+                std::vector<char> content(static_cast<std::size_t>(size));
+                file.seekg(0, std::ios::beg);
+                if (!file.read(content.data(), static_cast<std::streamsize>(size))) {
+                    if (size > 0) {
+                        return std::unexpected(std::make_error_code(std::errc::io_error));
+                    }
+                }
+                return content;
+            });
         co_return res;
     }
 
@@ -104,19 +105,20 @@ namespace wavex::fs {
      * @param content The string contents to write.
      * @return asio::awaitable yielding std::expected<void, std::error_code>.
      */
-    inline asio::awaitable<std::expected<void, std::error_code>> write_file(
+    inline asio::awaitable<std::expected<void, std::error_code> > write_file(
         std::filesystem::path path, std::string content) {
-        auto res = co_await wavex::spawn_blocking([p = std::move(path), data = std::move(content)]() -> std::expected<void, std::error_code> {
-            std::ofstream file(p, std::ios::binary | std::ios::trunc);
-            if (!file.is_open()) {
-                return std::unexpected(std::make_error_code(std::errc::permission_denied));
-            }
+        auto res = co_await wavex::spawn_blocking(
+            [p = std::move(path), data = std::move(content)]() -> std::expected<void, std::error_code> {
+                std::ofstream file(p, std::ios::binary | std::ios::trunc);
+                if (!file.is_open()) {
+                    return std::unexpected(std::make_error_code(std::errc::permission_denied));
+                }
 
-            if (!file.write(data.data(), static_cast<std::streamsize>(data.size()))) {
-                return std::unexpected(std::make_error_code(std::errc::io_error));
-            }
-            return {};
-        });
+                if (!file.write(data.data(), static_cast<std::streamsize>(data.size()))) {
+                    return std::unexpected(std::make_error_code(std::errc::io_error));
+                }
+                return {};
+            });
         co_return res;
     }
 
@@ -126,19 +128,20 @@ namespace wavex::fs {
      * @param content The string contents to append.
      * @return asio::awaitable yielding std::expected<void, std::error_code>.
      */
-    inline asio::awaitable<std::expected<void, std::error_code>> append_file(
+    inline asio::awaitable<std::expected<void, std::error_code> > append_file(
         std::filesystem::path path, std::string content) {
-        auto res = co_await wavex::spawn_blocking([p = std::move(path), data = std::move(content)]() -> std::expected<void, std::error_code> {
-            std::ofstream file(p, std::ios::binary | std::ios::app);
-            if (!file.is_open()) {
-                return std::unexpected(std::make_error_code(std::errc::permission_denied));
-            }
+        auto res = co_await wavex::spawn_blocking(
+            [p = std::move(path), data = std::move(content)]() -> std::expected<void, std::error_code> {
+                std::ofstream file(p, std::ios::binary | std::ios::app);
+                if (!file.is_open()) {
+                    return std::unexpected(std::make_error_code(std::errc::permission_denied));
+                }
 
-            if (!file.write(data.data(), static_cast<std::streamsize>(data.size()))) {
-                return std::unexpected(std::make_error_code(std::errc::io_error));
-            }
-            return {};
-        });
+                if (!file.write(data.data(), static_cast<std::streamsize>(data.size()))) {
+                    return std::unexpected(std::make_error_code(std::errc::io_error));
+                }
+                return {};
+            });
         co_return res;
     }
 
@@ -149,17 +152,18 @@ namespace wavex::fs {
      * @param options Filesystem copy options.
      * @return asio::awaitable yielding std::expected<void, std::error_code>.
      */
-    inline asio::awaitable<std::expected<void, std::error_code>> copy_file(
+    inline asio::awaitable<std::expected<void, std::error_code> > copy_file(
         std::filesystem::path from, std::filesystem::path to,
         std::filesystem::copy_options options = std::filesystem::copy_options::overwrite_existing) {
-        auto res = co_await wavex::spawn_blocking([f = std::move(from), t = std::move(to), options]() -> std::expected<void, std::error_code> {
-            std::error_code ec;
-            std::filesystem::copy_file(f, t, options, ec);
-            if (ec) {
-                return std::unexpected(ec);
-            }
-            return {};
-        });
+        auto res = co_await wavex::spawn_blocking(
+            [f = std::move(from), t = std::move(to), options]() -> std::expected<void, std::error_code> {
+                std::error_code ec;
+                std::filesystem::copy_file(f, t, options, ec);
+                if (ec) {
+                    return std::unexpected(ec);
+                }
+                return {};
+            });
         co_return res;
     }
 
@@ -168,7 +172,7 @@ namespace wavex::fs {
      * @param path Path to remove.
      * @return asio::awaitable yielding std::expected<bool, std::error_code> (true if file existed and was removed).
      */
-    inline asio::awaitable<std::expected<bool, std::error_code>> remove(
+    inline asio::awaitable<std::expected<bool, std::error_code> > remove(
         std::filesystem::path path) {
         auto res = co_await wavex::spawn_blocking([p = std::move(path)]() -> std::expected<bool, std::error_code> {
             std::error_code ec;
@@ -180,5 +184,4 @@ namespace wavex::fs {
         });
         co_return res;
     }
-
 } // namespace wavex::fs

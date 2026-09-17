@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2026 Jyotipriya Mondal
+// Copyright (c) 2026 Jyotipriya Mondal
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -32,7 +32,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <iostream>
 #include <memory>
 #include <mutex>
 #include <random>
@@ -169,6 +168,27 @@ namespace wavex::server {
             if (workers_.empty()) return;
             const std::size_t idx = next_worker_idx_++ % workers_.size();
             asio::co_spawn(*workers_[idx]->io_ctx, std::move(coro), asio::detached);
+        }
+
+        /**
+         * @brief Post a callable to every active worker's io_context.
+         *
+         * Primarily used for per-thread teardown or memory trimming tasks
+         * (e.g. wavex::memory::get_thread_local_pool().release()).
+         * The callable is executed on the worker's thread, so it is safe to access
+         * thread_local state (like the slab pool) without synchronization.
+         *
+         * @tparam F  Any callable with signature void().
+         * @param fn  The callable to post to each worker.
+         */
+        template<typename F>
+        void post_all(F fn) {
+            std::lock_guard<std::mutex> lock(workers_mutex_);
+            for (const auto &w: workers_) {
+                if (w && w->io_ctx) {
+                    asio::post(*w->io_ctx, fn);
+                }
+            }
         }
 
         /// Get current active worker count.

@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Jyotipriya Mondal
+// Copyright (c) 2026 Jyotipriary Mondal
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -10,18 +10,23 @@
  *
  * Provides base abstractions for HTTP/WS response generation and header/body management.
  * Features a fluent API for method chaining: res.status(200).set("X-Foo", "bar").send("body").
+ *
+ * Memory model:
+ *   `headers_` is backed by FlatMap<std::string_view, std::string_view>. All header
+ *   name and value views must remain valid for the lifetime of the Response object.
+ *   In WaveX's arena model, this is guaranteed by the request arena which outlives
+ *   the Response and is released only after the response is sent.
  */
 
 #pragma once
 
-
 #include <string>
 #include <string_view>
-#include <vector>
-#include <utility>
 #include <ranges>
-#include <cctype>
+#include <utility>
 #include <nlohmann/json.hpp>
+
+#include <wavex/Base/FlatMap.hpp>
 
 namespace wavex::base {
     /**
@@ -43,44 +48,34 @@ namespace wavex::base {
             return std::forward<Self>(self);
         }
 
-        /// Set a response header (updates if exists, otherwise appends)
+        /**
+         * @brief Set a response header (updates existing if present, otherwise appends).
+         *
+         * Uses case-insensitive search to conform to RFC 7230 §3.2 header field rules.
+         * Header name and value views are stored directly in headers_ FlatMap.
+         * The backing storage for the string_view data must outlive the Response object.
+         * In practice, HttpResponse stores owned std::string copies for set headers and
+         * passes views into those owned strings.
+         */
         template<typename Self>
         decltype(auto) set(this Self &&self, const std::string_view name, const std::string_view value) {
-            for (auto &[k, v]: self.headers_) {
-                if (k.size() == name.size()) {
-                    bool match = true;
-                    for (size_t i = 0; i < k.size(); ++i) {
-                        if (std::tolower(static_cast<unsigned char>(k[i])) !=
-                            std::tolower(static_cast<unsigned char>(name[i]))) {
-                            match = false;
-                            break;
-                        }
-                    }
-                    if (match) {
-                        v = std::string(value);
-                        return std::forward<Self>(self);
-                    }
-                }
+            if constexpr (requires { std::forward<Self>(self).set_impl(name, value); }) {
+                return std::forward<Self>(self).set_impl(name, value);
+            } else {
+                self.headers_.insert_or_assign_ci(name, value);
+                return std::forward<Self>(self);
             }
-            self.headers_.emplace_back(std::string(name), std::string(value));
-            return std::forward<Self>(self);
         }
 
         /// Remove a header by name (case-insensitive)
         template<typename Self>
         decltype(auto) remove_header(this Self &&self, const std::string_view name) {
-            std::erase_if(self.headers_, [&](const auto &pair) {
-                const auto &k = pair.first;
-                if (k.size() != name.size()) return false;
-                for (size_t i = 0; i < k.size(); ++i) {
-                    if (std::tolower(static_cast<unsigned char>(k[i])) !=
-                        std::tolower(static_cast<unsigned char>(name[i]))) {
-                        return false;
-                    }
-                }
-                return true;
-            });
-            return std::forward<Self>(self);
+            if constexpr (requires { std::forward<Self>(self).remove_header_impl(name); }) {
+                return std::forward<Self>(self).remove_header_impl(name);
+            } else {
+                self.headers_.erase_ci(name);
+                return std::forward<Self>(self);
+            }
         }
 
         /// Returns true if the response has already been sent
@@ -145,27 +140,21 @@ namespace wavex::base {
         /// Access the current body
         [[nodiscard]] const std::string &get_body() const { return body_; }
 
-        /// Check if a header exists (case-insensitive for HTTP)
+        /**
+         * @brief Check if a header exists (case-insensitive for HTTP)
+         */
         [[nodiscard]] bool has_header(const std::string_view name) const {
-            for (const auto &k: headers_ | std::views::keys) {
-                if (k.size() == name.size()) {
-                    bool match = true;
-                    for (size_t i = 0; i < k.size(); ++i) {
-                        if (std::tolower(static_cast<unsigned char>(k[i])) !=
-                            std::tolower(static_cast<unsigned char>(name[i]))) {
-                            match = false;
-                            break;
-                        }
-                    }
-                    if (match) return true;
-                }
-            }
-            return false;
+            return headers_.find_ci(name) != headers_.end();
         }
 
     protected:
         unsigned int status_code_ = 200;
-        std::vector<std::pair<std::string, std::string> > headers_;
+
+        /// Response headers — contiguous FlatMap for zero-node allocation.
+        /// Concrete subclasses (HttpResponse) own the backing string storage and
+        /// store string_views into those owned strings inside this map.
+        FlatMap<std::string_view, std::string_view> headers_;
+
         std::string body_;
         bool is_sent_ = false;
     };

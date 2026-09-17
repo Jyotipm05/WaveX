@@ -239,11 +239,18 @@ target_sources(wavex
         FILES
         include/wavex/Base/Logger.hpp
         include/wavex/Base/Chainable.hpp
+        include/wavex/Base/FlatMap.hpp
+        include/wavex/Base/Memory.hpp
         include/wavex/Base/MiddleWare.hpp
         include/wavex/Base/MimeTypes.hpp
+        include/wavex/Base/Request.hpp
+        include/wavex/Base/Response.hpp
+        include/wavex/Base/Uri.hpp
+        include/wavex/Base/Url.hpp
         include/wavex/Engine/Router.hpp
         include/wavex/Engine/HttpRouter.hpp
         include/wavex/protos/ProtocolTraits.hpp
+        include/wavex/protos/protos.hpp
         include/wavex/protos/http/Methods.hpp
         include/wavex/protos/http/http.hpp
         include/wavex/protos/http/http1codec.hpp
@@ -256,7 +263,7 @@ target_sources(wavex
         include/wavex/Server/TlsConfig.hpp
         include/wavex/Server/Server.hpp
         include/wavex/Client/HttpClient.hpp
-        include/wavex/Cli/Cli.hpp
+        include/wavex/CLI/CLI.hpp
         include/wavex/Async/SpawnBlocking.hpp
         include/wavex/Utils/Utils.hpp
         include/wavex/Utils/TempFile.hpp
@@ -421,6 +428,8 @@ if (WAVEX_TEST)
     wavex_add_test(wavex_client_file_upload_tests tests/test_client_file_upload.cpp)
     wavex_add_test(wavex_spawn_blocking_tests  tests/test_spawn_blocking.cpp)
     wavex_add_test(wavex_async_fs_tests        tests/test_async_fs.cpp)
+    wavex_add_test(wavex_flat_map_tests        tests/test_flat_map.cpp)
+    wavex_add_test(wavex_request_arena_tests   tests/test_request_arena.cpp)
 
     # Unified CLI-driven Postman Dev Servers (HTTP/1.1 and HTTP/2)
     add_executable(wavex_postman_http1_server tests/postman_demo_http1_server.cpp)

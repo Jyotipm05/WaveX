@@ -36,6 +36,7 @@ WaveX draws inspiration from **Rust's Actix Web** (hybrid radix-tree routing), *
   - **`InjectorQueue`**: Unbounded global MPMC queue with atomic size tracking for external tasks and overflow.
   - **Zero Request Loss on Scale-Down**: Retiring workers safely drain their remaining local ring tasks back into `InjectorQueue` on thread exit.
 - **🛡 Pipeline Short-Circuiting** — Middleware rejection (e.g. `401 Unauthorized`) immediately sends the response while skipping downstream middlewares and route handlers.
+- **⚡ Zero-Fragmentation Arena Memory Engine** — Per-request monotonic bump allocator (`RequestArena`) backed by a 4KB inline buffer. Route parameters, query strings, response headers, and wire serialization buffers are all allocated from the arena with zero calls to the global heap. A single O(1) pointer reset (`arena.release()`) reclaims the entire request's memory after the response is sent. Contiguous `FlatMap` replaces node-based `unordered_map` for params, query, and headers — eliminating all node allocation overhead and maximizing cache-line utilization.
 - **🧪 Interactive Postman Dev Servers** — Pre-configured CLI-driven testing servers for HTTP/1.1 ([tests/postman_demo_http1_server.cpp](tests/postman_demo_http1_server.cpp)) and HTTP/2 ([tests/postman_demo_http2_server.cpp](tests/postman_demo_http2_server.cpp)) supporting plain and TLS 1.3 modes via WaveX's built-in CLI parser.
 
 ---
@@ -734,6 +735,56 @@ curl -k --http2 -X POST https://127.0.0.1:8444/api/query \
      -d '{"domain": "google.com"}'
 ```
 
+### 18. Zero-Fragmentation Memory Architecture (Arena, FlatMap & string_view Safety Contract)
+
+WaveX delivers zero-allocation request handling in the hot path using a three-tier memory architecture and contiguous data structures:
+
+#### 1. Per-Request Bump Allocator (`RequestArena`)
+- **4KB Inline Buffer (`alignas(64)`)**: Sized to fit 95%+ of standard web requests (headers, query parameters, path segments, and response formatting) directly inside the arena without touching the global heap.
+- **Thread-Local Slab Pool**: Spills exceeding 4KB seamlessly allocate from a thread-local `std::pmr::unsynchronized_pool_resource` without global lock contention.
+- **O(1) Bulk Reclamation**: `arena.release()` resets the bump pointer at the end of the request coroutine lifecycle with zero calls to `free()`.
+
+#### 2. Cache-Line Contiguous `FlatMap`
+Replaces node-based `std::unordered_map` with a contiguous array for `req.params`, `req.query`, and `res.headers_`:
+- **Inline Array for N ≤ 16**: Zero heap allocation for standard routes and query strings.
+- **O(N) Linear Scans**: Outperforms hash maps for N ≤ 16 due to sequential hardware prefetching and CPU cache-line locality.
+- **RFC 7230 Header Conformance**: Case-insensitive lookups and mutations via `.find_ci()` and `.insert_or_assign_ci()`.
+
+#### 3. Resource Protection & Hard Caps (DoS Mitigation)
+- **Max Query Params (64)**: Hard-capped via `kMaxQueryParams`. Exceeding parameters triggers `431 Request Header Fields Too Large` before routing.
+- **Max Headers (100)**: Configurable server ceilings (`server.set_max_headers()`, `server.set_max_query_params()`).
+- **Idle Buffer Trimming**: Socket read buffers (`stream_buf`) exceeding 64KB automatically call `shrink_to_fit()` when empty. Idle thread-local pool memory can be purged across all workers via `server.trim_memory()`.
+
+#### 4. `string_view` Safety Contract
+
+Zero-copy `std::string_view` accessors provide maximum performance with clear lifecycle boundaries:
+
+> [!IMPORTANT]
+> All views from `req.param()`, `req.params`, `req.query`, `req.query_param()`, and `res.header()` point into the current request's backing storage. They remain valid **strictly during the current request coroutine turn** (prior to the request completion or connection buffer reuse).
+
+| Operation Type             | Context / Examples                                                                                                                                  | Developer Action                                                                      |
+|:---------------------------|:----------------------------------------------------------------------------------------------------------------------------------------------------|:--------------------------------------------------------------------------------------|
+| **In-Turn (Zero-Copy)**    | Path/query filtering, validation, numeric conversion (`std::from_chars`), JSON parsing, direct DB queries executed within the current handler turn  | **Use `std::string_view` directly.** Zero copies, zero heap overhead.                 |
+| **Escaping (Owning Copy)** | Offloading to worker threads via `wavex::spawn_blocking`, caching across requests, inserting into global state, storing in async background structs | **Explicitly copy to `std::string`**: `std::string(req.param("id"))` at the boundary. |
+
+```cpp
+// Example: In-turn zero-copy vs escaping
+router.get("/users/:id", [](auto &req, auto &res) -> asio::awaitable<void> {
+    // 1. In-turn: zero-copy validation
+    std::string_view id_view = req.param("id").value_or("");
+    int user_id = 0;
+    std::from_chars(id_view.data(), id_view.data() + id_view.size(), user_id);
+
+    // 2. Escaping: copy to owning std::string across background thread boundary
+    auto user_data = co_await wavex::spawn_blocking([id = std::string(id_view)] {
+        return fetch_user_from_db(id); // Safe across thread boundary
+    });
+
+    res.status(200).json(user_data);
+    co_return;
+});
+```
+
 ---
 
 ## Architecture
@@ -745,8 +796,10 @@ graph LR
         Uri["Uri / Url<br/><small>RFC 3986</small>"]
         Mime["MimeTypes<br/><small>file ext -> Content-Type</small>"]
         Chainable["Chainable / StaticChain<br/><small>C++23 static dispatch</small>"]
-        Req["Request<br/><small>abstract</small>"]
-        Res["Response<br/><small>fluent API</small>"]
+        FlatMap["FlatMap<br/><small>inline array KV, case-insensitive</small>"]
+        Memory["RequestArena<br/><small>4KB inline bump allocator</small>"]
+        Req["Request<br/><small>abstract (FlatMap params/query)</small>"]
+        Res["Response<br/><small>fluent API (FlatMap headers)</small>"]
         MW["Middleware<br/><small>linear chain + next()</small>"]
     end
 
@@ -815,6 +868,8 @@ graph LR
     style Uri fill:#2d6a4f,color:#fff
     style Mime fill:#2d6a4f,color:#fff
     style Chainable fill:#2d6a4f,color:#fff
+    style FlatMap fill:#2d6a4f,color:#fff
+    style Memory fill:#2d6a4f,color:#fff
     style Req fill:#2d6a4f,color:#fff
     style Res fill:#2d6a4f,color:#fff
     style MW fill:#2d6a4f,color:#fff
@@ -898,33 +953,35 @@ flowchart TD
 
 ## Component Status
 
-| Component                  | Status     | Description                                                                                                                               |
-|:---------------------------|:-----------|:------------------------------------------------------------------------------------------------------------------------------------------|
-| `Base/Logger`              | ✅ Complete | Levelled logger (TRACE, DEBUG, INFO, WARN, ERROR, FATAL)                                                                                  |
-| `Base/Uri` / `Base/Url`    | ✅ Complete | RFC 3986 URI encode/decode & URL query string parser                                                                                      |
-| `Base/MimeTypes`           | ✅ Complete | Fast file extension to MIME type mappings (`mime_type_from_ext`)                                                                          |
-| `Base/Chainable`           | ✅ Complete | C++23 "Deducing `this`" static pipeline dispatch (`StaticChain`, `make_chain`, `KeepAlivePolicy`, `ConditionalChainable`)                 |
-| `Base/Request`             | ✅ Complete | Protocol-agnostic CRTP request base (`Request<Derived>`, zero-vtable, multipart & query accessors)                                       |
-| `Base/Response`            | ✅ Complete | Protocol-agnostic CRTP response builder (`Response<Derived>`, zero-vtable, fluent API & `redirect` helpers)                               |
-| `Base/MiddleWare`          | ✅ Complete | Coroutine-aware middleware template (`GenericMiddlewareFn`), linear pipeline, `keep_alive`, `sse_stay_active` & `body_limit`               |
-| `Engine/Router`            | ✅ Complete | Protocol-agnostic radix tree with RE2 regex, wildcard matching & configurable 404 handler                                                 |
-| `Engine/HttpRouter`        | ✅ Complete | HTTP/1.1 (`Http1Router`) & HTTP/2 (`Http2Router`) method convenience routing (`get`, `post`, etc.) & 404 customization                    |
-| `Server/LocalQueue`        | ✅ Complete | Per-worker 256-slot ring buffer for ultra-fast task stealing                                                                              |
-| `Server/InjectorQueue`     | ✅ Complete | Global unbounded MPMC task overflow queue with atomic size tracking                                                                       |
-| `Server/ThreadPool`        | ✅ Complete | Adaptive Tokio-style work-stealing thread pool with load hysteresis                                                                       |
-| `Server/Server`            | ✅ Complete | Coroutine TCP & TLS 1.3 server with master acceptor, worker pool, ALPN, Keep-Alive, 404, payload limit & memory spooling                   |
-| `Server/TlsConfig`         | ✅ Complete | TLS 1.3 server encryption config (`cert_file`, `key_file`, `key_password`, `dh_file`, `force_tls13`)                                      |
-| `protos/ProtocolTraits`    | ✅ Complete | Protocol session traits (`protocol_traits<Codec>`) for prefaces, keep-alive, response prep & ALPN                                         |
-| `protos/http/http1codec`   | ✅ Complete | Zero-copy HTTP/1.x parser, encoder, response decoder, chunked framing, status text & stream pipelining                                     |
-| `protos/http/http2codec`   | ✅ Complete | Full RFC 7540 binary framing, RFC 7541 HPACK encoder/decoder, stream multiplexing & SETTINGS negotiation                                  |
-| `protos/http/HttpRequest`  | ✅ Complete | HTTP/1.1 & HTTP/2 with zero-copy stream parsing, keep-alive, multipart form parsing, decompressed body & file save                         |
-| `protos/http/HttpResponse` | ✅ Complete | HTTP/1.1 & HTTP/2 with injected write sink for streaming, commitment & fluent builder API                                                 |
-| `Client/HttpClient`        | ✅ Complete | Coroutine HTTP/1.1 & HTTP/2 client with plain/TLS 1.3, multipart form upload, payload compression, and file saving                         |
-| `Utils/TempFile`           | ✅ Complete | RAII temporary file management (`TempFileGuard`) with atomic move/cleanup and custom directory support                                     |
-| `Utils/Compression`        | ✅ Complete | Zero-overhead Gzip & Deflate compression/decompression (`Compressor`, `CompressionFormat`) via CMake-controlled zlib integration          |
-| `Utils/Multipart`          | ✅ Complete | RFC 7578 multipart/form-data parser, builder, in-memory buffering & disk spooling thresholds (`MultipartFormData`)                       |
-| `Utils/Utils`              | ✅ Complete | Umbrella utilities module (`wavex:utils`) and header (`Utils.hpp`) bundling TempFile, Compression, and Multipart                         |
-| `Cli/Cli`                  | ✅ Complete | Type-safe CLI argument parser (`wavex::cli::CliParser`), flag validator, and option engine                                                |
+| Component                  | Status     | Description                                                                                                                      |
+|:---------------------------|:-----------|:---------------------------------------------------------------------------------------------------------------------------------|
+| `Base/Logger`              | ✅ Complete | Levelled logger (TRACE, DEBUG, INFO, WARN, ERROR, FATAL)                                                                         |
+| `Base/Uri` / `Base/Url`    | ✅ Complete | RFC 3986 URI encode/decode & URL query string parser                                                                             |
+| `Base/MimeTypes`           | ✅ Complete | Fast file extension to MIME type mappings (`mime_type_from_ext`)                                                                 |
+| `Base/Chainable`           | ✅ Complete | C++23 "Deducing `this`" static pipeline dispatch (`StaticChain`, `make_chain`, `KeepAlivePolicy`, `ConditionalChainable`)        |
+| `Base/FlatMap`             | ✅ Complete | Cache-line contiguous KV container (`InlineCap=16`) with case-insensitive search (`find_ci`)                                     |
+| `Base/Memory`              | ✅ Complete | Per-request monotonic arena bump allocator (`RequestArena`) with 4KB inline buffer & thread-local slab pool                      |
+| `Base/Request`             | ✅ Complete | Protocol-agnostic CRTP request base (`Request<Derived>`, zero-vtable, multipart & query accessors)                               |
+| `Base/Response`            | ✅ Complete | Protocol-agnostic CRTP response builder (`Response<Derived>`, zero-vtable, fluent API & `redirect` helpers)                      |
+| `Base/MiddleWare`          | ✅ Complete | Coroutine-aware middleware template (`GenericMiddlewareFn`), linear pipeline, `keep_alive`, `sse_stay_active` & `body_limit`     |
+| `Engine/Router`            | ✅ Complete | Protocol-agnostic radix tree with RE2 regex, wildcard matching & configurable 404 handler                                        |
+| `Engine/HttpRouter`        | ✅ Complete | HTTP/1.1 (`Http1Router`) & HTTP/2 (`Http2Router`) method convenience routing (`get`, `post`, etc.) & 404 customization           |
+| `Server/LocalQueue`        | ✅ Complete | Per-worker 256-slot ring buffer for ultra-fast task stealing                                                                     |
+| `Server/InjectorQueue`     | ✅ Complete | Global unbounded MPMC task overflow queue with atomic size tracking                                                              |
+| `Server/ThreadPool`        | ✅ Complete | Adaptive Tokio-style work-stealing thread pool with load hysteresis                                                              |
+| `Server/Server`            | ✅ Complete | Coroutine TCP & TLS 1.3 server with master acceptor, worker pool, ALPN, Keep-Alive, 404, payload limit & memory spooling         |
+| `Server/TlsConfig`         | ✅ Complete | TLS 1.3 server encryption config (`cert_file`, `key_file`, `key_password`, `dh_file`, `force_tls13`)                             |
+| `protos/ProtocolTraits`    | ✅ Complete | Protocol session traits (`protocol_traits<Codec>`) for prefaces, keep-alive, response prep & ALPN                                |
+| `protos/http/http1codec`   | ✅ Complete | Zero-copy HTTP/1.x parser, encoder, response decoder, chunked framing, status text & stream pipelining                           |
+| `protos/http/http2codec`   | ✅ Complete | Full RFC 7540 binary framing, RFC 7541 HPACK encoder/decoder, stream multiplexing & SETTINGS negotiation                         |
+| `protos/http/HttpRequest`  | ✅ Complete | HTTP/1.1 & HTTP/2 with zero-copy stream parsing, keep-alive, multipart form parsing, decompressed body & file save               |
+| `protos/http/HttpResponse` | ✅ Complete | HTTP/1.1 & HTTP/2 with injected write sink for streaming, commitment & fluent builder API                                        |
+| `Client/HttpClient`        | ✅ Complete | Coroutine HTTP/1.1 & HTTP/2 client with plain/TLS 1.3, multipart form upload, payload compression, and file saving               |
+| `Utils/TempFile`           | ✅ Complete | RAII temporary file management (`TempFileGuard`) with atomic move/cleanup and custom directory support                           |
+| `Utils/Compression`        | ✅ Complete | Zero-overhead Gzip & Deflate compression/decompression (`Compressor`, `CompressionFormat`) via CMake-controlled zlib integration |
+| `Utils/Multipart`          | ✅ Complete | RFC 7578 multipart/form-data parser, builder, in-memory buffering & disk spooling thresholds (`MultipartFormData`)               |
+| `Utils/Utils`              | ✅ Complete | Umbrella utilities module (`wavex:utils`) and header (`Utils.hpp`) bundling TempFile, Compression, and Multipart                 |
+| `Cli/Cli`                  | ✅ Complete | Type-safe CLI argument parser (`wavex::cli::CliParser`), flag validator, and option engine                                       |
 
 ---
 
@@ -1065,8 +1122,10 @@ include/wavex/
 ├── Base/
 │   ├── Chainable.hpp        ← C++23 Deducing-this static dispatch & StaticChain
 │   ├── Logger.hpp           ← Levelled logger
-│   ├── Request.hpp          ← Abstract request base
-│   ├── Response.hpp         ← Abstract response + fluent API & redirects
+│   ├── Request.hpp          ← Abstract request base (FlatMap params & query)
+│   ├── Response.hpp         ← Abstract response + fluent API & redirects (FlatMap headers_)
+│   ├── FlatMap.hpp          ← Cache-line contiguous KV container (params, query, headers)
+│   ├── Memory.hpp           ← Per-request monotonic arena allocator & thread-local slab pool
 │   ├── MiddleWare.hpp       ← Middleware definitions (keep_alive, body_limit)
 │   ├── MimeTypes.hpp        ← File extension to MIME type resolver
 │   ├── Uri.hpp              ← RFC 3986 URI utilities
