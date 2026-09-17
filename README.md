@@ -601,6 +601,139 @@ asio::awaitable<void> upload_file() {
 }
 ```
 
+### 16. Heavy Request Offloading & Async File I/O (`spawn_blocking` & `wavex::fs`)
+
+To keep low-latency network I/O threads from starving when handling CPU-intensive operations (cryptography, image manipulation, heavy math) or blocking legacy libraries (synchronous SQLite, `<fstream>`), WaveX provides Tokio-equivalent asynchronous offloading:
+
+```cpp
+#include <wavex/wavex.hpp>
+
+// 1. Offload heavy computation or blocking legacy libraries to the dedicated thread pool
+router.post("/api/hash", [](auto &req, auto &res) -> asio::awaitable<void> {
+    // Calling coroutine yields immediately; executes on background blocking pool
+    std::string hash = co_await wavex::spawn_blocking([body = req.body()] {
+        return compute_heavy_argon2_hash(body);
+    });
+
+    res.status(200).send(hash);
+    co_return;
+});
+
+// 2. Tokio-equivalent non-blocking file system operations
+router.get("/api/file", [](auto &, auto &res) -> asio::awaitable<void> {
+    auto file_content = co_await wavex::fs::read_file("./data/document.txt");
+    if (!file_content) {
+        res.status(404).send("File not found");
+        co_return;
+    }
+
+    res.status(200).send(*file_content);
+    co_return;
+});
+```
+
+### 17. Safe Structured Queries (`QUERY` Method) & Postman Dev Servers
+
+WaveX natively supports the RFC 9110 HTTP `QUERY` method (safe structured queries carrying a request payload), in addition to standard `GET`, `POST`, `PUT`, `DELETE`, and `PATCH`.
+
+#### Domain-to-IP DNS Query Endpoint (`POST` / `QUERY` `/api/query`)
+
+An asynchronous coroutine handler querying DNS records without blocking worker threads:
+
+```cpp
+#include <wavex/wavex.hpp>
+#include <nlohmann/json.hpp>
+#include <asio/ip/tcp.hpp>
+#include <asio/as_tuple.hpp>
+#include <asio/use_awaitable.hpp>
+
+auto &router = wavex::engine::Http1Router::instance();
+
+auto dns_handler = [](const auto &req, auto &res) -> asio::awaitable<void> {
+    auto j = nlohmann::json::parse(req.body(), nullptr, false);
+    std::string domain = j.value("domain", "");
+
+    if (domain.empty()) {
+        res.status(400).json({
+            {"status", "error"},
+            {"message", "Missing 'domain' in JSON body. Example: {\"domain\": \"google.com\"}"}
+        });
+        co_return;
+    }
+
+    auto executor = co_await asio::this_coro::executor;
+    asio::ip::tcp::resolver resolver(executor);
+
+    auto [ec, results] = co_await resolver.async_resolve(domain, "", asio::as_tuple(asio::use_awaitable));
+    if (ec) {
+        res.status(404).json({
+            {"status", "error"},
+            {"domain", domain},
+            {"message", "Failed to resolve domain: " + ec.message()}
+        });
+        co_return;
+    }
+
+    std::vector<std::string> ips;
+    for (const auto &entry : results) {
+        ips.push_back(entry.endpoint().address().to_string());
+    }
+
+    res.status(200).json({
+        {"status", "success"},
+        {"domain", domain},
+        {"ip", ips.empty() ? "" : ips.front()},
+        {"ips", ips}
+    });
+    co_return;
+};
+
+// Route can be called via either standard POST or RFC 9110 QUERY
+router.post("/api/query", dns_handler);
+router.query("/api/query", dns_handler);
+```
+
+#### Interactive Dev Servers for Postman / cURL Testing
+
+WaveX includes unified interactive dev server binaries (`wavex_postman_http1_server` and `wavex_postman_http2_server`) configured via CLI flags:
+
+```bash
+# Run HTTP/1.1 Plain Dev Server on http://127.0.0.1:8080
+./wavex_postman_http1_server
+
+# Host on LAN (automatically binds to your machine's physical network IP)
+./wavex_postman_http1_server --lan
+
+# Enable TLS 1.3 HTTPS encryption on port 8443
+./wavex_postman_http1_server --tls
+
+# Run HTTP/2 Dev Server (Cleartext h2c on port 8082, or TLS 1.3 h2 on 8444)
+./wavex_postman_http2_server
+./wavex_postman_http2_server --tls
+```
+
+Querying the DNS resolver endpoint via cURL:
+
+```bash
+# HTTP/1.1 POST or QUERY
+curl -X POST http://127.0.0.1:8080/api/query \
+     -H "Content-Type: application/json" \
+     -d '{"domain": "google.com"}'
+
+curl -X QUERY http://127.0.0.1:8080/api/query \
+     -H "Content-Type: application/json" \
+     -d '{"domain": "google.com"}'
+
+# HTTP/2 (Cleartext h2c or TLS 1.3 h2)
+curl --http2-prior-knowledge -X POST http://127.0.0.1:8082/api/query \
+     -H "Content-Type: application/json" \
+     -d '{"domain": "google.com"}'
+
+curl -k --http2 -X POST https://127.0.0.1:8444/api/query \
+     -H "Content-Type: application/json" \
+     -d '{"domain": "google.com"}'
+```
+
 ---
 
 ## Architecture
@@ -635,6 +768,12 @@ graph LR
         Pool --> Server
     end
 
+    subgraph "Async & Blocking Offloading"
+        BlockingPool["BlockingThreadPool<br/><small>elastic 2..128 ring queue</small>"]
+        SpawnBlocking["wavex::spawn_blocking<br/><small>C++23 coroutine awaitable</small>"]
+        SpawnBlocking --> BlockingPool
+    end
+
     subgraph "Protos & Networking"
         H1Codec["http1codec<br/><small>chunked + zero-copy</small>"]
         H2Codec["http2codec<br/><small>RFC 7540 + HPACK RFC 7541</small>"]
@@ -649,6 +788,8 @@ graph LR
         Multipart["MultipartFormData<br/><small>RFC 7578 + disk spooler</small>"]
         Compression["Compressor<br/><small>Gzip / Deflate</small>"]
         TempFile["TempFileGuard<br/><small>RAII temp file</small>"]
+        AsyncFs["AsyncFs (wavex::fs)<br/><small>read_file / write_file</small>"]
+        AsyncFs --> SpawnBlocking
     end
 
     subgraph "CLI"
@@ -690,6 +831,9 @@ graph LR
     style LocalQ fill:#1b4332,color:#fff
     style InjQ fill:#1b4332,color:#fff
     style Pool fill:#52b788,color:#000
+    style BlockingPool fill:#2d6a4f,color:#fff
+    style SpawnBlocking fill:#40916c,color:#fff
+    style AsyncFs fill:#2d6a4f,color:#fff
 ```
 
 ### Request Lifecycle (UML Activity Diagram)
@@ -927,18 +1071,22 @@ include/wavex/
 │   ├── MimeTypes.hpp        ← File extension to MIME type resolver
 │   ├── Uri.hpp              ← RFC 3986 URI utilities
 │   └── Url.hpp              ← URL & query string parser
+├── Async/
+│   └── SpawnBlocking.hpp    ← Tokio-equivalent coroutine awaitable for offloading blocking tasks
 ├── Engine/
 │   ├── Router.hpp           ← Protocol-agnostic radix tree + RE2
 │   └── HttpRouter.hpp       ← HTTP route shortcuts (Http1Router & Http2Router)
 ├── Server/
 │   ├── WorkStealingQueue.hpp← LocalQueue (lock-free ring) & InjectorQueue (global MPMC)
 │   ├── ThreadPool.hpp       ← Tokio-style adaptive worker pool
+│   ├── BlockingPool.hpp     ← Elastic blocking thread pool with dynamic circular ring queue
 │   ├── Server.hpp           ← Coroutine TCP & TLS 1.3 server (Http1Server & Http2Server)
 │   └── TlsConfig.hpp        ← TLS 1.3 encryption configuration
 ├── Client/
 │   └── HttpClient.hpp       ← Async coroutine HTTP client with multipart & compression
 ├── Utils/
 │   ├── Utils.hpp            ← Umbrella header for utilities
+│   ├── AsyncFs.hpp          ← Non-blocking file I/O operations (read_file, write_file)
 │   ├── TempFile.hpp         ← RAII temporary file guard & atomic file mover
 │   ├── Compression.hpp      ← Zero-overhead Gzip & Deflate compressor
 │   └── Multipart.hpp        ← RFC 7578 multipart parser, builder & disk spooler
@@ -955,7 +1103,7 @@ include/wavex/
         └── HttpResponse.hpp ← Concrete HTTP response with injected write sink (Http1Response & Http2Response)
 
 src/                         ← Implementation + C++20 module partitions (.ixx)
-tests/                       ← Automated unit tests & interactive postman servers
+tests/                       ← Automated unit tests & interactive postman dev servers (HTTP/1.1 & HTTP/2)
 cmake/                       ← CMake installation config
 ```
 

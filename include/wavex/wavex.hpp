@@ -24,6 +24,7 @@
 #include <wavex/Server/Server.hpp>
 #include <wavex/Client/HttpClient.hpp>
 #include <wavex/CLI/CLI.hpp>
+#include <wavex/Async/SpawnBlocking.hpp>
 #include <wavex/Utils/Utils.hpp>
 
 /**

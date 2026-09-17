@@ -26,22 +26,27 @@ This skill provides essential domain context for developing, extending, and debu
    - `Server.hpp`: Coroutine TCP & TLS 1.3 server (`Server<Codec, RouterType>`), completely protocol-agnostic. Employs the 3-Seam Architecture (Transport Seam via `handle_connection<Stream>`, Codec Seam via `parse_stream`/`serialize`, and Policy Seam via `protocol_traits`). Supports configurable payload ceilings (`max_request_size`) and disk spooling thresholds (`max_memory_buffer`).
    - `TlsConfig.hpp`: TLS 1.3 configuration struct (`cert_file`, `key_file`, `key_password`, `dh_file`, `force_tls13`).
    - `ThreadPool.hpp`: Adaptive Tokio-style work-stealing thread pool with proportional hysteresis scaling.
+   - `BlockingPool.hpp`: Dedicated elastic thread pool (`BlockingThreadPool`) for offloading synchronous, CPU-intensive, or legacy blocking tasks.
    - `WorkStealingQueue.hpp`: Per-worker 256-slot ring buffer (`LocalQueue`) and global MPMC overflow queue (`InjectorQueue`).
 
-4. **Protocol Codecs & Traits (`include/wavex/protos/`)**:
+4. **Async & Offloading Subsystem (`include/wavex/Async/`)**:
+   - `SpawnBlocking.hpp`: Tokio-equivalent coroutine awaitable (`co_await wavex::spawn_blocking([=]{ ... })`). Offloads heavy computation/blocking calls to `BlockingThreadPool` and reschedules resumption cleanly on the caller's Asio `io_context` executor with full exception propagation.
+
+5. **Protocol Codecs & Traits (`include/wavex/protos/`)**:
    - `ProtocolTraits.hpp`: Protocol session policy seam (`protocol_traits<Codec>`) answering opening prefaces, persistence, response preparation, and ALPN registration.
    - `http/http1codec.hpp`: Zero-copy HTTP/1.x parser, encoder, chunked decoder, and standard status text mapping (including 301, 302, 303, 304, 307, 308).
    - `http/http2codec.hpp`: RFC 7540 binary framing parser, encoder, and RFC 7541 HPACK compression engine.
    - `http/HttpRequest.hpp`: Concrete request parsing from socket streams (`parse_stream`, `consumed_bytes`), multipart form accessors (`is_multipart`, `multipart`, `file`, `files`), decompression (`decompressed_body`), and disk persistence (`save_body_to_file`).
    - `http/HttpResponse.hpp`: Concrete response with injected write sink for streaming (`write_chunk`, `send_file`), committed state (`is_sent`), and headers sent state (`is_headers_sent`).
 
-5. **Utils Subsystem (`include/wavex/Utils/`, `src/Utils/`)**:
+6. **Utils Subsystem (`include/wavex/Utils/`, `src/Utils/`)**:
    - `Utils.hpp` (`wavex:utils`): Umbrella header and primary C++ module interface partition for utilities.
+   - `AsyncFs.hpp` (`wavex::fs`): Non-blocking file I/O operations (`read_file`, `read_bytes`, `write_file`, `append_file`, `copy_file`, `remove`) built on `spawn_blocking`.
    - `TempFile.hpp` (`wavex:utils_temp_file`): RAII temporary file management (`TempFileGuard`) with atomic move/rename to destination, size tracking, and auto-cleanup.
    - `Compression.hpp` (`wavex:utils_compression`): Zero-overhead Gzip & Deflate memory buffer and stream compression/decompression (`Compressor`, `CompressionFormat`) guarded by CMake definition `WAVEX_HAS_ZLIB`.
    - `Multipart.hpp` (`wavex:utils_multipart`): Complete RFC 7578 multipart/form-data parser, builder, and disk spooler (`MultipartFormData`, `MultipartLimits`, `UploadedFile`, `FormField`).
 
-6. **Client Subsystem (`include/wavex/Client/`)**:
+7. **Client Subsystem (`include/wavex/Client/`)**:
    - `HttpClient.hpp`: Async coroutine client supporting HTTP/1.1 & HTTP/2, plain TCP & TLS 1.3, fluent query builders, JSON, binary bodies, multipart/form-data uploads (`add_field`, `add_file`, `add_file_from_path`), payload compression (`compress`), response decompression (`decompressed_body`), and response saving (`save_to_file`).
 
 ## Common Pitfalls & Gotchas

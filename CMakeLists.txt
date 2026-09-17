@@ -252,14 +252,17 @@ target_sources(wavex
         include/wavex/protos/http/HttpResponse.hpp
         include/wavex/Server/WorkStealingQueue.hpp
         include/wavex/Server/ThreadPool.hpp
+        include/wavex/Server/BlockingPool.hpp
         include/wavex/Server/TlsConfig.hpp
         include/wavex/Server/Server.hpp
         include/wavex/Client/HttpClient.hpp
         include/wavex/Cli/Cli.hpp
+        include/wavex/Async/SpawnBlocking.hpp
         include/wavex/Utils/Utils.hpp
         include/wavex/Utils/TempFile.hpp
         include/wavex/Utils/Compression.hpp
         include/wavex/Utils/Multipart.hpp
+        include/wavex/Utils/AsyncFs.hpp
 )
 
 # C++ Modules
@@ -416,6 +419,8 @@ if (WAVEX_TEST)
     wavex_add_test(wavex_compression_tests      tests/test_compression.cpp)
     wavex_add_test(wavex_multipart_tests        tests/test_multipart.cpp)
     wavex_add_test(wavex_client_file_upload_tests tests/test_client_file_upload.cpp)
+    wavex_add_test(wavex_spawn_blocking_tests  tests/test_spawn_blocking.cpp)
+    wavex_add_test(wavex_async_fs_tests        tests/test_async_fs.cpp)
 
     # Unified CLI-driven Postman Dev Servers (HTTP/1.1 and HTTP/2)
     add_executable(wavex_postman_http1_server tests/postman_demo_http1_server.cpp)

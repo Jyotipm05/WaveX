@@ -12,6 +12,11 @@
  *   ./wavex_postman_http1_server -p 9000              # Plain HTTP on http://127.0.0.1:9000
  *   ./wavex_postman_http1_server --tls -p 4430 -c ssl/test.crt -k ssl/test.key
  *   ./wavex_postman_http1_server --help               # Show CLI usage and option details
+ *
+ * cURL testing:
+ *   curl http://127.0.0.1:8080/api/json
+ *   curl -X POST http://127.0.0.1:8080/api/query -H "Content-Type: application/json" -d '{"domain": "google.com"}'
+ *   curl -X QUERY http://127.0.0.1:8080/api/query -H "Content-Type: application/json" -d '{"domain": "google.com"}'
  */
 
 #ifndef ASIO_HAS_CO_AWAIT
@@ -20,10 +25,16 @@
 
 #include <iostream>
 #include <string>
+#include <vector>
+#include <algorithm>
 #include <nlohmann/json.hpp>
 #include <wavex/wavex.hpp>
 #include <asio/ip/udp.hpp>
+#include <asio/ip/tcp.hpp>
 #include <asio/ip/host_name.hpp>
+#include <asio/as_tuple.hpp>
+#include <asio/use_awaitable.hpp>
+#include <asio/this_coro.hpp>
 
 using namespace wavex;
 using HttpRequest = protos::http::Http1Request;
@@ -150,12 +161,13 @@ int main(int argc, char *argv[]) {
     }
     std::cout << "=========================================================================\n";
     std::cout << " Quick Test Endpoints Reference for Postman / cURL:\n";
-    std::cout << "  1. GET  " << base_url << "/\n";
-    std::cout << "  2. GET  " << base_url << "/api/json\n";
-    std::cout << "  3. POST " << base_url << "/api/echo  (Body: JSON payload)\n";
-    std::cout << "  4. GET  " << base_url << "/api/protected  (Header: Authorization: Bearer secret123)\n";
-    std::cout << "  5. GET  " << base_url << "/users/42\n";
-    std::cout << "  6. GET  " << base_url << "/files/documents/2026/report.pdf  (Wildcard match)\n";
+    std::cout << "  1. GET        " << base_url << "/\n";
+    std::cout << "  2. GET        " << base_url << "/api/json\n";
+    std::cout << "  3. POST       " << base_url << "/api/echo   (Body: JSON payload)\n";
+    std::cout << "  4. POST/QUERY " << base_url << "/api/query  (Body: {\"domain\": \"google.com\"})\n";
+    std::cout << "  5. GET        " << base_url << "/api/protected  (Header: Authorization: Bearer secret123)\n";
+    std::cout << "  6. GET        " << base_url << "/users/42\n";
+    std::cout << "  7. GET        " << base_url << "/files/documents/2026/report.pdf  (Wildcard match)\n";
     std::cout << "=========================================================================\n\n";
 
     auto &router = HttpRouter::instance();
@@ -212,7 +224,98 @@ int main(int argc, char *argv[]) {
         co_return;
     });
 
-    // 4. Protected route with Auth Middleware
+    // 4. JSON Query endpoint - Domain to IP DNS Resolver (Supports both POST and QUERY methods)
+    auto dns_query_handler = [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
+        const std::string raw(req.body());
+        std::string domain;
+
+        if (!raw.empty()) {
+            auto j = nlohmann::json::parse(raw, nullptr, false);
+            if (!j.is_discarded()) {
+                if (j.is_object()) {
+                    if (j.contains("domain") && j["domain"].is_string()) {
+                        domain = j["domain"].get<std::string>();
+                    } else if (j.contains("host") && j["host"].is_string()) {
+                        domain = j["host"].get<std::string>();
+                    }
+                } else if (j.is_string()) {
+                    domain = j.get<std::string>();
+                }
+            } else {
+                domain = raw;
+            }
+        }
+
+        // Clean & normalize domain string
+        while (!domain.empty() && (domain.front() == ' ' || domain.front() == '\t' || domain.front() == '"')) domain.erase(0, 1);
+        while (!domain.empty() && (domain.back() == ' ' || domain.back() == '\t' || domain.back() == '\r' || domain.back() == '\n' || domain.back() == '"')) domain.pop_back();
+
+        if (domain.starts_with("https://")) {
+            domain = domain.substr(8);
+        } else if (domain.starts_with("http://")) {
+            domain = domain.substr(7);
+        }
+
+        auto slash_pos = domain.find('/');
+        if (slash_pos != std::string::npos) {
+            domain = domain.substr(0, slash_pos);
+        }
+        auto colon_pos = domain.find(':');
+        if (colon_pos != std::string::npos) {
+            domain = domain.substr(0, colon_pos);
+        }
+
+        if (domain.empty()) {
+            res.status(400).json({
+                {"status", "error"},
+                {"protocol", "HTTP/1.1"},
+                {"message", "Missing or invalid domain in JSON body. Example: {\"domain\": \"google.com\"}"}
+            });
+            co_return;
+        }
+
+        auto executor = co_await asio::this_coro::executor;
+        asio::ip::tcp::resolver resolver(executor);
+
+        auto [ec, results] = co_await resolver.async_resolve(domain, "", asio::as_tuple(asio::use_awaitable));
+        if (ec) {
+            res.status(404).json({
+                {"status", "error"},
+                {"protocol", "HTTP/1.1"},
+                {"domain", domain},
+                {"message", "Failed to resolve domain: " + ec.message()}
+            });
+            co_return;
+        }
+
+        std::string primary_ip;
+        std::vector<std::string> all_ips;
+        for (const auto &entry : results) {
+            std::string ip = entry.endpoint().address().to_string();
+            if (primary_ip.empty()) {
+                primary_ip = ip;
+            }
+            if (std::find(all_ips.begin(), all_ips.end(), ip) == all_ips.end()) {
+                all_ips.push_back(ip);
+            }
+        }
+
+        res.status(200).json({
+            {"status", "success"},
+            {"protocol", "HTTP/1.1"},
+            {"domain", domain},
+            {"ip", primary_ip},
+            {"ips", all_ips}
+        });
+        co_return;
+    };
+
+    router.post("/api/query", dns_query_handler);
+    router.query("/api/query", dns_query_handler);
+    router.post("/api/dns", dns_query_handler);
+    router.query("/api/dns", dns_query_handler);
+
+    // 5. Protected route with Auth Middleware
     router.get("/api/protected", {auth_middleware}, [](HttpRequest &, HttpResponse &res) -> asio::awaitable<void> {
         res.status(200).json({
             {"status", "granted"},
@@ -221,7 +324,7 @@ int main(int argc, char *argv[]) {
         co_return;
     });
 
-    // 5. Dynamic path parameter
+    // 6. Dynamic path parameter
     router.get("/users/:id", [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
         res.status(200).json({
             {"endpoint", "user_details"},
