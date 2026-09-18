@@ -55,6 +55,7 @@
 #include <wavex/Server/ThreadPool.hpp>
 #include <wavex/Server/TlsConfig.hpp>
 #include <wavex/Base/Memory.hpp>
+#include <wavex/Base/Logger.hpp>
 
 namespace wavex::server {
     /**
@@ -145,6 +146,8 @@ namespace wavex::server {
         void stop() {
             if (!is_running_) [[unlikely]] return;
             is_running_ = false;
+            asio::error_code ec;
+            acceptor_.close(ec);
             master_io_.stop();
         }
 
@@ -348,6 +351,8 @@ namespace wavex::server {
             while (is_running_) {
                 try {
                     asio::ip::tcp::socket socket = co_await acceptor_.async_accept();
+                    asio::error_code nd_ec;
+                    socket.set_option(asio::ip::tcp::no_delay(true), nd_ec);
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
                     if (tls_enabled_ && ssl_ctx_) {
                         auto stream = std::make_unique<asio::ssl::stream<asio::ip::tcp::socket> >(
@@ -359,7 +364,9 @@ namespace wavex::server {
                     pool_.spawn_coroutine(
                         handle_connection(std::make_unique<asio::ip::tcp::socket>(std::move(socket))));
                 } catch (const std::exception &e) {
-                    std::cerr << "[Server] Accept error: " << e.what() << "\n";
+                    if (is_running_) {
+                        std::cerr << "[Server] Accept error: " << e.what() << "\n";
+                    }
                     break;
                 }
             }
@@ -373,6 +380,7 @@ namespace wavex::server {
             auto &stream = *stream_ptr;
             std::string stream_buf;
             stream_buf.reserve(8192);
+            std::size_t stream_buf_consumed = 0;
             auto executor = co_await asio::this_coro::executor;
 
             try {
@@ -397,10 +405,20 @@ namespace wavex::server {
 
                 unsigned request_count = 0;
                 while (is_running_) {
+                    wavex::memory::RequestArena arena;
+
+                    std::string_view unconsumed(stream_buf.data() + stream_buf_consumed,
+                                                stream_buf.size() - stream_buf_consumed);
                     RequestType req;
-                    auto p_res = req.parse_stream(stream_buf);
+                    auto p_res = req.parse_stream(unconsumed);
 
                     while (p_res == Codec::result::incomplete && is_running_) {
+                        // Compact stream_buf before reading if there are consumed bytes
+                        if (stream_buf_consumed > 0) {
+                            stream_buf.erase(0, stream_buf_consumed);
+                            stream_buf_consumed = 0;
+                        }
+
                         asio::steady_timer timer(executor, keep_alive_timeout_);
                         bool timed_out = false;
                         timer.async_wait([&](const std::error_code ec) {
@@ -431,7 +449,9 @@ namespace wavex::server {
                             co_return;
                         }
 
-                        p_res = req.parse_stream(stream_buf);
+                        unconsumed = std::string_view(stream_buf.data() + stream_buf_consumed,
+                                                      stream_buf.size() - stream_buf_consumed);
+                        p_res = req.parse_stream(unconsumed);
                     }
 
                     if (p_res != Codec::result::success) {
@@ -454,7 +474,12 @@ namespace wavex::server {
                         err_res.status(431).send("Request Header Fields Too Large");
                         co_await asio::async_write(stream, asio::buffer(err_res.serialize()),
                                                    asio::use_awaitable);
-                        stream_buf.erase(0, req.consumed_bytes());
+                        stream_buf_consumed += req.consumed_bytes();
+                        if (stream_buf_consumed >= 4096 || stream_buf_consumed == stream_buf.size()) {
+                            stream_buf.erase(0, stream_buf_consumed);
+                            stream_buf_consumed = 0;
+                        }
+                        arena.release();
                         if (!keep) break;
                         continue;
                     }
@@ -498,6 +523,7 @@ namespace wavex::server {
                                     std::ignore = stream.lowest_layer().close(close_ec);
                                     co_return std::unexpected(std::make_error_code(std::errc::timed_out));
                                 }
+
                                 if (write_ec) {
                                     co_return std::unexpected(write_ec);
                                 }
@@ -527,7 +553,14 @@ namespace wavex::server {
                                                    asio::use_awaitable);
                     }
 
-                    stream_buf.erase(0, req.consumed_bytes());
+                    stream_buf_consumed += req.consumed_bytes();
+                    if (stream_buf_consumed >= 4096) {
+                        stream_buf.erase(0, stream_buf_consumed);
+                        stream_buf_consumed = 0;
+                    } else if (stream_buf_consumed == stream_buf.size()) {
+                        stream_buf.clear();
+                        stream_buf_consumed = 0;
+                    }
 
                     // Trim stream_buf RSS if it has grown large and is now empty
                     if (stream_buf.capacity() > 64 * 1024 && stream_buf.empty()) {
@@ -535,10 +568,12 @@ namespace wavex::server {
                         stream_buf.reserve(8192); // restore working reservation
                     }
 
+                    arena.release();
+
                     if (!keep) break;
                 }
-            } catch (const std::exception &) {
-                // Connection closed or stream error
+            } catch (const std::exception &e) {
+                wavex::log::trace("[Server] Connection closed or stream error: {}", e.what());
             }
 
             // Graceful transport shutdown

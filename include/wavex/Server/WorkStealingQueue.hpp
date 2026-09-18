@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2026 Jyotipriya Mondal
+// Copyright (c) 2026 Jyotipriya Mondal
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -21,13 +21,157 @@
 
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <functional>
 #include <mutex>
+#include <new>
 #include <optional>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace wavex::server {
-    using Task = std::function<void()>;
+    /**
+     * @class InlineTask
+     * @brief Zero-heap-allocation type-erased move-only task wrapper with SBO.
+     *
+     * In high-performance work-stealing systems (such as Tokio, Seastar, and WaveX),
+     * task dispatch is on the ultra-hot path. Using std::function causes heap allocations
+     * when captures exceed 16-24 bytes, and requires copy-constructibility.
+     *
+     * InlineTask provides:
+     *   - In-place storage up to `Capacity` bytes (default 64) with std::max_align_t alignment.
+     *   - Move-only semantics (supports unique_ptr, coroutine handles, etc.).
+     *   - Transparent heap fallback if a closure exceeds Capacity (safe & universal).
+     *   - Zero dynamic allocation overhead on all standard dispatch closures.
+     */
+    template<std::size_t Capacity = 64>
+    class InlineTask {
+        enum class Op { Destroy, Move };
+        using InvokerFn = void (*)(void *);
+        using ManagerFn = void (*)(Op, void *src, void *dst) noexcept;
+
+        InvokerFn invoker_{nullptr};
+        ManagerFn manager_{nullptr};
+        alignas(std::max_align_t) std::byte storage_[Capacity];
+
+    public:
+        constexpr InlineTask() noexcept = default;
+
+        constexpr InlineTask(std::nullptr_t) noexcept : invoker_(nullptr), manager_(nullptr) {}
+
+        ~InlineTask() {
+            reset();
+        }
+
+        InlineTask(const InlineTask &) = delete;
+        InlineTask &operator=(const InlineTask &) = delete;
+
+        InlineTask(InlineTask &&other) noexcept {
+            if (other.manager_) {
+                other.manager_(Op::Move, other.storage_, storage_);
+                invoker_ = other.invoker_;
+                manager_ = other.manager_;
+                other.invoker_ = nullptr;
+                other.manager_ = nullptr;
+            }
+        }
+
+        InlineTask &operator=(InlineTask &&other) noexcept {
+            if (this != &other) {
+                reset();
+                if (other.manager_) {
+                    other.manager_(Op::Move, other.storage_, storage_);
+                    invoker_ = other.invoker_;
+                    manager_ = other.manager_;
+                    other.invoker_ = nullptr;
+                    other.manager_ = nullptr;
+                }
+            }
+            return *this;
+        }
+
+        InlineTask &operator=(std::nullptr_t) noexcept {
+            reset();
+            return *this;
+        }
+
+        template<typename F>
+            requires (!std::is_same_v<std::decay_t<F>, InlineTask> &&
+                      !std::is_same_v<std::decay_t<F>, std::nullptr_t> &&
+                      std::is_invocable_v<std::decay_t<F>&>)
+        InlineTask(F &&f) {
+            using DecayF = std::decay_t<F>;
+            if constexpr (sizeof(DecayF) <= Capacity && alignof(DecayF) <= alignof(std::max_align_t)) {
+                ::new (static_cast<void*>(storage_)) DecayF(std::forward<F>(f));
+                invoker_ = [](void *ptr) {
+                    (*reinterpret_cast<DecayF *>(ptr))();
+                };
+                manager_ = [](Op op, void *src, void *dst) noexcept {
+                    auto *src_fn = reinterpret_cast<DecayF *>(src);
+                    if (op == Op::Destroy) {
+                        src_fn->~DecayF();
+                    } else if (op == Op::Move) {
+                        ::new (dst) DecayF(std::move(*src_fn));
+                        src_fn->~DecayF();
+                    }
+                };
+            } else {
+                auto *heap_ptr = new DecayF(std::forward<F>(f));
+                *reinterpret_cast<DecayF **>(storage_) = heap_ptr;
+                invoker_ = [](void *ptr) {
+                    auto *heap_ptr = *reinterpret_cast<DecayF **>(ptr);
+                    (*heap_ptr)();
+                };
+                manager_ = [](Op op, void *src, void *dst) noexcept {
+                    auto **src_ptr = reinterpret_cast<DecayF **>(src);
+                    if (op == Op::Destroy) {
+                        delete *src_ptr;
+                        *src_ptr = nullptr;
+                    } else if (op == Op::Move) {
+                        auto **dst_ptr = reinterpret_cast<DecayF **>(dst);
+                        *dst_ptr = *src_ptr;
+                        *src_ptr = nullptr;
+                    }
+                };
+            }
+        }
+
+        template<typename F>
+            requires (!std::is_same_v<std::decay_t<F>, InlineTask> &&
+                      !std::is_same_v<std::decay_t<F>, std::nullptr_t> &&
+                      std::is_invocable_v<std::decay_t<F>&>)
+        InlineTask &operator=(F &&f) {
+            *this = InlineTask(std::forward<F>(f));
+            return *this;
+        }
+
+        void reset() noexcept {
+            if (manager_) {
+                manager_(Op::Destroy, storage_, nullptr);
+                invoker_ = nullptr;
+                manager_ = nullptr;
+            }
+        }
+
+        [[nodiscard]] explicit operator bool() const noexcept {
+            return invoker_ != nullptr;
+        }
+
+        void operator()() {
+            if (invoker_) {
+                invoker_(storage_);
+            }
+        }
+
+        void operator()() const {
+            if (invoker_) {
+                invoker_(const_cast<std::byte *>(storage_));
+            }
+        }
+    };
+
+    using Task = InlineTask<64>;
 
     // ─────────────────────────────────────────────────────────────────────────
     // LocalQueue — Bounded, lock-free ring buffer (256 slots)
@@ -63,8 +207,9 @@ namespace wavex::server {
         /**
          * @brief Owner-only: push a task onto the back of the ring.
          * @return true if queued, false if the ring is full (spill to InjectorQueue).
+         * Note: If full, task is NOT moved from, allowing the caller to spill it to InjectorQueue.
          */
-        [[nodiscard]] bool push(Task task) {
+        [[nodiscard]] bool push(Task &&task) {
             const std::size_t b = bottom_.load(std::memory_order_relaxed);
 
             // Full check: ring has CAPACITY-1 usable slots to avoid ambiguity.
@@ -76,6 +221,10 @@ namespace wavex::server {
             // Release so steal() readers see the fully-written task.
             bottom_.store(b + 1, std::memory_order_release);
             return true;
+        }
+
+        [[nodiscard]] bool push(Task &task) {
+            return push(std::move(task));
         }
 
         /**

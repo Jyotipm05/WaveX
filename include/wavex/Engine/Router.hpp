@@ -771,21 +771,18 @@ namespace wavex::engine {
 
             // 3. Wildcard child (*) — captures all remaining segments
             if (node->wildcard_child) {
-                // Build wildcard value from remaining segments (needs a temporary string)
-                // This string is short-lived and will be stored in the matched RouteMatch params FlatMap.
-                // We store it in an intermediate buffer that lives long enough for the caller.
-                // Since wildcard captures are uncommon and small, a local static is fine here.
-                // For arena compatibility, wildcard values are copied into the RouteMatch FlatMap.
-                std::string remaining;
-                for (size_t i = depth; i < segments.size(); ++i) {
-                    if (!remaining.empty()) remaining += '/';
-                    remaining += segments[i];
+                if (depth < segments.size()) {
+                    const char *w_begin = segments[depth].data();
+                    const char *w_end = segments.back().data() + segments.back().size();
+                    std::string_view wildcard_slice(w_begin, static_cast<size_t>(w_end - w_begin));
+                    params.insert_or_assign(
+                        std::string_view(node->wildcard_child->param_name),
+                        wildcard_slice);
+                } else {
+                    params.insert_or_assign(
+                        std::string_view(node->wildcard_child->param_name),
+                        std::string_view{});
                 }
-                // Store as a view into the wildcard_remaining_ member so it survives resolve()
-                wildcard_remaining_ = std::move(remaining);
-                params.insert_or_assign(
-                    std::string_view(node->wildcard_child->param_name),
-                    std::string_view(wildcard_remaining_));
                 if (!node->wildcard_child->handlers.empty()) {
                     return node->wildcard_child.get();
                 }
@@ -793,9 +790,5 @@ namespace wavex::engine {
 
             return nullptr;
         }
-
-        /// Temporary storage for wildcard segment concatenation during resolve().
-        /// Mutable because resolve() is logically const but needs this scratch buffer.
-        mutable std::string wildcard_remaining_;
     };
 } // namespace wavex::engine

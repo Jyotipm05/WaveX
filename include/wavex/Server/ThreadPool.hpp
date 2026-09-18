@@ -30,6 +30,7 @@
 #endif
 
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -40,6 +41,7 @@
 
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
+#include <asio/executor_work_guard.hpp>
 #include <asio/io_context.hpp>
 
 #include <wavex/Server/WorkStealingQueue.hpp>
@@ -60,8 +62,24 @@ namespace wavex::server {
             return s_config;
         }
 
-        std::size_t min_workers = 1;
-        std::size_t max_workers = 5;
+        static std::size_t default_max_workers() noexcept {
+            const auto hw = std::thread::hardware_concurrency();
+            return hw > 0 ? std::max<std::size_t>(4, hw) : 4;
+        }
+
+        static std::size_t default_min_workers() noexcept {
+            return std::max<std::size_t>(1, default_max_workers() / 4);
+        }
+
+        ThreadPoolConfig() {
+            if (upper_thresholds.size() < max_workers - 1)
+                upper_thresholds.resize(max_workers - 1, 50);
+            if (lower_thresholds.size() < max_workers - 1)
+                lower_thresholds.resize(max_workers - 1, 10);
+        }
+
+        std::size_t min_workers = default_min_workers();
+        std::size_t max_workers = default_max_workers();
 
         /// Scale-up divider for proportional step calculation: step = max(1, (target - current) / scale_up_divider)
         std::size_t scale_up_divider = 2;
@@ -100,6 +118,7 @@ namespace wavex::server {
     struct WorkerNode {
         std::size_t id = 0;
         std::shared_ptr<asio::io_context> io_ctx;
+        asio::executor_work_guard<asio::io_context::executor_type> work_guard;
         std::unique_ptr<LocalQueue> queue; ///< Bounded 256-slot lock-free ring buffer
         std::atomic<bool> is_retiring{false};
         std::atomic<bool> is_busy{false};
@@ -109,6 +128,7 @@ namespace wavex::server {
         explicit WorkerNode(const std::size_t worker_id)
             : id(worker_id),
               io_ctx(std::make_shared<asio::io_context>()),
+              work_guard(asio::make_work_guard(*io_ctx)),
               queue(std::make_unique<LocalQueue>()) {
         }
     };
@@ -143,31 +163,37 @@ namespace wavex::server {
          * @brief Submit a generic task to the pool.
          *
          * Tries to push into the next round-robin worker's LocalQueue first.
-         * Falls back to the InjectorQueue if the local ring is full.
+         * Falls back to the InjectorQueue if the local ring is full (lock-free fast path).
          */
         void dispatch(Task task) {
-            std::lock_guard<std::mutex> lock(workers_mutex_);
-            if (workers_.empty()) {
+            const std::size_t count = worker_count_.load(std::memory_order_acquire);
+            if (count == 0) {
                 // No workers yet — queue directly into injector
                 injector_.push(std::move(task));
+                check_burst_spill();
                 return;
             }
-            const std::size_t idx = next_worker_idx_++ % workers_.size();
-            if (!workers_[idx]->queue->push(task)) {
-                // LocalQueue full → spill to global injector
+            const std::size_t idx = next_worker_idx_.fetch_add(1, std::memory_order_relaxed) % count;
+            auto *w = (idx < kMaxWorkerSlots) ? worker_table_[idx].load(std::memory_order_acquire) : nullptr;
+            if (!w || !w->queue->push(std::move(task))) {
+                // LocalQueue full or slot unavailable → spill to global injector
                 injector_.push(std::move(task));
+                check_burst_spill();
             }
         }
 
         /**
-         * @brief Spawn an Asio coroutine onto one of the worker io_contexts.
+         * @brief Spawn an Asio coroutine onto one of the worker io_contexts (lock-free fast path).
          */
         template<typename Coro>
         void spawn_coroutine(Coro coro) {
-            std::lock_guard<std::mutex> lock(workers_mutex_);
-            if (workers_.empty()) return;
-            const std::size_t idx = next_worker_idx_++ % workers_.size();
-            asio::co_spawn(*workers_[idx]->io_ctx, std::move(coro), asio::detached);
+            const std::size_t count = worker_count_.load(std::memory_order_acquire);
+            if (count == 0) return;
+            const std::size_t idx = next_worker_idx_.fetch_add(1, std::memory_order_relaxed) % count;
+            auto *w = (idx < kMaxWorkerSlots) ? worker_table_[idx].load(std::memory_order_acquire) : nullptr;
+            if (w && w->io_ctx) {
+                asio::co_spawn(*w->io_ctx, std::move(coro), asio::detached);
+            }
         }
 
         /**
@@ -191,10 +217,9 @@ namespace wavex::server {
             }
         }
 
-        /// Get current active worker count.
-        [[nodiscard]] std::size_t worker_count() const {
-            std::lock_guard<std::mutex> lock(workers_mutex_);
-            return workers_.size();
+        /// Get current active worker count (lock-free).
+        [[nodiscard]] std::size_t worker_count() const noexcept {
+            return worker_count_.load(std::memory_order_acquire);
         }
 
         /// Force an immediate scaling evaluation.
@@ -209,9 +234,14 @@ namespace wavex::server {
         }
 
     private:
+        static constexpr std::size_t kMaxWorkerSlots = 128;
+
         ThreadPoolConfig &config_;
         mutable std::mutex workers_mutex_;
         std::vector<std::shared_ptr<WorkerNode> > workers_;
+        std::array<std::atomic<WorkerNode *>, kMaxWorkerSlots> worker_table_{};
+        std::atomic<std::size_t> worker_count_{0};
+        std::atomic<std::size_t> burst_spill_count_{0};
         InjectorQueue injector_; ///< Global overflow & external submission queue
         std::atomic<bool> pool_stopping_{false};
         std::thread monitor_thread_;
@@ -220,6 +250,13 @@ namespace wavex::server {
         bool monitor_signal_{false};
         std::atomic<std::size_t> next_worker_idx_{0};
         std::size_t scale_down_cooldown_counter_{0};
+
+        void check_burst_spill() noexcept {
+            if (burst_spill_count_.fetch_add(1, std::memory_order_relaxed) + 1 >= 8) {
+                burst_spill_count_.store(0, std::memory_order_relaxed);
+                notify_monitor();
+            }
+        }
 
         // ── Lifecycle ──────────────────────────────────────────────────────
 
@@ -243,8 +280,13 @@ namespace wavex::server {
 
             std::vector<std::shared_ptr<WorkerNode> > to_join; {
                 std::lock_guard<std::mutex> lock(workers_mutex_);
+                worker_count_.store(0, std::memory_order_release);
+                for (std::size_t i = 0; i < kMaxWorkerSlots; ++i) {
+                    worker_table_[i].store(nullptr, std::memory_order_relaxed);
+                }
                 for (const auto &w: workers_) {
                     w->stop_requested = true;
+                    w->work_guard.reset();
                     if (w->io_ctx) w->io_ctx->stop();
                 }
                 to_join = std::move(workers_);
@@ -266,6 +308,11 @@ namespace wavex::server {
         void add_worker_unlocked() {
             const std::size_t new_id = workers_.size() + 1;
             auto worker = std::make_shared<WorkerNode>(new_id);
+            const std::size_t slot = workers_.size();
+            if (slot < kMaxWorkerSlots) {
+                worker_table_[slot].store(worker.get(), std::memory_order_release);
+                worker_count_.store(slot + 1, std::memory_order_release);
+            }
             worker->thread = std::thread([this, w = worker] { worker_loop(w); });
             workers_.emplace_back(std::move(worker));
         }
@@ -285,16 +332,15 @@ namespace wavex::server {
                     continue;
                 }
 
-                // ── 2. Steal from a random peer's LocalQueue (FIFO) ─────────
+                // ── 2. Steal from a random peer's LocalQueue (FIFO, lock-free)
                 {
-                    std::lock_guard<std::mutex> lock(workers_mutex_);
-                    const std::size_t n = workers_.size();
+                    const std::size_t n = worker_count_.load(std::memory_order_acquire);
                     if (n > 1) {
                         // Pick a random start to avoid thundering-herd on worker 0.
                         const std::size_t start = rng() % n;
                         for (std::size_t i = 0; i < n; ++i) {
-                            auto &other = workers_[(start + i) % n];
-                            if (other->id != w->id) {
+                            auto *other = worker_table_[(start + i) % n].load(std::memory_order_acquire);
+                            if (other && other->id != w->id && !other->is_retiring.load(std::memory_order_relaxed)) {
                                 if (auto stolen = other->queue->steal_half(*w->queue)) {
                                     w->is_busy = true;
                                     (*stolen)();
@@ -315,10 +361,14 @@ namespace wavex::server {
                 }
 
                 // ── 4. Poll asio::io_context for coroutine continuations ─────
-                w->io_ctx->poll();
-
-                // ── 5. Yield — prevent tight CPU spin when fully idle ────────
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                // With work_guard active, io_ctx does not prematurely stop.
+                // Drain ready handlers non-blocking via poll(), or sleep efficiently
+                // in the OS kernel (IOCP/epoll) for up to 100 microseconds if idle.
+                if (!w->stop_requested) {
+                    if (w->io_ctx->poll() == 0) {
+                        w->io_ctx->run_one_for(std::chrono::microseconds(100));
+                    }
+                }
 
             next_iteration:;
             }
@@ -412,6 +462,11 @@ namespace wavex::server {
                         if (scale_down_cooldown_counter_ >= config_.scale_down_cooldown_cycles) {
                             scale_down_cooldown_counter_ = 0;
                             retiring_worker = workers_.back();
+                            const std::size_t slot = workers_.size() - 1;
+                            worker_count_.store(slot, std::memory_order_release);
+                            if (slot < kMaxWorkerSlots) {
+                                worker_table_[slot].store(nullptr, std::memory_order_release);
+                            }
                             workers_.pop_back();
                         }
                     } else {
@@ -430,6 +485,8 @@ namespace wavex::server {
         static void decommission_worker(const std::shared_ptr<WorkerNode> &retiring) {
             retiring->is_retiring = true;
             retiring->stop_requested = true;
+            retiring->work_guard.reset();
+            if (retiring->io_ctx) retiring->io_ctx->stop();
 
             if (retiring->thread.joinable())
                 retiring->thread.join();

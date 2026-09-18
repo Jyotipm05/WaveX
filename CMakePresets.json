@@ -86,7 +86,7 @@
       "name": ".fast-build",
       "displayName": "Fast Build",
       "hidden": true,
-      "jobs": 10
+      "jobs": 6
     },
     {
       "name": ".max-build",
