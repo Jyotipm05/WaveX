@@ -38,6 +38,7 @@
 #define ASIO_HAS_CO_AWAIT 1
 #endif
 
+#include <cassert>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -769,11 +770,16 @@ namespace wavex::engine {
                 }
             }
 
-            // 3. Wildcard child (*) — captures all remaining segments
+            // 3. Wildcard child (*) — captures all remaining segments.
+            // INVARIANT: All string_views in `segments` are non-empty, contiguous slices
+            // of the single normalized path buffer parsed in resolve(). Therefore,
+            // (segments.back().data() + segments.back().size()) - segments[depth].data()
+            // is valid pointer arithmetic spanning the entire wildcard suffix.
             if (node->wildcard_child) {
                 if (depth < segments.size()) {
                     const char *w_begin = segments[depth].data();
                     const char *w_end = segments.back().data() + segments.back().size();
+                    assert(w_begin <= w_end && "Segments must be contiguous slices of the same path buffer");
                     std::string_view wildcard_slice(w_begin, static_cast<size_t>(w_end - w_begin));
                     params.insert_or_assign(
                         std::string_view(node->wildcard_child->param_name),

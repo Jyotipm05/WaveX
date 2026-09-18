@@ -31,21 +31,27 @@ This skill provides essential domain context for developing, extending, and debu
 
 2. **Routing Engine (`include/wavex/Engine/`)**:
     - `Router.hpp`: Protocol-agnostic radix tree with RE2 regex (`{id:[0-9]+}`), dynamic `:param`, wildcard `*param`,
-      scoped middlewares, and 404 handler.
+      scoped middlewares, and 404 handler. Wildcard captures are zero-allocation contiguous string slices
+      `std::string_view(w_begin, w_end - w_begin)` guarded by a contiguous path buffer invariant assertion.
     - `HttpRouter.hpp`: HTTP-specific convenience wrapper (`get`, `post`, `put`, `del`, `patch`, `query`).
 
 3. **Server Subsystem (`include/wavex/Server/`)**:
     - `Server.hpp`: Coroutine TCP & TLS 1.3 server (`Server<Codec, RouterType>`), completely protocol-agnostic. Employs
       the 3-Seam Architecture (Transport Seam via `handle_connection<Stream>`, Codec Seam via `parse_stream`/
-      `serialize`, and Policy Seam via `protocol_traits`). Supports configurable payload ceilings (`max_request_size`)
-      and disk spooling thresholds (`max_memory_buffer`). Per-request `RequestArena` is scoped to the request block
-      only (not the connection lifetime), reclaimed via `arena.release()` after each response is sent.
+      `serialize`, and Policy Seam via `protocol_traits`). Configures `TCP_NODELAY` immediately upon socket accept.
+      Employs an offset cursor (`stream_buf_consumed`) to amortize `stream_buf` compaction until >= 4096 bytes.
+      Supports configurable payload ceilings (`max_request_size`) and disk spooling thresholds (`max_memory_buffer`).
     - `TlsConfig.hpp`: TLS 1.3 configuration struct (`cert_file`, `key_file`, `key_password`, `dh_file`, `force_tls13`).
-    - `ThreadPool.hpp`: Adaptive Tokio-style work-stealing thread pool with proportional hysteresis scaling.
+    - `ThreadPool.hpp`: Adaptive Tokio-style work-stealing thread pool with proportional hysteresis scaling. Hot paths
+      (stealing and round-robin dispatch) access an atomic pointer table (`worker_table_`) without `workers_mutex_` lock
+      contention. Worker threads hold an `asio::executor_work_guard` to prevent premature context stop and achieve
+      microsecond latency via non-blocking `poll()` followed by `run_one_for(100us)` IOCP/epoll wait. Includes fast-path
+      burst spill triggers for immediate scaling evaluations.
     - `BlockingPool.hpp`: Dedicated elastic thread pool (`BlockingThreadPool`) for offloading synchronous,
       CPU-intensive, or legacy blocking tasks.
     - `WorkStealingQueue.hpp`: Per-worker 256-slot ring buffer (`LocalQueue`) and global MPMC overflow queue (
-      `InjectorQueue`).
+      `InjectorQueue`). Uses `InlineTask<64>`: a type-erased, move-only task wrapper with 64-byte SBO aligned to
+      `std::max_align_t` (zero heap allocations on the hot dispatch path).
 
 4. **Async & Offloading Subsystem (`include/wavex/Async/`)**:
     - `SpawnBlocking.hpp`: Tokio-equivalent coroutine awaitable (`co_await wavex::spawn_blocking([=]{ ... })`). Offloads
@@ -153,5 +159,11 @@ This skill provides essential domain context for developing, extending, and debu
     - For incoming requests (`HttpRequest`), decode all query parameters into a single contiguous linear buffer (`query_decoded_buf_`), constructing `query` FlatMap views *after* buffer finalization to eliminate per-key allocations entirely.
     - For outgoing responses (`HttpResponse`), use a contiguous `std::vector<std::pair<std::string, std::string>>` (`header_store_`) and re-synchronize `headers_` and `headers_views_` views immediately after insertions or reallocations to guarantee memory validity without `std::deque` heap chunk overhead.
 
+13. **Asio `io_context` Premature Stopped State in Worker Loops**:
+    - When combining Asio with custom task loops (`ThreadPool::worker_loop`), calling `run_one_for` on an `io_context` without outstanding work causes Asio to stop the context. Subsequent calls skip event processing, causing `asio::co_spawn` connection handlers to deadlock.
+    - Always maintain an `asio::executor_work_guard` on the worker's `io_context`. Poll ready work non-blocking via `poll()`, and sleep via `run_one_for(100us)` when idle. Reset the work guard prior to calling `io_ctx->stop()`.
 
-
+14. **Wildcard Path Segment Contiguity Invariant**:
+    - Router wildcard captures (`*` or `*name`) rely on pointer arithmetic spanning from the wildcard start segment to the end of the last segment.
+    - This invariant requires all segments in the resolution array to be contiguous slices of the same normalized request path buffer.
+    - Guard pointer differences with `assert(w_begin <= w_end)`. Never construct resolution segments from separately allocated strings.

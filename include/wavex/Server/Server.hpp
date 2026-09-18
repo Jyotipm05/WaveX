@@ -405,8 +405,6 @@ namespace wavex::server {
 
                 unsigned request_count = 0;
                 while (is_running_) {
-                    wavex::memory::RequestArena arena;
-
                     std::string_view unconsumed(stream_buf.data() + stream_buf_consumed,
                                                 stream_buf.size() - stream_buf_consumed);
                     RequestType req;
@@ -479,7 +477,6 @@ namespace wavex::server {
                             stream_buf.erase(0, stream_buf_consumed);
                             stream_buf_consumed = 0;
                         }
-                        arena.release();
                         if (!keep) break;
                         continue;
                     }
@@ -567,8 +564,6 @@ namespace wavex::server {
                         stream_buf.shrink_to_fit();
                         stream_buf.reserve(8192); // restore working reservation
                     }
-
-                    arena.release();
 
                     if (!keep) break;
                 }

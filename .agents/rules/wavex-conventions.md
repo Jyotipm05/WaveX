@@ -60,3 +60,18 @@
     - Never expose `std::string_view` into an incrementally grown `std::vector` without post-mutation view synchronization, as vector reallocation moves small SSO strings and invalidates earlier views.
     - **Incoming Requests (`HttpRequest`)**: Use a single contiguous linear buffer (`query_decoded_buf_`). Decode all query keys/values into this buffer, and populate `query` FlatMap string views *after* buffer finalization.
     - **Outgoing Responses (`HttpResponse`)**: Use a contiguous `std::vector<std::pair<std::string, std::string>>` (`header_store_`), and safely synchronize `headers_` and `headers_views_` after insertions or reallocations. This guarantees complete pointer validity without `std::deque` heap chunk overhead.
+
+13. **Asio `io_context` Lifecycle in Custom Worker Loops**:
+    - When embedding an `asio::io_context` alongside custom task queues (e.g. work-stealing rings in `ThreadPool`), NEVER call `run()`, `run_one()`, or `run_one_for()` without an active `asio::executor_work_guard`.
+    - Without a work guard, running out of ready work immediately transitions `io_context` into the `stopped()` state, permanently dropping subsequent `asio::co_spawn` tasks and causing server deadlocks.
+    - Use `io_ctx->poll()` to drain ready handlers with 0μs latency, and `io_ctx->run_one_for(100us)` with an active `work_guard` to sleep inside the OS kernel (IOCP/epoll) when idle.
+    - Always call `work_guard.reset()` before `io_ctx->stop()` during pool shutdown or thread decommissioning.
+
+14. **Router Wildcard Pointer Arithmetic Invariant**:
+    - When capturing wildcard routes (`*` or `*name`), path segments must be contiguous slices of the single normalized request path buffer.
+    - Pointer arithmetic `(segments.back().data() + segments.back().size()) - segments[depth].data()` must be guarded with `assert(w_begin <= w_end)`.
+    - Never construct path segments from individually allocated `std::string` objects.
+
+15. **Per-Request Allocation Boundaries**:
+    - `FlatMap<K, V, 16>` handles path params, query parameters, and response headers inline with zero heap allocation for N <= 16.
+    - Never instantiate `wavex::memory::RequestArena` in coroutine connection loops unless request/response structures are explicitly wired to consume its `pmr::memory_resource*`, as an unused 4KB arena bloats the coroutine frame.
