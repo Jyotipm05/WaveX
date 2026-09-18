@@ -51,6 +51,12 @@
 #include <asio/ssl.hpp>
 #endif
 
+#include <asio/signal_set.hpp>
+#include <csignal>
+#include <unordered_set>
+#include <mutex>
+
+#include <wavex/Base/Event.hpp>
 #include <wavex/Engine/HttpRouter.hpp>
 #include <wavex/Server/ThreadPool.hpp>
 #include <wavex/Server/TlsConfig.hpp>
@@ -58,6 +64,94 @@
 #include <wavex/Base/Logger.hpp>
 
 namespace wavex::server {
+    /**
+     * @enum ServerState
+     * @brief Lifecycle states of the Server instance.
+     */
+    enum class ServerState : uint8_t {
+        Stopped,
+        Running,
+        ShuttingDown
+    };
+
+    /**
+     * @struct ConnectionTracker
+     * @brief Thread-safe registry of active and idle socket connections for graceful drain.
+     */
+    struct ConnectionTracker {
+        struct Entry {
+            std::function<void()> cancel;
+            std::function<void()> close;
+        };
+
+        mutable std::mutex mtx;
+        uint64_t next_id{1};
+        std::unordered_map<uint64_t, Entry> all_sockets;
+        std::unordered_set<uint64_t> idle_sockets;
+
+        uint64_t register_socket(std::function<void()> cancel_fn, std::function<void()> close_fn) {
+            std::lock_guard lock(mtx);
+            uint64_t id = next_id++;
+            all_sockets.emplace(id, Entry{std::move(cancel_fn), std::move(close_fn)});
+            return id;
+        }
+
+        void unregister_socket(uint64_t id) {
+            std::lock_guard lock(mtx);
+            all_sockets.erase(id);
+            idle_sockets.erase(id);
+        }
+
+        void mark_idle(uint64_t id) {
+            std::lock_guard lock(mtx);
+            if (all_sockets.contains(id)) {
+                idle_sockets.insert(id);
+            }
+        }
+
+        void mark_active(uint64_t id) {
+            std::lock_guard lock(mtx);
+            idle_sockets.erase(id);
+        }
+
+        void cancel_all_idle() {
+            std::vector<std::function<void()>> to_cancel;
+            {
+                std::lock_guard lock(mtx);
+                to_cancel.reserve(idle_sockets.size());
+                for (uint64_t id : idle_sockets) {
+                    if (auto it = all_sockets.find(id); it != all_sockets.end()) {
+                        to_cancel.push_back(it->second.cancel);
+                    }
+                }
+                idle_sockets.clear();
+            }
+            for (auto &fn : to_cancel) {
+                if (fn) fn();
+            }
+        }
+
+        void force_close_all() {
+            std::vector<std::function<void()>> to_close;
+            {
+                std::lock_guard lock(mtx);
+                to_close.reserve(all_sockets.size());
+                for (auto &[id, entry] : all_sockets) {
+                    to_close.push_back(entry.close);
+                }
+                all_sockets.clear();
+                idle_sockets.clear();
+            }
+            for (auto &fn : to_close) {
+                if (fn) fn();
+            }
+        }
+
+        [[nodiscard]] std::size_t count() const {
+            std::lock_guard lock(mtx);
+            return all_sockets.size();
+        }
+    };
     /**
      * @class Server
      * @brief Completely protocol-agnostic coroutine TCP/TLS server.
@@ -131,24 +225,162 @@ namespace wavex::server {
 
         /// Start master acceptor loop and run event loop
         void run() {
-            if (is_running_) [[unlikely]] {
+            ServerState expected = ServerState::Stopped;
+            if (!state_.compare_exchange_strong(expected, ServerState::Running, std::memory_order_acq_rel)) [[unlikely]] {
                 std::cerr << "Critical: Duplicate run() invocation detected!\n";
                 return;
             }
-            is_running_ = true;
+            is_stopped_.store(false, std::memory_order_release);
+            is_signal_shutdown_.store(false, std::memory_order_release);
+
+            if (master_io_.stopped()) {
+                master_io_.restart();
+            }
+
+            if (pool_.worker_count() == 0) {
+                pool_.start_pool();
+            }
+
+            if (!acceptor_.is_open()) {
+                asio::error_code ec;
+                auto ep = asio::ip::tcp::endpoint(asio::ip::make_address(address_), port_);
+                acceptor_.open(ep.protocol(), ec);
+                acceptor_.set_option(asio::ip::tcp::acceptor::reuse_address(true), ec);
+                acceptor_.bind(ep, ec);
+                acceptor_.listen(asio::socket_base::max_listen_connections, ec);
+            }
+
             // Pre-compile all middleware chains for zero-allocation resolve() hot path
             router_.freeze();
+
+            if (enable_signals_) {
+                signals_.emplace(master_io_, SIGINT, SIGTERM);
+#if defined(SIGQUIT)
+                signals_->add(SIGQUIT);
+#endif
+                signals_->async_wait([this](const asio::error_code &ec, int sig) {
+                    if (!ec) {
+                        is_signal_shutdown_.store(true, std::memory_order_release);
+                        wavex::log::info("[WaveX] Signal {} received, initiating graceful shutdown...", sig);
+                        exit(shutdown_timeout_);
+                    }
+                });
+            }
+
             asio::co_spawn(master_io_, accept_loop(), asio::detached);
             master_io_.run();
+
+            state_.store(ServerState::Stopped, std::memory_order_release);
+            if (master_io_.stopped()) {
+                master_io_.restart();
+            }
         }
 
-        /// Stop the server and thread pool
+        /**
+         * @brief Initiates graceful drain and shutdown of the server.
+         *
+         * Can be called from ANY thread, including route handlers on worker threads.
+         * Stops accepting new connections, cancels idle keep-alive sockets, allows in-flight
+         * requests to finish their responses with Connection: close, and unblocks server.run()
+         * without terminating the process (never calls std::exit).
+         *
+         * @param timeout Maximum grace period before force-closing remaining active sockets.
+         */
+        void exit(std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+            ServerState expected = ServerState::Running;
+            if (!state_.compare_exchange_strong(expected, ServerState::ShuttingDown, std::memory_order_acq_rel)) {
+                return; // Not running or already shutting down
+            }
+            asio::post(master_io_, [this, timeout] {
+                start_graceful_shutdown(timeout);
+            });
+        }
+
+        /**
+         * @brief Synonym for exit(). Initiates graceful drain and shutdown.
+         */
+        void shutdown(std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+            exit(timeout);
+        }
+
+        /**
+         * @brief Attaches an external generic ShutdownEvent to trigger server exit.
+         * @param event The generic base::ShutdownEvent instance.
+         */
+        void attach_shutdown_event(base::ShutdownEvent &event) {
+            event.subscribe([this](std::chrono::milliseconds timeout) {
+                exit(timeout);
+            }).detach();
+        }
+
+        /**
+         * @brief Attaches an external generic EventBus to trigger server exit on ServerShutdownEvent.
+         * @param bus The generic base::EventBus instance.
+         */
+        void attach_event_bus(base::EventBus &bus) {
+            bus.subscribe<base::ServerShutdownEvent>([this](const base::ServerShutdownEvent &ev) {
+                exit(ev.timeout);
+            }).detach();
+        }
+
+        /// Immediately stop the server, force-close sockets, and stop thread pool
         void stop() {
-            if (!is_running_) [[unlikely]] return;
-            is_running_ = false;
+            if (is_stopped_.exchange(true, std::memory_order_acq_rel)) return;
+            state_.store(ServerState::Stopped, std::memory_order_release);
             asio::error_code ec;
             acceptor_.close(ec);
+            conn_tracker_.force_close_all();
+            if (shutdown_timer_) {
+                shutdown_timer_->cancel(ec);
+            }
+            pool_.stop_pool();
+            if (signals_) {
+                signals_->cancel(ec);
+                signals_.reset();
+            }
+            std::signal(SIGINT, SIG_DFL);
+            std::signal(SIGTERM, SIG_DFL);
             master_io_.stop();
+        }
+
+        /// Enable or disable OS signal interception (SIGINT, SIGTERM)
+        void enable_signal_handling(bool enable = true) noexcept {
+            enable_signals_ = enable;
+        }
+
+        /// Configure whether OS signals should invoke std::exit(0) upon drain completion
+        void set_exit_on_signal(bool exit_proc) noexcept {
+            exit_on_signal_ = exit_proc;
+        }
+
+        /// Configure default graceful shutdown timeout
+        void set_shutdown_timeout(std::chrono::milliseconds timeout) noexcept {
+            shutdown_timeout_ = timeout;
+        }
+
+        /// Get configured graceful shutdown timeout
+        [[nodiscard]] std::chrono::milliseconds shutdown_timeout() const noexcept {
+            return shutdown_timeout_;
+        }
+
+        /// Checks if the server is currently actively running
+        [[nodiscard]] bool is_running() const noexcept {
+            return state_.load(std::memory_order_acquire) == ServerState::Running;
+        }
+
+        /// Checks if the server is in the graceful drain / shutdown sequence
+        [[nodiscard]] bool is_shutting_down() const noexcept {
+            return state_.load(std::memory_order_acquire) == ServerState::ShuttingDown;
+        }
+
+        /// Checks if the server is fully stopped
+        [[nodiscard]] bool is_stopped() const noexcept {
+            return state_.load(std::memory_order_acquire) == ServerState::Stopped;
+        }
+
+        /// Returns the number of currently active connection coroutines
+        [[nodiscard]] std::size_t active_connections() const noexcept {
+            return active_connections_.load(std::memory_order_acquire);
         }
 
         /// Access the underlying thread pool
@@ -278,7 +510,16 @@ namespace wavex::server {
         asio::ip::tcp::acceptor acceptor_;
         ThreadPool pool_;
         unsigned short port_;
-        std::atomic<bool> is_running_{false};
+        std::atomic<ServerState> state_{ServerState::Stopped};
+        std::atomic<std::size_t> active_connections_{0};
+        std::atomic<bool> is_stopped_{false};
+        std::atomic<bool> is_signal_shutdown_{false};
+        bool enable_signals_{true};
+        bool exit_on_signal_{true};
+        std::chrono::milliseconds shutdown_timeout_{10000};
+        std::optional<asio::signal_set> signals_;
+        std::optional<asio::steady_timer> shutdown_timer_;
+        ConnectionTracker conn_tracker_;
         bool tls_enabled_{false};
         TlsConfig tls_config_;
         std::chrono::seconds keep_alive_timeout_{5};
@@ -288,6 +529,53 @@ namespace wavex::server {
         std::size_t max_query_params_{64}; ///< Max query params per request (hard cap → 431)
         std::size_t max_headers_{100}; ///< Max headers per request (hard cap → 431)
         std::optional<NotFoundHandler> server_not_found_handler_{std::nullopt};
+
+        void start_graceful_shutdown(std::chrono::milliseconds timeout) {
+            asio::error_code ec;
+            acceptor_.close(ec);
+
+            // Cancel all idle sockets waiting for keep-alive requests immediately
+            conn_tracker_.cancel_all_idle();
+
+            // If no active in-flight requests, finalize shutdown immediately
+            if (active_connections_.load(std::memory_order_acquire) == 0) {
+                finish_shutdown();
+                return;
+            }
+
+            // Arm a deadline timer for remaining in-flight requests
+            shutdown_timer_.emplace(master_io_, timeout);
+            shutdown_timer_->async_wait([this](const asio::error_code &timer_ec) {
+                if (!timer_ec) {
+                    wavex::log::warn("[WaveX] Graceful shutdown timeout reached. Force-closing remaining sockets.");
+                    conn_tracker_.force_close_all();
+                    finish_shutdown();
+                }
+            });
+        }
+
+        void finish_shutdown() {
+            if (is_stopped_.exchange(true, std::memory_order_acq_rel)) return;
+
+            asio::error_code ec;
+            if (shutdown_timer_) {
+                shutdown_timer_->cancel(ec);
+            }
+            if (signals_) {
+                signals_->cancel(ec);
+                signals_.reset();
+            }
+            std::signal(SIGINT, SIG_DFL);
+            std::signal(SIGTERM, SIG_DFL);
+
+            pool_.stop_pool();
+            master_io_.stop();
+            state_.store(ServerState::Stopped, std::memory_order_release);
+
+            if (is_signal_shutdown_.load(std::memory_order_acquire) && exit_on_signal_) {
+                std::exit(0);
+            }
+        }
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
         std::unique_ptr<asio::ssl::context> ssl_ctx_;
@@ -348,23 +636,23 @@ namespace wavex::server {
 
         /// Master acceptor loop — accepts incoming sockets and spawns connection handlers
         asio::awaitable<void> accept_loop() {
-            while (is_running_) {
+            while (state_.load(std::memory_order_acquire) == ServerState::Running) {
                 try {
                     asio::ip::tcp::socket socket = co_await acceptor_.async_accept();
                     asio::error_code nd_ec;
                     socket.set_option(asio::ip::tcp::no_delay(true), nd_ec);
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
                     if (tls_enabled_ && ssl_ctx_) {
-                        auto stream = std::make_unique<asio::ssl::stream<asio::ip::tcp::socket> >(
+                        auto stream = std::make_shared<asio::ssl::stream<asio::ip::tcp::socket> >(
                             std::move(socket), *ssl_ctx_);
                         pool_.spawn_coroutine(handle_connection(std::move(stream)));
                         continue;
                     }
 #endif
                     pool_.spawn_coroutine(
-                        handle_connection(std::make_unique<asio::ip::tcp::socket>(std::move(socket))));
+                        handle_connection(std::make_shared<asio::ip::tcp::socket>(std::move(socket))));
                 } catch (const std::exception &e) {
-                    if (is_running_) {
+                    if (state_.load(std::memory_order_acquire) == ServerState::Running) {
                         std::cerr << "[Server] Accept error: " << e.what() << "\n";
                     }
                     break;
@@ -376,8 +664,42 @@ namespace wavex::server {
          * @brief Unified connection handler — written once for every protocol and transport.
          */
         template<typename Stream>
-        asio::awaitable<void> handle_connection(std::unique_ptr<Stream> stream_ptr) {
+        asio::awaitable<void> handle_connection(std::shared_ptr<Stream> stream_ptr) {
             auto &stream = *stream_ptr;
+            auto weak_stream = std::weak_ptr<Stream>(stream_ptr);
+
+            const uint64_t conn_id = conn_tracker_.register_socket(
+                [weak_stream] {
+                    if (auto s = weak_stream.lock()) {
+                        asio::error_code ec;
+                        s->lowest_layer().cancel(ec);
+                    }
+                },
+                [weak_stream] {
+                    if (auto s = weak_stream.lock()) {
+                        asio::error_code ec;
+                        s->lowest_layer().cancel(ec);
+                        s->lowest_layer().close(ec);
+                    }
+                }
+            );
+            active_connections_.fetch_add(1, std::memory_order_acq_rel);
+
+            struct ConnectionGuard {
+                Server &srv;
+                uint64_t id;
+                ~ConnectionGuard() {
+                    srv.conn_tracker_.unregister_socket(id);
+                    if (srv.active_connections_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                        if (srv.state_.load(std::memory_order_acquire) == ServerState::ShuttingDown) {
+                            asio::post(srv.master_io_, [&srv = srv] {
+                                srv.finish_shutdown();
+                            });
+                        }
+                    }
+                }
+            } conn_guard{*this, conn_id};
+
             std::string stream_buf;
             stream_buf.reserve(8192);
             std::size_t stream_buf_consumed = 0;
@@ -404,17 +726,29 @@ namespace wavex::server {
                 }
 
                 unsigned request_count = 0;
-                while (is_running_) {
+                while (state_.load(std::memory_order_acquire) != ServerState::Stopped) {
+                    if (state_.load(std::memory_order_acquire) == ServerState::ShuttingDown && stream_buf.empty()) {
+                        break;
+                    }
+
                     std::string_view unconsumed(stream_buf.data() + stream_buf_consumed,
                                                 stream_buf.size() - stream_buf_consumed);
                     RequestType req;
                     auto p_res = req.parse_stream(unconsumed);
 
-                    while (p_res == Codec::result::incomplete && is_running_) {
+                    while (p_res == Codec::result::incomplete && state_.load(std::memory_order_acquire) != ServerState::Stopped) {
+                        if (state_.load(std::memory_order_acquire) == ServerState::ShuttingDown && stream_buf.empty()) {
+                            co_return;
+                        }
+
                         // Compact stream_buf before reading if there are consumed bytes
                         if (stream_buf_consumed > 0) {
                             stream_buf.erase(0, stream_buf_consumed);
                             stream_buf_consumed = 0;
+                        }
+
+                        if (stream_buf.empty()) {
+                            conn_tracker_.mark_idle(conn_id);
                         }
 
                         asio::steady_timer timer(executor, keep_alive_timeout_);
@@ -434,6 +768,8 @@ namespace wavex::server {
                         std::error_code timer_ec;
                         std::ignore = timer.cancel(timer_ec);
 
+                        conn_tracker_.mark_active(conn_id);
+
                         if (timed_out || read_ec == asio::error::operation_aborted) co_return;
                         if (read_ec || bytes_read == 0) co_return;
 
@@ -442,7 +778,8 @@ namespace wavex::server {
                         if (max_request_size_ > 0 && stream_buf.size() > max_request_size_) {
                             ResponseType err_res;
                             err_res.status(413).send("Payload Too Large");
-                            co_await asio::async_write(stream, asio::buffer(err_res.serialize()),
+                            std::string err_wire = err_res.serialize();
+                            co_await asio::async_write(stream, asio::buffer(err_wire),
                                                        asio::use_awaitable);
                             co_return;
                         }
@@ -455,7 +792,8 @@ namespace wavex::server {
                     if (p_res != Codec::result::success) {
                         ResponseType err_res;
                         err_res.status(400).send("Bad Request");
-                        co_await asio::async_write(stream, asio::buffer(err_res.serialize()),
+                        std::string err_wire = err_res.serialize();
+                        co_await asio::async_write(stream, asio::buffer(err_wire),
                                                    asio::use_awaitable);
                         co_return;
                     }
@@ -470,7 +808,8 @@ namespace wavex::server {
                         ResponseType err_res;
                         traits::prepare_response(req, err_res, false, 0, 0);
                         err_res.status(431).send("Request Header Fields Too Large");
-                        co_await asio::async_write(stream, asio::buffer(err_res.serialize()),
+                        std::string err_wire = err_res.serialize();
+                        co_await asio::async_write(stream, asio::buffer(err_wire),
                                                    asio::use_awaitable);
                         stream_buf_consumed += req.consumed_bytes();
                         if (stream_buf_consumed >= 4096 || stream_buf_consumed == stream_buf.size()) {
@@ -497,9 +836,13 @@ namespace wavex::server {
 
                     // Inject per-connection write sink for streaming transfers (chunked, send_file)
                     if constexpr (requires { res.set_write_sink({}); }) {
-                        res.set_write_sink([&stream](const std::string_view data,
-                                                     const std::chrono::milliseconds timeout)
+                        res.set_write_sink([weak_stream](const std::string_view data,
+                                                         const std::chrono::milliseconds timeout)
                         -> asio::awaitable<std::expected<void, std::error_code> > {
+                                auto s = weak_stream.lock();
+                                if (!s) {
+                                    co_return std::unexpected(std::make_error_code(std::errc::broken_pipe));
+                                }
                                 auto ex = co_await asio::this_coro::executor;
                                 asio::steady_timer timer(ex, timeout);
                                 bool timed_out = false;
@@ -507,17 +850,17 @@ namespace wavex::server {
                                     if (!ec) {
                                         timed_out = true;
                                         std::error_code cancel_ec;
-                                        std::ignore = stream.lowest_layer().cancel(cancel_ec);
+                                        std::ignore = s->lowest_layer().cancel(cancel_ec);
                                     }
                                 });
 
                                 auto [write_ec, bytes_written] = co_await asio::async_write(
-                                    stream, asio::buffer(data), asio::as_tuple(asio::use_awaitable));
+                                    *s, asio::buffer(data), asio::as_tuple(asio::use_awaitable));
                                 (void) timer.cancel();
 
                                 if (timed_out || write_ec == asio::error::operation_aborted) {
                                     std::error_code close_ec;
-                                    std::ignore = stream.lowest_layer().close(close_ec);
+                                    std::ignore = s->lowest_layer().close(close_ec);
                                     co_return std::unexpected(std::make_error_code(std::errc::timed_out));
                                 }
 
@@ -528,8 +871,6 @@ namespace wavex::server {
                             });
                     }
 
-                    traits::prepare_response(req, res, keep,
-                                             static_cast<unsigned>(keep_alive_timeout_.count()), remaining);
                     res.status(match ? 200 : 404);
 
                     if (!match) {
@@ -544,9 +885,18 @@ namespace wavex::server {
                         co_await run_chain(req, res, match->middlewares, match->handler);
                     }
 
+                    // Check shutdown state after handler execution
+                    // (in case the handler itself invoked server.exit() or external shutdown event)
+                    const bool is_shutting_down = state_.load(std::memory_order_acquire) == ServerState::ShuttingDown;
+                    const bool effective_keep = keep && !is_shutting_down;
+
+                    traits::prepare_response(req, res, effective_keep,
+                                             static_cast<unsigned>(keep_alive_timeout_.count()), remaining);
+
                     // Server writes serialized response if headers were not already flushed by streaming
                     if (!res.is_headers_sent()) {
-                        co_await asio::async_write(stream, asio::buffer(res.serialize()),
+                        std::string wire_resp = res.serialize();
+                        co_await asio::async_write(stream, asio::buffer(wire_resp),
                                                    asio::use_awaitable);
                     }
 
@@ -565,7 +915,7 @@ namespace wavex::server {
                         stream_buf.reserve(8192); // restore working reservation
                     }
 
-                    if (!keep) break;
+                    if (!effective_keep) break;
                 }
             } catch (const std::exception &e) {
                 wavex::log::trace("[Server] Connection closed or stream error: {}", e.what());

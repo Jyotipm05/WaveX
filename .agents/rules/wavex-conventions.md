@@ -87,3 +87,23 @@
 
 18. **Graceful TCP Teardown vs. Connection Abort**:
     - Server-side connection termination must use `asio::ip::tcp::socket::shutdown_send` (`SD_SEND` / `SHUT_WR`), not `shutdown_both`. Calling `shutdown_both` immediately followed by `close()` instructs Winsock to reject subsequent incoming packets (including client ACKs or FINs), causing Winsock to issue a TCP RST packet and abort in-flight response transmission.
+
+19. **Asio Async Operation Buffer Lifetime (Temporary vs. Coro-Frame Lvalue)**:
+    - NEVER pass temporary `std::string` expressions directly into `asio::buffer()` inside asynchronous calls (`co_await asio::async_write(stream, asio::buffer(res.serialize()), ...)`).
+    - `asio::buffer()` holds a raw memory pointer without ownership. When an asynchronous operation suspends, temporary strings in the expression may be destroyed while the OS kernel (Windows IOCP / `WSASend` or Linux epoll) is actively transmitting the buffer, leading to memory corruption or intermittent `0xC0000005` SegFaults.
+    - Always pin serialized output to a named variable on the coroutine frame:
+      ```cpp
+      std::string wire_resp = res.serialize();
+      co_await asio::async_write(stream, asio::buffer(wire_resp), asio::use_awaitable);
+      ```
+
+20. **Connection Lifetime & Thread-Safe Socket Registry (`std::weak_ptr` vs. Raw Reference)**:
+    - In socket tracking and graceful shutdown registries (`ConnectionTracker`), NEVER capture raw socket references (`[&lowest_sock]`) in cancellation or closure callbacks.
+    - If a connection coroutine completes and exits while a server stop or force-close sequence executes concurrently on another thread, invoking `lowest_sock.close()` on a deallocated socket causes a fatal use-after-free SegFault.
+    - Connection streams must be managed via `std::shared_ptr<Stream>` in `handle_connection` and captured via `std::weak_ptr<Stream>` by value in tracker callbacks. Checking `if (auto s = weak_stream.lock())` guarantees the socket remains alive for the duration of the cancellation/close call, or safely no-ops if already closed.
+
+21. **Server Graceful Drain, Deadlock Immunity & Test Signal Isolation**:
+    - **Idle Keep-Alive Cancellation**: When initiating shutdown (`server.exit()`, `ShutdownEvent`), the server must proactively cancel idle sockets waiting on empty buffers (`cancel_all_idle()`) to prevent draining hangs.
+    - **Worker Thread Deadlock Immunity**: During programmatic shutdown, the final shutdown step (`finish_shutdown()`) must be posted to `master_io_` rather than calling `pool_.stop_pool()` directly from inside a worker thread, ensuring worker threads never attempt to join themselves.
+    - **Response Stamping**: In-flight requests finishing during shutdown must have their responses stamped with `Connection: close`.
+    - **Test Signal Isolation**: Automated unit tests using loopback test servers must configure `server.enable_signal_handling(false)` to prevent background signal registration from interfering with the test runner's global signal table.

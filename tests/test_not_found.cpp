@@ -161,6 +161,7 @@ void test_server_default_404_integration() {
 
     const unsigned short port = 19180;
     wavex::server::Http1Server server(router, "127.0.0.1", port);
+    server.enable_signal_handling(false);
 
     std::thread server_thread([&server] {
         server.run();
@@ -201,6 +202,7 @@ void test_server_custom_404_integration() {
     auto router = wavex::engine::Http1Router::make_instance();
     const unsigned short port = 19181;
     wavex::server::Http1Server server(router, "127.0.0.1", port);
+    server.enable_signal_handling(false);
     server.set_not_found("Custom 404: The requested resource does not exist.", "text/plain");
 
     std::thread server_thread([&server] {
@@ -248,6 +250,7 @@ void test_server_keep_alive_on_404() {
 
     const unsigned short port = 19182;
     wavex::server::Http1Server server(router, "127.0.0.1", port);
+    server.enable_signal_handling(false);
     server.set_keep_alive_timeout(std::chrono::seconds(5));
 
     std::thread server_thread([&server] {

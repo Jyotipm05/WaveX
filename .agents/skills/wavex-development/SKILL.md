@@ -28,6 +28,9 @@ This skill provides essential domain context for developing, extending, and debu
       `std::pmr::monotonic_buffer_resource` with a **4KB inline buffer** scoped to a single request (not the connection
       lifetime). Chains to a thread-local `std::pmr::unsynchronized_pool_resource` on overflow. `arena.release()`
       reclaims all memory in O(1). Thread-local pool trims via `get_thread_local_pool().release()` on idle.
+    - `Event.hpp`: Generic C++23 pub-sub event architecture (`Event<Args...>`, `EventBus`, `Subscription`, `ShutdownEvent`).
+      Multicast signal dispatch with snapshot isolation, RAII subscriptions (`sub.unsubscribe()`, `sub.detach()`), and
+      `mutable std::mutex` in `EventBus` allowing `subscriber_count() const`.
 
 2. **Routing Engine (`include/wavex/Engine/`)**:
     - `Router.hpp`: Protocol-agnostic radix tree with RE2 regex (`{id:[0-9]+}`), dynamic `:param`, wildcard `*param`,
@@ -41,6 +44,10 @@ This skill provides essential domain context for developing, extending, and debu
       `serialize`, and Policy Seam via `protocol_traits`). Configures `TCP_NODELAY` immediately upon socket accept.
       Employs an offset cursor (`stream_buf_consumed`) to amortize `stream_buf` compaction until >= 4096 bytes.
       Supports configurable payload ceilings (`max_request_size`) and disk spooling thresholds (`max_memory_buffer`).
+      Features atomic `ServerState` (`Stopped`, `Running`, `ShuttingDown`), type-erased `ConnectionTracker` for thread-safe
+      socket lifecycle management, proactive idle cancellation (`cancel_all_idle()`), and graceful in-flight request
+      drain (`server.exit()`, `server.shutdown()`, `attach_shutdown_event()`). Supports complete server restartability
+      across `run()` / `exit()` lifecycles without process termination.
     - `TlsConfig.hpp`: TLS 1.3 configuration struct (`cert_file`, `key_file`, `key_password`, `dh_file`, `force_tls13`).
     - `ThreadPool.hpp`: Adaptive Tokio-style work-stealing thread pool with proportional hysteresis scaling. Hot paths
       (stealing and round-robin dispatch) access an atomic pointer table (`worker_table_`) without `workers_mutex_` lock
@@ -177,3 +184,21 @@ This skill provides essential domain context for developing, extending, and debu
 
 17. **Graceful Socket Shutdown via `shutdown_send`**:
     - In TCP servers, terminate connections using `stream.shutdown(shutdown_send)` before `close()`. Using `shutdown_both` aborts incoming packet reception, prompting Windows Winsock to reset the connection (TCP RST) upon receiving the client's ACK or FIN.
+
+18. **Dangling Buffers in `co_await asio::async_write`**:
+    - `asio::buffer()` takes a raw pointer/reference and does NOT own or copy data. Never pass temporary `std::string` expressions directly into `asio::buffer()` in asynchronous calls (`co_await asio::async_write(stream, asio::buffer(res.serialize()), ...)`).
+    - When `async_write` suspends the coroutine, the temporary string can be destroyed while the OS kernel (Windows IOCP / `WSASend` or Linux epoll) is actively transmitting the buffer, causing intermittent heap corruption or `0xC0000005` SegFaults.
+    - Always pin serialized output to a named variable on the coroutine frame (`std::string wire = res.serialize(); co_await asio::async_write(stream, asio::buffer(wire), ...);`).
+
+19. **Socket Use-After-Free in Multi-Threaded Connection Tracking**:
+    - In connection registries (`ConnectionTracker`), never capture raw socket references (`[&lowest_sock]`) in cancellation or closure callbacks.
+    - If a connection coroutine completes and exits while a server stop or force-close sequence executes concurrently on another thread, invoking `lowest_sock.close()` on a deallocated socket causes a fatal use-after-free SegFault.
+    - Manage connection streams via `std::shared_ptr<Stream>` in `handle_connection` and capture `std::weak_ptr<Stream>` by value in tracker callbacks. Checking `if (auto s = weak_stream.lock())` guarantees the socket remains alive for the duration of the cancellation/close call, or safely no-ops if already closed.
+
+20. **Worker Thread Self-Join Deadlock on `server.exit()`**:
+    - If a route handler invokes `server.exit()` on a worker thread and attempts to shut down the pool synchronously, the worker thread deadlocks trying to `join()` itself.
+    - Always post the final shutdown step (`finish_shutdown()`) to `master_io_` so that the main thread coordinates thread pool joining.
+
+21. **Unit Test Signal Guard Isolation**:
+    - Automated unit tests running multiple short-lived server instances concurrently or sequentially can conflict over the process's OS signal table (`SIGINT`/`SIGTERM`).
+    - Test servers should always configure `server.enable_signal_handling(false)` to ensure clean test isolation.

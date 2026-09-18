@@ -10,6 +10,9 @@
 #include <vector>
 #include <thread>
 #include <chrono>
+#include <asio/co_spawn.hpp>
+#include <asio/detached.hpp>
+#include <asio/steady_timer.hpp>
 
 namespace {
     int tests_run{0};
@@ -324,6 +327,252 @@ void test_proportional_hysteresis_scaling() {
     config.check_interval = std::chrono::milliseconds(100);
 }
 
+// ─── Test 7: Generic Event Pub-Sub & Subscription ────────────────────────────
+
+void test_generic_event_system() {
+    std::cout << "\n[Test 7] Generic Event<Args...> pub-sub & RAII Subscription\n";
+    wavex::base::Event<int, std::string> ev;
+    check(ev.subscriber_count() == 0, "Initial subscriber count is 0");
+
+    int received_int = 0;
+    std::string received_msg;
+
+    auto sub1 = ev.subscribe([&](int i, std::string s) {
+        received_int = i;
+        received_msg = std::move(s);
+    });
+
+    check(ev.subscriber_count() == 1, "Subscriber count is 1 after subscription");
+
+    ev.publish(42, "hello event");
+    check(received_int == 42, "Received int 42");
+    check(received_msg == "hello event", "Received msg 'hello event'");
+
+    int sub2_calls = 0;
+    {
+        auto sub2 = ev.subscribe([&](int, const std::string &) {
+            sub2_calls++;
+        });
+        check(ev.subscriber_count() == 2, "Subscriber count is 2 with second listener");
+        ev.publish(1, "test");
+        check(sub2_calls == 1, "Second subscriber called");
+    }
+    // sub2 went out of scope and unsubscribed automatically via RAII
+    check(ev.subscriber_count() == 1, "Subscriber count back to 1 after RAII unsubscribe");
+
+    sub1.unsubscribe();
+    check(ev.subscriber_count() == 0, "Subscriber count 0 after explicit unsubscribe");
+}
+
+// ─── Test 8: Generic EventBus ────────────────────────────────────────────────
+
+struct UserLoginEvent {
+    std::string username;
+    int user_id;
+};
+
+void test_generic_event_bus() {
+    std::cout << "\n[Test 8] Generic EventBus type-safe pub-sub\n";
+    wavex::base::EventBus bus;
+
+    std::string logged_in_user;
+    int logged_in_id = 0;
+
+    auto sub = bus.subscribe<UserLoginEvent>([&](const UserLoginEvent &e) {
+        logged_in_user = e.username;
+        logged_in_id = e.user_id;
+    });
+
+    check(bus.subscriber_count<UserLoginEvent>() == 1, "Bus subscriber count is 1");
+
+    bus.publish(UserLoginEvent{.username = "alice", .user_id = 101});
+    check(logged_in_user == "alice", "Received username alice");
+    check(logged_in_id == 101, "Received user_id 101");
+
+    sub.unsubscribe();
+    check(bus.subscriber_count<UserLoginEvent>() == 0, "Bus subscriber count is 0 after unsubscribe");
+}
+
+// ─── Test 9: Server Graceful Remote Shutdown ──────────────────────────────────
+
+void test_server_graceful_remote_shutdown() {
+    std::cout << "\n[Test 9] Server programmatic graceful exit via HTTP route handler\n";
+
+    wavex::engine::Http1Router router;
+    wavex::server::Http1Server server(router, "127.0.0.1", 18091);
+    server.enable_signal_handling(false);
+
+    router.post("/api/admin/shutdown", [&](wavex::protos::http::Http1Request &, wavex::protos::http::Http1Response &res) -> asio::awaitable<void> {
+        res.status(200).send("Shutdown initiated");
+        server.exit(std::chrono::seconds(2));
+        co_return;
+    });
+
+    std::thread srv_th([&server] {
+        server.run();
+    });
+
+    while (!server.is_running()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    check(server.is_running(), "Server is running on 18091");
+
+    asio::io_context client_ioc;
+    bool request_ok = false;
+    bool conn_close_found = false;
+
+    asio::co_spawn(client_ioc, [&]() -> asio::awaitable<void> {
+        auto res = co_await wavex::client::HttpClient::post("http://127.0.0.1:18091/api/admin/shutdown", "");
+        if (res.status_code() == 200 && res.get_body() == "Shutdown initiated") {
+            request_ok = true;
+        }
+        auto opt_conn = res.header("Connection");
+        if (opt_conn && (*opt_conn == "close" || opt_conn->find("close") != std::string_view::npos)) {
+            conn_close_found = true;
+        }
+        co_return;
+    }, asio::detached);
+
+    client_ioc.run();
+
+    check(request_ok, "Shutdown route responded 200 OK with body");
+    check(conn_close_found, "Shutdown response included Connection: close");
+
+    if (srv_th.joinable()) {
+        srv_th.join();
+    }
+
+    check(server.is_stopped(), "Server run() loop terminated cleanly and state is Stopped");
+}
+
+// ─── Test 10: External ShutdownEvent ──────────────────────────────────────────
+
+void test_server_external_shutdown_event() {
+    std::cout << "\n[Test 10] Server graceful shutdown triggered via external ShutdownEvent\n";
+
+    wavex::engine::Http1Router router;
+    wavex::server::Http1Server server(router, "127.0.0.1", 18092);
+    server.enable_signal_handling(false);
+
+    wavex::base::ShutdownEvent shutdown_ev;
+    server.attach_shutdown_event(shutdown_ev);
+
+    std::thread srv_th([&server] {
+        server.run();
+    });
+
+    while (!server.is_running()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    check(server.is_running(), "Server running on 18092");
+
+    shutdown_ev.publish(std::chrono::seconds(2));
+
+    if (srv_th.joinable()) {
+        srv_th.join();
+    }
+
+    check(server.is_stopped(), "Server stopped cleanly after external ShutdownEvent");
+}
+
+// ─── Test 11: In-Flight Request Drain ─────────────────────────────────────────
+
+void test_server_inflight_drain() {
+    std::cout << "\n[Test 11] Server in-flight request drain before shutdown\n";
+
+    wavex::engine::Http1Router router;
+    wavex::server::Http1Server server(router, "127.0.0.1", 18093);
+    server.enable_signal_handling(false);
+
+    router.get("/slow", [](wavex::protos::http::Http1Request &, wavex::protos::http::Http1Response &res) -> asio::awaitable<void> {
+        auto ex = co_await asio::this_coro::executor;
+        asio::steady_timer timer(ex, std::chrono::milliseconds(100));
+        co_await timer.async_wait(asio::use_awaitable);
+        res.status(200).send("Slow response done");
+        co_return;
+    });
+
+    std::thread srv_th([&server] {
+        server.run();
+    });
+
+    while (!server.is_running()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    bool slow_finished = false;
+    std::thread client_th([&]() {
+        asio::io_context client_ioc;
+        asio::co_spawn(client_ioc, [&]() -> asio::awaitable<void> {
+            auto res = co_await wavex::client::HttpClient::get("http://127.0.0.1:18093/slow");
+            if (res.status_code() == 200 && res.get_body() == "Slow response done") {
+                slow_finished = true;
+            }
+            co_return;
+        }, asio::detached);
+        client_ioc.run();
+    });
+
+    // Give client request time to reach the server and begin executing the slow handler
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    // Trigger shutdown while the /slow request is in-flight
+    server.exit(std::chrono::seconds(3));
+
+    if (client_th.joinable()) client_th.join();
+    if (srv_th.joinable()) srv_th.join();
+
+    check(slow_finished, "In-flight request completed successfully before server stopped");
+    check(server.is_stopped(), "Server stopped after draining in-flight connection");
+}
+
+// ─── Test 12: Server Restartability ───────────────────────────────────────────
+
+void test_server_restartability() {
+    std::cout << "\n[Test 12] Server restartability across multiple run() / exit() lifecycles\n";
+
+    wavex::engine::Http1Router router;
+    router.get("/ping", [](wavex::protos::http::Http1Request &, wavex::protos::http::Http1Response &res) -> asio::awaitable<void> {
+        res.status(200).send("pong");
+        co_return;
+    });
+
+    wavex::server::Http1Server server(router, "127.0.0.1", 18094);
+    server.enable_signal_handling(false);
+
+    // Lifecycle 1
+    std::thread srv_th1([&server] { server.run(); });
+    while (!server.is_running()) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    check(server.is_running(), "Server running (cycle 1)");
+
+    server.exit(std::chrono::seconds(2));
+    if (srv_th1.joinable()) srv_th1.join();
+    check(server.is_stopped(), "Server stopped (cycle 1)");
+
+    // Lifecycle 2 — restart the same server instance
+    std::thread srv_th2([&server] { server.run(); });
+    while (!server.is_running()) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    check(server.is_running(), "Server running again (cycle 2)");
+
+    bool ping_ok = false;
+    {
+        asio::io_context client_ioc;
+        asio::co_spawn(client_ioc, [&]() -> asio::awaitable<void> {
+            auto res = co_await wavex::client::HttpClient::get("http://127.0.0.1:18094/ping");
+            if (res.status_code() == 200 && res.get_body() == "pong") {
+                ping_ok = true;
+            }
+            co_return;
+        }, asio::detached);
+        client_ioc.run();
+    }
+    check(ping_ok, "Server responded to /ping during cycle 2");
+
+    server.exit(std::chrono::seconds(2));
+    if (srv_th2.joinable()) srv_th2.join();
+    check(server.is_stopped(), "Server stopped (cycle 2)");
+}
+
 // ─── main ─────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -336,6 +585,12 @@ int main() {
     test_thread_pool_execution_and_scaling();
     test_cache_line_alignment();
     test_proportional_hysteresis_scaling();
+    test_generic_event_system();
+    test_generic_event_bus();
+    test_server_graceful_remote_shutdown();
+    test_server_external_shutdown_event();
+    test_server_inflight_drain();
+    test_server_restartability();
 
     std::cout << "\n" << tests_passed << "/" << tests_run << " tests passed.\n";
     return tests_passed == tests_run ? 0 : 1;

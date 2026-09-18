@@ -40,6 +40,7 @@ WaveX draws inspiration from **Rust's Actix Web** (hybrid radix-tree routing), *
   - **Zero Request Loss on Scale-Down**: Retiring workers safely drain their remaining local ring tasks back into `InjectorQueue` on thread exit.
 - **🛡 Pipeline Short-Circuiting** — Middleware rejection (e.g. `401 Unauthorized`) immediately sends the response while skipping downstream middlewares and route handlers.
 - **⚡ Zero-Fragmentation Memory & Contiguous Containers** — Contiguous `FlatMap<K, V, 16>` stores `req.params`, `req.query`, and `res.headers_` directly inside cache-line-aligned inline arrays with zero heap allocations on the hot request path. Memory management is complemented by a three-tier bump allocator (`RequestArena`) backed by a 4KB inline buffer and thread-local slab pools. Socket acceptance configures `TCP_NODELAY` immediately to prevent delayed-ACK penalties, and connection handling utilizes an offset cursor (`stream_buf_consumed`) to amortize buffer compaction.
+- **🛑 Production Graceful Shutdown & Generic Pub-Sub Event System** — Clean connection draining with deadline timeouts (`server.exit()`, `server.shutdown()`), automatic `SIGINT`/`SIGTERM` interception, OS signal handler restoration (`SIG_DFL`), proactive keep-alive cancellation, automatic `Connection: close` stamping, worker-thread deadlock immunity, complete server restartability (`server.run()` unblocks without `std::exit`), and a zero-overhead generic C++23 pub-sub event bus (`wavex::base::Event`, `EventBus`, `ShutdownEvent`).
 - **🧪 Interactive Postman Dev Servers** — Pre-configured CLI-driven testing servers for HTTP/1.1 ([tests/postman_demo_http1_server.cpp](tests/postman_demo_http1_server.cpp)) and HTTP/2 ([tests/postman_demo_http2_server.cpp](tests/postman_demo_http2_server.cpp)) supporting plain and TLS 1.3 modes via WaveX's built-in CLI parser.
 
 ---
@@ -786,6 +787,87 @@ router.get("/users/:id", [](auto &req, auto &res) -> asio::awaitable<void> {
     res.status(200).json(user_data);
     co_return;
 });
+```
+
+### 19. Production Graceful Shutdown & Generic Event System
+
+WaveX provides enterprise-grade graceful termination that ensures zero dropped in-flight requests during server updates, container lifecycle events (Kubernetes `SIGTERM`), or developer-triggered remote maintenance.
+
+#### 1. OS Signal Interception (`Ctrl+C` / `SIGTERM`)
+By default, `Server` intercepts `SIGINT` and `SIGTERM` via `asio::signal_set`. When a signal arrives:
+1. **Acceptor Closes**: The TCP listener immediately stops accepting new incoming connections.
+2. **Idle Keep-Alive Sockets Cancelled**: Persistent connections idling between requests are proactively aborted to avoid hanging the drain sequence.
+3. **In-Flight Requests Complete**: Active requests continue processing. Their outgoing responses are automatically stamped with `Connection: close`.
+4. **Deadline Guard**: If in-flight requests exceed the configurable grace period (default 10s via `server.set_shutdown_timeout()`), remaining sockets are force-closed.
+5. **OS Default Signals Restored**: Signal handlers are restored to `SIG_DFL` and the process exits cleanly via `std::exit(0)`.
+
+```cpp
+server.set_shutdown_timeout(std::chrono::seconds(5));
+server.enable_signal_handling(true); // Default true
+server.run();
+```
+
+#### 2. Programmatic Remote Shutdown (`server.exit()` / Route Handlers)
+Developers can trigger graceful shutdown directly inside any custom route handler or background worker without deadlocking worker threads:
+
+```cpp
+// Remote shutdown endpoint (authentication omitted for brevity)
+router.post("/api/admin/exit", [&](auto &, auto &res) -> asio::awaitable<void> {
+    res.status(200).send("Server draining. Goodbye!");
+    
+    // Initiates graceful drain with 5s timeout.
+    // Unblocks server.run() without invoking std::exit().
+    server.exit(std::chrono::seconds(5));
+    co_return;
+});
+
+server.run();
+
+// Post-run cleanup runs normally!
+wavex::log::info("Server stopped. Performing database backups...");
+```
+
+#### 3. Generic C++23 Pub-Sub Event Architecture
+WaveX includes a high-performance, thread-safe publish-subscribe event system in `wavex/Base/Event.hpp`:
+
+- **`Event<Args...>`**: Multicast typed event with snapshot-isolated dispatch (no deadlocks or iterator invalidation). Supports RAII `Subscription` handles (`sub.unsubscribe()`).
+- **`EventBus`**: Heterogeneous event broker dispatching events based on the C++ struct/class type (`bus.publish(MyEvent{})`, `bus.subscribe<MyEvent>(...)`).
+- **`ShutdownEvent` / `ServerShutdownEvent`**: Decouple shutdown triggers from the server instance.
+
+```cpp
+#include <wavex/Base/Event.hpp>
+
+// 1. Standalone multicast event
+wavex::base::Event<std::string, int> on_user_action;
+auto sub = on_user_action.subscribe([](std::string name, int score) {
+    wavex::log::info("User {} action, score: {}", name, score);
+});
+on_user_action.publish("Alice", 100);
+
+// 2. Type-safe EventBus
+wavex::base::EventBus bus;
+struct OrderPlacedEvent { std::string order_id; double amount; };
+
+auto order_sub = bus.subscribe<OrderPlacedEvent>([](const OrderPlacedEvent &e) {
+    wavex::log::info("Processing order {} for ${:.2f}", e.order_id, e.amount);
+});
+bus.publish(OrderPlacedEvent{.order_id = "ORD-42", .amount = 99.95});
+
+// 3. Attaching external shutdown events to Server
+wavex::base::ShutdownEvent shutdown_event;
+server.attach_shutdown_event(shutdown_event);
+
+// Trigger shutdown from any independent service or thread
+shutdown_event.publish(std::chrono::seconds(3));
+```
+
+#### 4. Server Restartability
+Calling `server.exit()` unblocks `server.run()` while leaving the process running. The same `Server` instance can be re-run cleanly (`server.run()`), automatically re-initializing worker thread pools and network listeners:
+
+```cpp
+server.run();  // Cycle 1: runs until exit()
+// Perform updates, reloads, or migrations...
+server.run();  // Cycle 2: re-opens acceptor and thread pool cleanly
 ```
 
 ---

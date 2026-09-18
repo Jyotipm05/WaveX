@@ -233,33 +233,6 @@ namespace wavex::server {
             return scale_down_cooldown_counter_;
         }
 
-    private:
-        static constexpr std::size_t kMaxWorkerSlots = 128;
-
-        ThreadPoolConfig &config_;
-        mutable std::mutex workers_mutex_;
-        std::vector<std::shared_ptr<WorkerNode> > workers_;
-        std::array<std::atomic<WorkerNode *>, kMaxWorkerSlots> worker_table_{};
-        std::atomic<std::size_t> worker_count_{0};
-        std::atomic<std::size_t> burst_spill_count_{0};
-        InjectorQueue injector_; ///< Global overflow & external submission queue
-        std::atomic<bool> pool_stopping_{false};
-        std::thread monitor_thread_;
-        std::condition_variable cv_monitor_;
-        mutable std::mutex monitor_mutex_;
-        bool monitor_signal_{false};
-        std::atomic<std::size_t> next_worker_idx_{0};
-        std::size_t scale_down_cooldown_counter_{0};
-
-        void check_burst_spill() noexcept {
-            if (burst_spill_count_.fetch_add(1, std::memory_order_relaxed) + 1 >= 8) {
-                burst_spill_count_.store(0, std::memory_order_relaxed);
-                notify_monitor();
-            }
-        }
-
-        // ── Lifecycle ──────────────────────────────────────────────────────
-
         // ── Lifecycle ──────────────────────────────────────────────────────
 
         void start_pool() {
@@ -295,6 +268,31 @@ namespace wavex::server {
             for (auto &w: to_join) {
                 if (w->thread.joinable())
                     w->thread.join();
+            }
+        }
+
+    private:
+        static constexpr std::size_t kMaxWorkerSlots = 128;
+
+        ThreadPoolConfig &config_;
+        mutable std::mutex workers_mutex_;
+        std::vector<std::shared_ptr<WorkerNode> > workers_;
+        std::array<std::atomic<WorkerNode *>, kMaxWorkerSlots> worker_table_{};
+        std::atomic<std::size_t> worker_count_{0};
+        std::atomic<std::size_t> burst_spill_count_{0};
+        InjectorQueue injector_; ///< Global overflow & external submission queue
+        std::atomic<bool> pool_stopping_{false};
+        std::thread monitor_thread_;
+        std::condition_variable cv_monitor_;
+        mutable std::mutex monitor_mutex_;
+        bool monitor_signal_{false};
+        std::atomic<std::size_t> next_worker_idx_{0};
+        std::size_t scale_down_cooldown_counter_{0};
+
+        void check_burst_spill() noexcept {
+            if (burst_spill_count_.fetch_add(1, std::memory_order_relaxed) + 1 >= 8) {
+                burst_spill_count_.store(0, std::memory_order_relaxed);
+                notify_monitor();
             }
         }
 
