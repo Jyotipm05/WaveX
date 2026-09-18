@@ -105,6 +105,9 @@ namespace wavex::client {
             std::string response_buffer;
             char buf[4096];
             asio::error_code read_ec;
+            protos::http::http1codec::response parsed_h1;
+            std::size_t consumed = 0;
+            bool response_complete = false;
 
             while (true) {
                 std::size_t bytes = co_await stream.async_read_some(
@@ -112,17 +115,30 @@ namespace wavex::client {
                 if (bytes > 0) {
                     response_buffer.append(buf, bytes);
                 }
+
+                if (!response_buffer.empty()) {
+                    parsed_h1 = {};
+                    consumed = 0;
+                    if (protos::http::http1codec::parser::parse_response(
+                            response_buffer, parsed_h1, consumed) ==
+                        protos::http::http1codec::parser::result::success) {
+                        response_complete = true;
+                        break;
+                    }
+                }
+
                 if (read_ec) break;
             }
 
-            protos::http::http1codec::response parsed_h1;
-            std::size_t consumed = 0;
-            if (protos::http::http1codec::parser::parse_response(response_buffer, parsed_h1, consumed) !=
-                protos::http::http1codec::parser::result::success) {
-                res.status_code(502);
-                res.status_text("Bad Gateway");
-                res.body("Invalid response format from upstream HTTP server");
-                co_return res;
+            if (!response_complete) {
+                consumed = 0;
+                if (protos::http::http1codec::parser::parse_response(response_buffer, parsed_h1, consumed) !=
+                    protos::http::http1codec::parser::result::success) {
+                    res.status_code(502);
+                    res.status_text("Bad Gateway");
+                    res.body("Invalid response format from upstream HTTP server");
+                    co_return res;
+                }
             }
 
             res.status_code(parsed_h1.status_code);
@@ -420,16 +436,22 @@ namespace wavex::client {
         const bool is_tls = (parsed_url.scheme == "https");
 
         auto executor = co_await asio::this_coro::executor;
-        asio::ip::tcp::resolver resolver(executor);
+        asio::ip::tcp::resolver::results_type endpoints;
 
-        asio::error_code resolve_ec;
-        auto endpoints = co_await resolver.async_resolve(
-            host, port_str, asio::redirect_error(asio::use_awaitable, resolve_ec));
-        if (resolve_ec) {
-            res.status_code(502);
-            res.status_text("Bad Gateway");
-            res.body("Host resolution failed: " + resolve_ec.message());
-            co_return res;
+        if (is_ip_literal) {
+            endpoints = asio::ip::tcp::resolver::results_type::create(
+                asio::ip::tcp::endpoint(ip_addr, port), host, port_str);
+        } else {
+            asio::ip::tcp::resolver resolver(executor);
+            asio::error_code resolve_ec;
+            endpoints = co_await resolver.async_resolve(
+                host, port_str, asio::redirect_error(asio::use_awaitable, resolve_ec));
+            if (resolve_ec) {
+                res.status_code(502);
+                res.status_text("Bad Gateway");
+                res.body("Host resolution failed: " + resolve_ec.message());
+                co_return res;
+            }
         }
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
@@ -489,6 +511,8 @@ namespace wavex::client {
                     res.body("TCP connect failed: " + conn_ec.message());
                     co_return res;
                 }
+                asio::error_code nd_ec;
+                ssl_socket.lowest_layer().set_option(asio::ip::tcp::no_delay(true), nd_ec);
 
                 asio::error_code hs_ec;
                 co_await ssl_socket.async_handshake(
@@ -549,6 +573,8 @@ namespace wavex::client {
                 res.body("TCP connect failed: " + conn_ec.message());
                 co_return res;
             }
+            asio::error_code nd_ec;
+            socket.set_option(asio::ip::tcp::no_delay(true), nd_ec);
 
             if (options.version == HttpVersion::Http2) {
                 res = co_await execute_http2_exchange(

@@ -580,7 +580,7 @@ namespace wavex::server {
 #endif
             {
                 asio::error_code ignore_ec;
-                std::ignore = stream.shutdown(asio::ip::tcp::socket::shutdown_both, ignore_ec);
+                std::ignore = stream.shutdown(asio::ip::tcp::socket::shutdown_send, ignore_ec);
             }
             asio::error_code ignore_ec;
             std::ignore = stream.lowest_layer().close(ignore_ec);

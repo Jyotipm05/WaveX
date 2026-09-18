@@ -167,3 +167,13 @@ This skill provides essential domain context for developing, extending, and debu
     - Router wildcard captures (`*` or `*name`) rely on pointer arithmetic spanning from the wildcard start segment to the end of the last segment.
     - This invariant requires all segments in the resolution array to be contiguous slices of the same normalized request path buffer.
     - Guard pointer differences with `assert(w_begin <= w_end)`. Never construct resolution segments from separately allocated strings.
+
+15. **HTTP/1.1 Response Read Completion**:
+    - Never implement client read loops that blindly wait for EOF (`while (true) { stream.async_read_some(...); if (read_ec) break; }`).
+    - Parse framing (`http1codec::parser::parse_response`) as bytes arrive. When `Content-Length` bytes are received, the chunked terminal `0\r\n\r\n` is reached, or a `204`/`304`/`1xx` status is parsed, break immediately. Waiting for EOF causes clients to hang indefinitely when connections stay open or FINs are delayed.
+
+16. **Direct IP Literal Resolution**:
+    - Avoid invoking Asio's resolver (`resolver.async_resolve`) when the target host is an IP literal (`127.0.0.1`, `::1`). Construct endpoint sequences directly via `asio::ip::tcp::resolver::results_type::create(endpoint, host, port_str)` to eliminate OS resolver thread dispatch and NetBIOS/LLMNR lookup latency on Windows.
+
+17. **Graceful Socket Shutdown via `shutdown_send`**:
+    - In TCP servers, terminate connections using `stream.shutdown(shutdown_send)` before `close()`. Using `shutdown_both` aborts incoming packet reception, prompting Windows Winsock to reset the connection (TCP RST) upon receiving the client's ACK or FIN.

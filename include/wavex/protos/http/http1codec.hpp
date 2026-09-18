@@ -340,6 +340,14 @@ namespace wavex::protos::http {
                 r != result::success)
                 return r;
 
+            // RFC 7230 §3.3.3: 1xx, 204, and 304 responses MUST NOT contain a message body.
+            if ((res.status_code >= 100 && res.status_code < 200) ||
+                res.status_code == 204 || res.status_code == 304) {
+                res.body = {};
+                bytes_consumed = cursor;
+                return result::success;
+            }
+
             // ── Body ─────────────────────────────────────────────────────────────
             return extract_body(buffer, cursor, res, bytes_consumed);
         }
@@ -421,12 +429,7 @@ namespace wavex::protos::http {
             }
 
             if (buffer.size() - cursor < content_length) {
-                if (is_request) {
-                    return result::incomplete;
-                }
-                msg.body = buffer.substr(cursor);
-                bytes_consumed = buffer.size();
-                return result::success;
+                return result::incomplete;
             }
 
             msg.body = buffer.substr(cursor, content_length);

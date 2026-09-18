@@ -75,3 +75,15 @@
 15. **Per-Request Allocation Boundaries**:
     - `FlatMap<K, V, 16>` handles path params, query parameters, and response headers inline with zero heap allocation for N <= 16.
     - Never instantiate `wavex::memory::RequestArena` in coroutine connection loops unless request/response structures are explicitly wired to consume its `pmr::memory_resource*`, as an unused 4KB arena bloats the coroutine frame.
+
+16. **HTTP/1.1 Message Framing & Client Response Completion**:
+    - `HttpClient` must never read until TCP EOF in an unbounded loop when exchanging HTTP/1.1 messages with known framing. It must evaluate `parser::parse_response` as chunks arrive and exit the read loop immediately once `result::success` is achieved.
+    - In `http1codec::extract_body`, when `Content-Length` (`cl`) is present, `buffer.size() - cursor < content_length` MUST evaluate to `result::incomplete` for both requests and responses. Returning `result::success` with partial body truncates responses and breaks stream framing.
+    - Status codes `1xx`, `204` (No Content), and `304` (Not Modified) have no message body (RFC 7230 §3.3.3 / RFC 9112 §6.3); `parse_response` must finalize them immediately with `bytes_consumed = cursor` and `body = ""`.
+
+17. **Domainless IP Resolution & TCP Socket Options**:
+    - When connecting to an IP literal (e.g. `127.0.0.1`, `::1`), never invoke `resolver.async_resolve()`. Directly construct endpoint sequences via `asio::ip::tcp::resolver::results_type::create(endpoint, host, port_str)`. Calling `getaddrinfo` on IP literals introduces thread scheduling latency and NetBIOS/LLMNR stalls on Windows.
+    - Both server-accepted and client-initiated TCP sockets must enable `TCP_NODELAY` (`no_delay(true)`) to prevent Nagle's algorithm and 40–200ms delayed-ACK penalties from deadlocking ping-pong localhost exchanges.
+
+18. **Graceful TCP Teardown vs. Connection Abort**:
+    - Server-side connection termination must use `asio::ip::tcp::socket::shutdown_send` (`SD_SEND` / `SHUT_WR`), not `shutdown_both`. Calling `shutdown_both` immediately followed by `close()` instructs Winsock to reject subsequent incoming packets (including client ACKs or FINs), causing Winsock to issue a TCP RST packet and abort in-flight response transmission.
