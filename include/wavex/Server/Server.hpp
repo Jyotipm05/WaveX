@@ -727,7 +727,7 @@ namespace wavex::server {
 
                 unsigned request_count = 0;
                 while (state_.load(std::memory_order_acquire) != ServerState::Stopped) {
-                    if (state_.load(std::memory_order_acquire) == ServerState::ShuttingDown && stream_buf.empty()) {
+                    if (state_.load(std::memory_order_acquire) == ServerState::ShuttingDown && stream_buf.empty()) [[unlikely]] {
                         break;
                     }
 
@@ -737,7 +737,7 @@ namespace wavex::server {
                     auto p_res = req.parse_stream(unconsumed);
 
                     while (p_res == Codec::result::incomplete && state_.load(std::memory_order_acquire) != ServerState::Stopped) {
-                        if (state_.load(std::memory_order_acquire) == ServerState::ShuttingDown && stream_buf.empty()) {
+                        if (state_.load(std::memory_order_acquire) == ServerState::ShuttingDown && stream_buf.empty()) [[unlikely]] {
                             co_return;
                         }
 
@@ -770,12 +770,12 @@ namespace wavex::server {
 
                         conn_tracker_.mark_active(conn_id);
 
-                        if (timed_out || read_ec == asio::error::operation_aborted) co_return;
-                        if (read_ec || bytes_read == 0) co_return;
+                        if (timed_out || read_ec == asio::error::operation_aborted) [[unlikely]] co_return;
+                        if (read_ec || bytes_read == 0) [[unlikely]] co_return;
 
                         stream_buf.append(buffer, bytes_read);
 
-                        if (max_request_size_ > 0 && stream_buf.size() > max_request_size_) {
+                        if (max_request_size_ > 0 && stream_buf.size() > max_request_size_) [[unlikely]] {
                             ResponseType err_res;
                             err_res.status(413).send("Payload Too Large");
                             std::string err_wire = err_res.serialize();
@@ -789,7 +789,7 @@ namespace wavex::server {
                         p_res = req.parse_stream(unconsumed);
                     }
 
-                    if (p_res != Codec::result::success) {
+                    if (p_res != Codec::result::success) [[unlikely]] {
                         ResponseType err_res;
                         err_res.status(400).send("Bad Request");
                         std::string err_wire = err_res.serialize();
@@ -804,7 +804,7 @@ namespace wavex::server {
                             request_count < max_keep_alive_requests_ ? max_keep_alive_requests_ - request_count : 0;
 
                     // Hard cap: reject requests that overflow query param or header limits
-                    if (req.has_query_param_overflow()) {
+                    if (req.has_query_param_overflow()) [[unlikely]] {
                         ResponseType err_res;
                         traits::prepare_response(req, err_res, false, 0, 0);
                         err_res.status(431).send("Request Header Fields Too Large");
@@ -828,7 +828,7 @@ namespace wavex::server {
                     }
 
                     // Copy route params from RouteMatch into the request
-                    if (match) {
+                    if (match) [[likely]] {
                         for (const auto &[k, v]: match->params) {
                             req.params.insert_or_assign(k, v);
                         }
@@ -840,7 +840,7 @@ namespace wavex::server {
                                                          const std::chrono::milliseconds timeout)
                         -> asio::awaitable<std::expected<void, std::error_code> > {
                                 auto s = weak_stream.lock();
-                                if (!s) {
+                                if (!s) [[unlikely]] {
                                     co_return std::unexpected(std::make_error_code(std::errc::broken_pipe));
                                 }
                                 auto ex = co_await asio::this_coro::executor;
@@ -858,13 +858,13 @@ namespace wavex::server {
                                     *s, asio::buffer(data), asio::as_tuple(asio::use_awaitable));
                                 (void) timer.cancel();
 
-                                if (timed_out || write_ec == asio::error::operation_aborted) {
+                                if (timed_out || write_ec == asio::error::operation_aborted) [[unlikely]] {
                                     std::error_code close_ec;
                                     std::ignore = s->lowest_layer().close(close_ec);
                                     co_return std::unexpected(std::make_error_code(std::errc::timed_out));
                                 }
 
-                                if (write_ec) {
+                                if (write_ec) [[unlikely]] {
                                     co_return std::unexpected(write_ec);
                                 }
                                 co_return std::expected<void, std::error_code>{};
@@ -873,13 +873,13 @@ namespace wavex::server {
 
                     res.status(match ? 200 : 404);
 
-                    if (!match) {
+                    if (!match) [[unlikely]] {
                         if (server_not_found_handler_) {
                             co_await (*server_not_found_handler_)(req, res);
                         } else {
                             co_await router_.not_found_handler()(req, res);
                         }
-                    } else if (match->middlewares.empty()) {
+                    } else if (match->middlewares.empty()) [[likely]] {
                         co_await match->handler(req, res);
                     } else {
                         co_await run_chain(req, res, match->middlewares, match->handler);
@@ -894,14 +894,14 @@ namespace wavex::server {
                                              static_cast<unsigned>(keep_alive_timeout_.count()), remaining);
 
                     // Server writes serialized response if headers were not already flushed by streaming
-                    if (!res.is_headers_sent()) {
+                    if (!res.is_headers_sent()) [[likely]] {
                         std::string wire_resp = res.serialize();
                         co_await asio::async_write(stream, asio::buffer(wire_resp),
                                                    asio::use_awaitable);
                     }
 
                     stream_buf_consumed += req.consumed_bytes();
-                    if (stream_buf_consumed >= 4096) {
+                    if (stream_buf_consumed >= 4096) [[unlikely]] {
                         stream_buf.erase(0, stream_buf_consumed);
                         stream_buf_consumed = 0;
                     } else if (stream_buf_consumed == stream_buf.size()) {
@@ -910,7 +910,7 @@ namespace wavex::server {
                     }
 
                     // Trim stream_buf RSS if it has grown large and is now empty
-                    if (stream_buf.capacity() > 64 * 1024 && stream_buf.empty()) {
+                    if (stream_buf.capacity() > 64 * 1024 && stream_buf.empty()) [[unlikely]] {
                         stream_buf.shrink_to_fit();
                         stream_buf.reserve(8192); // restore working reservation
                     }

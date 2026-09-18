@@ -118,21 +118,21 @@ namespace wavex::protos::http {
      * every method lookup.
      */
     inline method from_string(const std::string_view m) noexcept {
-        if (m.empty()) return method::UNKNOWN;
+        if (m.empty()) [[unlikely]] return method::UNKNOWN;
         switch (m[0]) {
-            case 'G': return (m == "GET") ? method::GET : method::UNKNOWN;
+            case 'G': [[likely]] return (m == "GET") ? method::GET : method::UNKNOWN;
+            case 'P':
+                if (m == "POST") [[likely]] return method::POST;
+                if (m == "PUT") return method::PUT;
+                if (m == "PATCH") return method::PATCH;
+                return method::UNKNOWN;
             case 'D': return (m == "DELETE") ? method::DELETE : method::UNKNOWN;
             case 'H': return (m == "HEAD") ? method::HEAD : method::UNKNOWN;
             case 'O': return (m == "OPTIONS") ? method::OPTIONS : method::UNKNOWN;
             case 'T': return (m == "TRACE") ? method::TRACE : method::UNKNOWN;
             case 'C': return (m == "CONNECT") ? method::CONNECT : method::UNKNOWN;
             case 'Q': return (m == "QUERY") ? method::QUERY : method::UNKNOWN;
-            case 'P':
-                if (m == "POST") return method::POST;
-                if (m == "PUT") return method::PUT;
-                if (m == "PATCH") return method::PATCH;
-                return method::UNKNOWN;
-            default: return method::UNKNOWN;
+            default: [[unlikely]] return method::UNKNOWN;
         }
     }
 
@@ -240,7 +240,7 @@ namespace wavex::protos::http {
                                    std::size_t &line_end,
                                    std::size_t &next_cursor) {
             const std::size_t pos = buffer.find('\n', cursor);
-            if (pos == std::string_view::npos) return false;
+            if (pos == std::string_view::npos) [[unlikely]] return false;
 
             if (pos > cursor && buffer[pos - 1] == '\r') {
                 line_end = pos - 1;
@@ -267,28 +267,28 @@ namespace wavex::protos::http {
             // ── Request line ──────────────────────────────────────────────────────
             std::size_t rl_end = 0;
             std::size_t next_cursor = 0;
-            if (!find_next_line(buffer, cursor, rl_end, next_cursor)) return result::incomplete;
+            if (!find_next_line(buffer, cursor, rl_end, next_cursor)) [[unlikely]] return result::incomplete;
 
             const std::string_view rl = buffer.substr(0, rl_end);
             cursor = next_cursor;
 
             const std::size_t sp1 = rl.find(' ');
-            if (sp1 == std::string_view::npos) return result::error;
+            if (sp1 == std::string_view::npos) [[unlikely]] return result::error;
             const std::size_t sp2 = rl.find(' ', sp1 + 1);
-            if (sp2 == std::string_view::npos) return result::error;
+            if (sp2 == std::string_view::npos) [[unlikely]] return result::error;
 
             req.method_type = from_string(rl.substr(0, sp1));
             req.target = rl.substr(sp1 + 1, sp2 - sp1 - 1);
 
             // Parse "HTTP/X.Y" — starts_with is C++20 and avoids a substr copy
             const std::string_view ver = rl.substr(sp2 + 1);
-            if (ver.size() < 8 || !ver.starts_with("HTTP/")) return result::error;
+            if (ver.size() < 8 || !ver.starts_with("HTTP/")) [[unlikely]] return result::error;
             req.version_major = ver[5] - '0';
             req.version_minor = ver[7] - '0';
 
             // ── Headers ──────────────────────────────────────────────────────────
             if (const result r = parse_headers(buffer, cursor, req.headers);
-                r != result::success)
+                r != result::success) [[unlikely]]
                 return r;
 
             // ── Body ─────────────────────────────────────────────────────────────
@@ -308,18 +308,18 @@ namespace wavex::protos::http {
             // ── Status line ───────────────────────────────────────────────────────
             std::size_t sl_end = 0;
             std::size_t next_cursor = 0;
-            if (!find_next_line(buffer, cursor, sl_end, next_cursor)) return result::incomplete;
+            if (!find_next_line(buffer, cursor, sl_end, next_cursor)) [[unlikely]] return result::incomplete;
 
             const std::string_view sl = buffer.substr(0, sl_end);
             cursor = next_cursor;
 
-            if (sl.size() < 12 || !sl.starts_with("HTTP/")) return result::error;
+            if (sl.size() < 12 || !sl.starts_with("HTTP/")) [[unlikely]] return result::error;
 
             res.version_major = sl[5] - '0';
             res.version_minor = sl[7] - '0';
 
             const std::size_t sp1 = sl.find(' ');
-            if (sp1 == std::string_view::npos) return result::error;
+            if (sp1 == std::string_view::npos) [[unlikely]] return result::error;
             const std::size_t sp2 = sl.find(' ', sp1 + 1);
 
             const std::string_view code_sv = sl.substr(
@@ -329,7 +329,7 @@ namespace wavex::protos::http {
             unsigned int code = 0;
             const auto [ptr, ec] = std::from_chars(
                 code_sv.data(), code_sv.data() + code_sv.size(), code);
-            if (ec != std::errc{}) return result::error;
+            if (ec != std::errc{}) [[unlikely]] return result::error;
             res.status_code = code;
 
             if (sp2 != std::string_view::npos)
@@ -337,7 +337,7 @@ namespace wavex::protos::http {
 
             // ── Headers ──────────────────────────────────────────────────────────
             if (const result r = parse_headers(buffer, cursor, res.headers);
-                r != result::success)
+                r != result::success) [[unlikely]]
                 return r;
 
             // RFC 7230 §3.3.3: 1xx, 204, and 304 responses MUST NOT contain a message body.
@@ -368,19 +368,19 @@ namespace wavex::protos::http {
             while (cursor < buffer.size()) {
                 std::size_t line_end = 0;
                 std::size_t next_cursor = 0;
-                if (!find_next_line(buffer, cursor, line_end, next_cursor)) {
+                if (!find_next_line(buffer, cursor, line_end, next_cursor)) [[unlikely]] {
                     return result::incomplete;
                 }
 
                 // Blank line -> end of header section
-                if (line_end == cursor) {
+                if (line_end == cursor) [[likely]] {
                     cursor = next_cursor;
                     return result::success;
                 }
 
                 const std::string_view line = buffer.substr(cursor, line_end - cursor);
                 const std::size_t colon = line.find(':');
-                if (colon == std::string_view::npos) return result::error;
+                if (colon == std::string_view::npos) [[unlikely]] return result::error;
 
                 headers.emplace_back(
                     line.substr(0, colon),
@@ -399,10 +399,12 @@ namespace wavex::protos::http {
          * calling get_header() twice (two separate O(n) scans).
          */
         static result extract_body(const std::string_view buffer,
-                                   const std::size_t cursor,
-                                   message_base &msg,
-                                   std::size_t &bytes_consumed,
-                                   const bool is_request = false) {
+                                    const std::size_t cursor,
+                                    message_base &msg,
+                                    std::size_t &bytes_consumed,
+                                    const bool is_request = false) {
+            [[assume(cursor <= buffer.size())]];
+
             // Single pass: find both interesting headers at once
             std::optional<std::string_view> te, cl;
             for (const auto &[n, v]: msg.headers) {
@@ -419,7 +421,7 @@ namespace wavex::protos::http {
             if (cl) {
                 const auto [ptr, ec] = std::from_chars(
                     cl->data(), cl->data() + cl->size(), content_length);
-                if (ec != std::errc{}) return result::error;
+                if (ec != std::errc{}) [[unlikely]] return result::error;
             } else if (is_request) {
                 // RFC 7230 §3.3.3: In a request message without Transfer-Encoding
                 // or Content-Length, message body length is zero.
@@ -428,7 +430,7 @@ namespace wavex::protos::http {
                 content_length = buffer.size() - cursor;
             }
 
-            if (buffer.size() - cursor < content_length) {
+            if (buffer.size() - cursor < content_length) [[unlikely]] {
                 return result::incomplete;
             }
 

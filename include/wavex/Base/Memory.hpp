@@ -145,7 +145,9 @@ namespace wavex::memory {
      */
     template<typename T, typename... Args>
     [[nodiscard]] T *make_in_arena(std::pmr::memory_resource *mr, Args &&... args) {
+        [[assume(mr != nullptr)]];
         void *raw = mr->allocate(sizeof(T), alignof(T));
+        [[assume(raw != nullptr)]];
         return ::new(raw) T(std::forward<Args>(args)...);
     }
 } // namespace wavex::memory

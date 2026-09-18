@@ -364,7 +364,7 @@ namespace wavex::engine {
          *         if no route matches.
          */
         [[nodiscard]] std::optional<RouteMatch> resolve(MethodType m, const std::string_view path) const {
-            if (!frozen_) {
+            if (!frozen_) [[unlikely]] {
                 freeze();
             }
 
@@ -385,9 +385,9 @@ namespace wavex::engine {
                     const std::size_t end = normalized.find('/', start);
                     const std::size_t actual_end = (end == std::string_view::npos) ? normalized.size() : end;
                     if (actual_end != start) {
-                        if (seg_count < seg_buf.size()) {
+                        if (seg_count < seg_buf.size()) [[likely]] {
                             seg_buf[seg_count++] = normalized.substr(start, actual_end - start);
-                        } else {
+                        } else [[unlikely]] {
                             // Rare overflow path (> 16 segments)
                             if (seg_overflow.empty()) {
                                 seg_overflow.assign(seg_buf.begin(), seg_buf.begin() + seg_count);
@@ -408,10 +408,10 @@ namespace wavex::engine {
             base::FlatMap<std::string_view, std::string_view> params;
             const Node *node = resolve_node(root_.get(), segments, 0, params);
 
-            if (!node) return std::nullopt;
+            if (!node) [[unlikely]] return std::nullopt;
 
             const auto it = node->handlers.find(m);
-            if (it == node->handlers.end()) return std::nullopt;
+            if (it == node->handlers.end()) [[unlikely]] return std::nullopt;
 
             const auto mw_it = node->compiled_middlewares.find(m);
             const std::span<const MiddlewareFn> mws_span =
@@ -738,6 +738,7 @@ namespace wavex::engine {
                                  const std::span<const std::string_view> &segments,
                                  const size_t depth,
                                  base::FlatMap<std::string_view, std::string_view> &params) const {
+            [[assume(depth <= segments.size())]];
             if (depth == segments.size()) {
                 if (!node->handlers.empty()) return node;
                 return nullptr;
@@ -746,8 +747,8 @@ namespace wavex::engine {
             const auto &segment = segments[depth];
 
             // 1. Static children first (highest priority) — O(1) average.
-            if (const auto found = node->static_index.find(segment); found != node->static_index.end()) {
-                if (auto result = resolve_node(found->second, segments, depth + 1, params)) return result;
+            if (const auto found = node->static_index.find(segment); found != node->static_index.end()) [[likely]] {
+                if (auto result = resolve_node(found->second, segments, depth + 1, params)) [[likely]] return result;
             }
 
             // 2. Dynamic / Regex param children
@@ -780,6 +781,7 @@ namespace wavex::engine {
                     const char *w_begin = segments[depth].data();
                     const char *w_end = segments.back().data() + segments.back().size();
                     assert(w_begin <= w_end && "Segments must be contiguous slices of the same path buffer");
+                    [[assume(w_begin <= w_end)]];
                     std::string_view wildcard_slice(w_begin, static_cast<size_t>(w_end - w_begin));
                     params.insert_or_assign(
                         std::string_view(node->wildcard_child->param_name),

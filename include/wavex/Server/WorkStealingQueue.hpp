@@ -68,7 +68,7 @@ namespace wavex::server {
         InlineTask &operator=(const InlineTask &) = delete;
 
         InlineTask(InlineTask &&other) noexcept {
-            if (other.manager_) {
+            if (other.manager_) [[likely]] {
                 other.manager_(Op::Move, other.storage_, storage_);
                 invoker_ = other.invoker_;
                 manager_ = other.manager_;
@@ -80,7 +80,7 @@ namespace wavex::server {
         InlineTask &operator=(InlineTask &&other) noexcept {
             if (this != &other) {
                 reset();
-                if (other.manager_) {
+                if (other.manager_) [[likely]] {
                     other.manager_(Op::Move, other.storage_, storage_);
                     invoker_ = other.invoker_;
                     manager_ = other.manager_;
@@ -159,13 +159,13 @@ namespace wavex::server {
         }
 
         void operator()() {
-            if (invoker_) {
+            if (invoker_) [[likely]] {
                 invoker_(storage_);
             }
         }
 
         void operator()() const {
-            if (invoker_) {
+            if (invoker_) [[likely]] {
                 invoker_(const_cast<std::byte *>(storage_));
             }
         }
@@ -210,11 +210,12 @@ namespace wavex::server {
          * Note: If full, task is NOT moved from, allowing the caller to spill it to InjectorQueue.
          */
         [[nodiscard]] bool push(Task &&task) {
+            [[assume((CAPACITY & (CAPACITY - 1)) == 0)]];
             const std::size_t b = bottom_.load(std::memory_order_relaxed);
 
             // Full check: ring has CAPACITY-1 usable slots to avoid ambiguity.
             if (const std::size_t t = top_.load(std::memory_order_acquire);
-                b - t >= CAPACITY - 1)
+                b - t >= CAPACITY - 1) [[unlikely]]
                 return false;
 
             slots_[b & MASK] = std::move(task);
@@ -233,16 +234,16 @@ namespace wavex::server {
          */
         std::optional<Task> pop() {
             std::size_t b = bottom_.load(std::memory_order_relaxed);
-            if (b == 0) return std::nullopt;
+            if (b == 0) [[unlikely]] return std::nullopt;
             b -= 1;
             bottom_.store(b, std::memory_order_relaxed);
             std::atomic_thread_fence(std::memory_order_seq_cst);
 
             if (std::size_t t = top_.load(std::memory_order_relaxed); t <= b) {
-                if (t == b) {
+                if (t == b) [[unlikely]] {
                     // Last element in queue — race with a stealing thread.
                     if (!top_.compare_exchange_strong(t, t + 1,
-                                                      std::memory_order_seq_cst, std::memory_order_relaxed)) {
+                                                      std::memory_order_seq_cst, std::memory_order_relaxed)) [[unlikely]] {
                         // Lost race to a thief.
                         bottom_.store(b + 1, std::memory_order_relaxed);
                         return std::nullopt;
@@ -267,12 +268,12 @@ namespace wavex::server {
             std::atomic_thread_fence(std::memory_order_seq_cst);
 
             if (const std::size_t b = bottom_.load(std::memory_order_acquire);
-                t >= b)
+                t >= b) [[unlikely]]
                 return std::nullopt; // Empty.
 
             // CAS first: claim slot t atomically BEFORE moving content
             if (!top_.compare_exchange_strong(t, t + 1,
-                                              std::memory_order_seq_cst, std::memory_order_relaxed)) {
+                                              std::memory_order_seq_cst, std::memory_order_relaxed)) [[unlikely]] {
                 return std::nullopt; // Lost race to another thief
             }
             Task task = std::move(slots_[t & MASK]);
@@ -289,7 +290,7 @@ namespace wavex::server {
             std::atomic_thread_fence(std::memory_order_seq_cst);
 
             const std::size_t b = bottom_.load(std::memory_order_acquire);
-            if (t >= b) return std::nullopt; // Empty.
+            if (t >= b) [[unlikely]] return std::nullopt; // Empty.
 
             const std::size_t num_tasks = b - t;
             // Steal half of the available tasks (at least 1 task)
@@ -297,7 +298,7 @@ namespace wavex::server {
 
             // Atomically reserve slots [t, t + steal_count)
             if (!top_.compare_exchange_strong(t, t + steal_count,
-                                              std::memory_order_seq_cst, std::memory_order_relaxed)) {
+                                              std::memory_order_seq_cst, std::memory_order_relaxed)) [[unlikely]] {
                 return std::nullopt; // Lost race to another thief
             }
 

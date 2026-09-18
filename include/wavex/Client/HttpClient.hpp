@@ -336,7 +336,7 @@ namespace wavex::client {
 
         [[nodiscard]] std::optional<std::string_view> header(const std::string_view name) const noexcept {
             for (const auto &[k, v]: headers_storage_) {
-                if (k.size() == name.size()) {
+                if (k.size() == name.size()) [[unlikely]] {
                     bool match = true;
                     for (size_t i = 0; i < k.size(); ++i) {
                         if (std::tolower(static_cast<unsigned char>(k[i])) !=
@@ -345,7 +345,7 @@ namespace wavex::client {
                             break;
                         }
                     }
-                    if (match) return v;
+                    if (match) [[likely]] return v;
                 }
             }
             return std::nullopt;
@@ -406,7 +406,7 @@ namespace wavex::client {
          */
         bool save_to_file(const std::filesystem::path &dest_path) const {
             std::ofstream out(dest_path, std::ios::binary);
-            if (!out) return false;
+            if (!out) [[unlikely]] return false;
             out.write(body_.data(), static_cast<std::streamsize>(body_.size()));
             return out.good();
         }

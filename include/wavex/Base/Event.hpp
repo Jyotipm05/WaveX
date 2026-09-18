@@ -75,7 +75,7 @@ namespace wavex::base {
 
         /// Manually unbind the subscription immediately
         void reset() noexcept {
-            if (active_ && unbind_) {
+            if (active_ && unbind_) [[likely]] {
                 active_ = false;
                 try {
                     unbind_();
@@ -185,7 +185,7 @@ namespace wavex::base {
             std::vector<Handler> snapshot;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (listeners_.empty()) return;
+                if (listeners_.empty()) [[unlikely]] return;
                 snapshot.reserve(listeners_.size());
                 for (const auto &entry : listeners_) {
                     snapshot.push_back(entry.handler);
@@ -193,7 +193,7 @@ namespace wavex::base {
             }
 
             for (const auto &fn : snapshot) {
-                if (fn) {
+                if (fn) [[likely]] {
                     fn(args...);
                 }
             }
@@ -312,10 +312,10 @@ namespace wavex::base {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 auto it = channels_.find(typeid(EventType));
-                if (it == channels_.end()) return;
+                if (it == channels_.end()) [[unlikely]] return;
                 holder_copy = std::static_pointer_cast<Event<const EventType &>>(it->second);
             }
-            if (holder_copy) {
+            if (holder_copy) [[likely]] {
                 holder_copy->emit(event);
             }
         }

@@ -157,7 +157,7 @@ namespace wavex {
 
         template<typename Self, typename... Args>
         decltype(auto) handle_impl(this Self &&self, Args &&... args) {
-            if (!self.enabled_) {
+            if (!self.enabled_) [[unlikely]] {
                 using Ret = std::remove_cvref_t<decltype(self.handler_.handle(std::forward<Args>(args)...))>;
                 if constexpr (std::same_as<Ret, bool>) {
                     return true;

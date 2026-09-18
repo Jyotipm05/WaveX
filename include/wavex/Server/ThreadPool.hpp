@@ -167,15 +167,18 @@ namespace wavex::server {
          */
         void dispatch(Task task) {
             const std::size_t count = worker_count_.load(std::memory_order_acquire);
-            if (count == 0) {
+            if (count == 0) [[unlikely]] {
                 // No workers yet — queue directly into injector
                 injector_.push(std::move(task));
                 check_burst_spill();
                 return;
             }
             const std::size_t idx = next_worker_idx_.fetch_add(1, std::memory_order_relaxed) % count;
-            auto *w = (idx < kMaxWorkerSlots) ? worker_table_[idx].load(std::memory_order_acquire) : nullptr;
-            if (!w || !w->queue->push(std::move(task))) {
+            WorkerNode *w = nullptr;
+            if (idx < kMaxWorkerSlots) [[likely]] {
+                w = worker_table_[idx].load(std::memory_order_acquire);
+            }
+            if (!w || !w->queue->push(std::move(task))) [[unlikely]] {
                 // LocalQueue full or slot unavailable → spill to global injector
                 injector_.push(std::move(task));
                 check_burst_spill();
@@ -188,10 +191,13 @@ namespace wavex::server {
         template<typename Coro>
         void spawn_coroutine(Coro coro) {
             const std::size_t count = worker_count_.load(std::memory_order_acquire);
-            if (count == 0) return;
+            if (count == 0) [[unlikely]] return;
             const std::size_t idx = next_worker_idx_.fetch_add(1, std::memory_order_relaxed) % count;
-            auto *w = (idx < kMaxWorkerSlots) ? worker_table_[idx].load(std::memory_order_acquire) : nullptr;
-            if (w && w->io_ctx) {
+            const WorkerNode *w = nullptr;
+            if (idx < kMaxWorkerSlots) [[likely]] {
+                w = worker_table_[idx].load(std::memory_order_acquire);
+            }
+            if (w && w->io_ctx) [[likely]] {
                 asio::co_spawn(*w->io_ctx, std::move(coro), asio::detached);
             }
         }
@@ -323,7 +329,7 @@ namespace wavex::server {
 
             while (!w->stop_requested && !w->is_retiring) {
                 // ── 1. Pop from own LocalQueue (LIFO, cache-local) ──────────
-                if (auto task = w->queue->pop()) {
+                if (auto task = w->queue->pop()) [[likely]] {
                     w->is_busy = true;
                     (*task)();
                     w->is_busy = false;

@@ -154,7 +154,7 @@ namespace wavex::base {
          */
         [[nodiscard]] const V &at(std::string_view key) const {
             const auto it = find(key);
-            if (it == end())
+            if (it == end()) [[unlikely]]
                 throw std::out_of_range("FlatMap::at: key not found");
             return it->second;
         }
@@ -173,9 +173,9 @@ namespace wavex::base {
                 return;
             }
             // Append
-            if (size_ < InlineCap) {
+            if (size_ < InlineCap) [[likely]] {
                 inline_[size_] = {std::move(key), std::move(value)};
-            } else {
+            } else [[unlikely]] {
                 overflow_.emplace_back(std::move(key), std::move(value));
             }
             ++size_;
@@ -189,9 +189,9 @@ namespace wavex::base {
                 mutable_pair_at(it.idx).second = std::move(value);
                 return;
             }
-            if (size_ < InlineCap) {
+            if (size_ < InlineCap) [[likely]] {
                 inline_[size_] = {std::move(key), std::move(value)};
-            } else {
+            } else [[unlikely]] {
                 overflow_.emplace_back(std::move(key), std::move(value));
             }
             ++size_;
@@ -247,14 +247,16 @@ namespace wavex::base {
         size_type size_{0};
 
         [[nodiscard]] const value_type &pair_at(size_type idx) const noexcept {
-            if (idx < InlineCap)
+            if (idx < InlineCap) [[likely]]
                 return inline_[idx];
+            [[assume(idx >= InlineCap)]];
             return overflow_[idx - InlineCap];
         }
 
         [[nodiscard]] value_type &mutable_pair_at(size_type idx) noexcept {
-            if (idx < InlineCap)
+            if (idx < InlineCap) [[likely]]
                 return inline_[idx];
+            [[assume(idx >= InlineCap)]];
             return overflow_[idx - InlineCap];
         }
     };
