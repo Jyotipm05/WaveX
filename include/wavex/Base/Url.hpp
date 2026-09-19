@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2026 Jyotipriya Mondal
+// Copyright (c) 2026 Jyotipriya Mondal
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -32,14 +32,24 @@ namespace wavex::url {
      *   scheme "://" [userinfo "@"] host [":" port] path ["?" query] ["#" fragment]
      */
     struct Url {
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
         std::string scheme; ///< e.g. "http", "https"
         std::string userinfo; ///< e.g. "user:pass" (the part before '@')
         std::string host; ///< hostname or IP address (IPv6 without brackets)
-        uint16_t port = 0; ///< 0 means "infer from scheme" (80 / 443)
         std::string path; ///< e.g. "/foo/bar"
         std::string query; ///< query string without leading '?'
         std::string fragment; ///< fragment without leading '#'
+        uint16_t port = 0; ///< 0 means "infer from scheme" (80 / 443)
 
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        Url() = default;
+        ~Url() = default;
+        Url(const Url &) = default;
+        Url &operator=(const Url &) = default;
+        Url(Url &&) noexcept = default;
+        Url &operator=(Url &&) noexcept = default;
+
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
         /**
          * @brief Parse a raw URL string into its components.
          * @param raw  Full URL, e.g. "https://user@example.com:8080/path?q=1#sec"

@@ -29,7 +29,13 @@ namespace wavex::utils {
      * files if a connection disconnects or an error occurs during upload.
      */
     class TempFileGuard {
+    private:
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        std::filesystem::path path_{};
+        bool committed_{false};
+
     public:
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         TempFileGuard() = default;
 
         explicit TempFileGuard(std::filesystem::path path)
@@ -58,6 +64,7 @@ namespace wavex::utils {
         TempFileGuard(const TempFileGuard &) = delete;
         TempFileGuard &operator=(const TempFileGuard &) = delete;
 
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
         [[nodiscard]] const std::filesystem::path &path() const noexcept { return path_; }
         [[nodiscard]] bool empty() const noexcept { return path_.empty(); }
         explicit operator bool() const noexcept { return !path_.empty(); }
@@ -161,9 +168,6 @@ namespace wavex::utils {
                 std::filesystem::remove(path_, ec);
             }
         }
-
-        std::filesystem::path path_;
-        bool committed_{false};
     };
 
 } // namespace wavex::utils

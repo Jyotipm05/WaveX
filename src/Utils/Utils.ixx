@@ -12,6 +12,7 @@
 module;
 
 #include <wavex/Utils/Utils.hpp>
+#include <wavex/Utils/AsyncFs.hpp>
 
 export module wavex:utils;
 
@@ -27,4 +28,13 @@ export namespace wavex::utils {
     using wavex::utils::FormField;
     using wavex::utils::MultipartLimits;
     using wavex::utils::MultipartFormData;
+}
+
+export namespace wavex::fs {
+    using fs::read_file;
+    using fs::read_bytes;
+    using fs::write_file;
+    using fs::append_file;
+    using fs::remove;
+    using fs::copy_file;
 }

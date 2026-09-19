@@ -90,13 +90,26 @@ namespace wavex::protos::http {
 
         // ─── Frame Header (9 octets, RFC 7540 §4.1) ───────────────────────────────
         struct frame_header {
-            uint32_t length = 0; // 24 bits: payload length
-            frame_type type = frame_type::DATA; // 8 bits
-            uint8_t flags = flags::NONE; // 8 bits
-            uint32_t stream_id = 0; // 31 bits: MSB reserved bit masked out
-
+            // ─── 1. Nested Types & Trait Constants (TOP) ───────────────────────
             static constexpr std::size_t HEADER_SIZE = 9;
 
+            // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+            uint32_t length{0}; // 24 bits: payload length
+            uint32_t stream_id{0}; // 31 bits: MSB reserved bit masked out
+            frame_type type{frame_type::DATA}; // 8 bits
+            uint8_t flags{flags::NONE}; // 8 bits
+
+            // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+            frame_header() = default;
+            constexpr frame_header(uint32_t l, uint32_t sid, frame_type t, uint8_t f) noexcept
+                : length(l), stream_id(sid), type(t), flags(f) {}
+            ~frame_header() = default;
+            frame_header(const frame_header &) = default;
+            frame_header &operator=(const frame_header &) = default;
+            frame_header(frame_header &&) noexcept = default;
+            frame_header &operator=(frame_header &&) noexcept = default;
+
+            // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
             [[nodiscard]] bool has_flag(const uint8_t f) const noexcept {
                 return (flags & f) == f;
             }
@@ -426,19 +439,45 @@ namespace wavex::protos::http {
             // ─── HPACK Dynamic Table ──────────────────────────────────────────────
             class dynamic_table {
             public:
+                // ─── 1. Nested Types & Definitions (TOP) ───────────────────────────
                 struct entry {
-                    std::string name;
-                    std::string value;
+                    // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+                    std::string name{};
+                    std::string value{};
 
+                    // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+                    entry() = default;
+                    entry(std::string n, std::string v) : name(std::move(n)), value(std::move(v)) {}
+                    ~entry() = default;
+                    entry(const entry &) = default;
+                    entry &operator=(const entry &) = default;
+                    entry(entry &&) noexcept = default;
+                    entry &operator=(entry &&) noexcept = default;
+
+                    // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
                     [[nodiscard]] std::size_t size() const noexcept {
                         return name.size() + value.size() + 32;
                     }
                 };
 
+            private:
+                // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+                std::vector<entry> entries_{};
+                std::size_t current_size_{0};
+                std::size_t max_capacity_{4096};
+
+            public:
+                // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
                 explicit dynamic_table(const std::size_t max_capacity = 4096)
                     : max_capacity_(max_capacity) {
                 }
+                ~dynamic_table() = default;
+                dynamic_table(const dynamic_table &) = default;
+                dynamic_table &operator=(const dynamic_table &) = default;
+                dynamic_table(dynamic_table &&) noexcept = default;
+                dynamic_table &operator=(dynamic_table &&) noexcept = default;
 
+                // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
                 void set_max_capacity(const std::size_t new_cap) {
                     max_capacity_ = new_cap;
                     evict_to_fit();
@@ -471,10 +510,6 @@ namespace wavex::protos::http {
                         entries_.pop_back();
                     }
                 }
-
-                std::vector<entry> entries_;
-                std::size_t current_size_ = 0;
-                std::size_t max_capacity_ = 4096;
             };
 
             /**
@@ -682,58 +717,70 @@ namespace wavex::protos::http {
          * @brief HTTP/2 Request Message (inherits protocol-agnostic message_base).
          */
         struct request : public message_base {
-            http::method method_type = method::UNKNOWN;
-            std::string_view target; ///< Extracted from :path
-            uint32_t stream_id = 1; ///< HTTP/2 Stream Identifier
-            std::string_view scheme = "https"; ///< :scheme
-            std::string_view authority; ///< :authority
-
+            // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+            std::string_view target{}; ///< Extracted from :path
+            std::string_view scheme{"https"}; ///< :scheme
+            std::string_view authority{}; ///< :authority
             // Internal backing storage for decoded strings
-            std::string target_storage;
-            std::string scheme_storage;
-            std::string authority_storage;
-            std::string body_storage;
-            std::vector<std::pair<std::string, std::string> > headers_storage;
+            std::string target_storage{};
+            std::string scheme_storage{};
+            std::string authority_storage{};
+            std::string body_storage{};
+            std::vector<std::pair<std::string, std::string>> headers_storage{};
+            uint32_t stream_id{1}; ///< HTTP/2 Stream Identifier
+            http::method method_type{method::UNKNOWN};
 
+            // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
             request() {
                 version_major = 2;
                 version_minor = 0;
             }
 
+            ~request() = default;
+
             request(const request &other)
                 : message_base(other),
-                  method_type(other.method_type),
-                  stream_id(other.stream_id),
+                  target(other.target),
+                  scheme(other.scheme),
+                  authority(other.authority),
                   target_storage(other.target_storage),
                   scheme_storage(other.scheme_storage),
                   authority_storage(other.authority_storage),
                   body_storage(other.body_storage),
-                  headers_storage(other.headers_storage) {
+                  headers_storage(other.headers_storage),
+                  stream_id(other.stream_id),
+                  method_type(other.method_type) {
                 rebase(other);
             }
 
             request(request &&other) noexcept
                 : message_base(std::move(other)),
-                  method_type(other.method_type),
-                  stream_id(other.stream_id),
+                  target(other.target),
+                  scheme(other.scheme),
+                  authority(other.authority),
                   target_storage(std::move(other.target_storage)),
                   scheme_storage(std::move(other.scheme_storage)),
                   authority_storage(std::move(other.authority_storage)),
                   body_storage(std::move(other.body_storage)),
-                  headers_storage(std::move(other.headers_storage)) {
+                  headers_storage(std::move(other.headers_storage)),
+                  stream_id(other.stream_id),
+                  method_type(other.method_type) {
                 rebase(other);
             }
 
             request &operator=(const request &other) {
                 if (this != &other) {
                     message_base::operator=(other);
-                    method_type = other.method_type;
-                    stream_id = other.stream_id;
+                    target = other.target;
+                    scheme = other.scheme;
+                    authority = other.authority;
                     target_storage = other.target_storage;
                     scheme_storage = other.scheme_storage;
                     authority_storage = other.authority_storage;
                     body_storage = other.body_storage;
                     headers_storage = other.headers_storage;
+                    stream_id = other.stream_id;
+                    method_type = other.method_type;
                     rebase(other);
                 }
                 return *this;
@@ -742,18 +789,22 @@ namespace wavex::protos::http {
             request &operator=(request &&other) noexcept {
                 if (this != &other) {
                     message_base::operator=(std::move(other));
-                    method_type = other.method_type;
-                    stream_id = other.stream_id;
+                    target = other.target;
+                    scheme = other.scheme;
+                    authority = other.authority;
                     target_storage = std::move(other.target_storage);
                     scheme_storage = std::move(other.scheme_storage);
                     authority_storage = std::move(other.authority_storage);
                     body_storage = std::move(other.body_storage);
                     headers_storage = std::move(other.headers_storage);
+                    stream_id = other.stream_id;
+                    method_type = other.method_type;
                     rebase(other);
                 }
                 return *this;
             }
 
+            // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
             void rebase(const request &fallback) {
                 target = !target_storage.empty() ? std::string_view(target_storage) : fallback.target;
                 scheme = !scheme_storage.empty() ? std::string_view(scheme_storage) : fallback.scheme;
@@ -774,47 +825,50 @@ namespace wavex::protos::http {
          * @brief HTTP/2 Response Message (inherits protocol-agnostic message_base).
          */
         struct response : public message_base {
-            unsigned int status_code = 200;
-            std::string_view status_text = "OK";
-            uint32_t stream_id = 1; ///< Target HTTP/2 Stream Identifier
-
+            // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+            std::string_view status_text{"OK"};
             // Internal backing storage for decoded strings
-            std::string body_storage;
-            std::vector<std::pair<std::string, std::string> > headers_storage;
+            std::string body_storage{};
+            std::vector<std::pair<std::string, std::string>> headers_storage{};
+            unsigned int status_code{200};
+            uint32_t stream_id{1}; ///< Target HTTP/2 Stream Identifier
 
+            // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
             response() {
                 version_major = 2;
                 version_minor = 0;
             }
 
+            ~response() = default;
+
             response(const response &other)
                 : message_base(other),
-                  status_code(other.status_code),
                   status_text(other.status_text),
-                  stream_id(other.stream_id),
                   body_storage(other.body_storage),
-                  headers_storage(other.headers_storage) {
+                  headers_storage(other.headers_storage),
+                  status_code(other.status_code),
+                  stream_id(other.stream_id) {
                 rebase(other);
             }
 
             response(response &&other) noexcept
                 : message_base(std::move(other)),
-                  status_code(other.status_code),
                   status_text(other.status_text),
-                  stream_id(other.stream_id),
                   body_storage(std::move(other.body_storage)),
-                  headers_storage(std::move(other.headers_storage)) {
+                  headers_storage(std::move(other.headers_storage)),
+                  status_code(other.status_code),
+                  stream_id(other.stream_id) {
                 rebase(other);
             }
 
             response &operator=(const response &other) {
                 if (this != &other) {
                     message_base::operator=(other);
-                    status_code = other.status_code;
                     status_text = other.status_text;
-                    stream_id = other.stream_id;
                     body_storage = other.body_storage;
                     headers_storage = other.headers_storage;
+                    status_code = other.status_code;
+                    stream_id = other.stream_id;
                     rebase(other);
                 }
                 return *this;
@@ -823,16 +877,17 @@ namespace wavex::protos::http {
             response &operator=(response &&other) noexcept {
                 if (this != &other) {
                     message_base::operator=(std::move(other));
-                    status_code = other.status_code;
                     status_text = other.status_text;
-                    stream_id = other.stream_id;
                     body_storage = std::move(other.body_storage);
                     headers_storage = std::move(other.headers_storage);
+                    status_code = other.status_code;
+                    stream_id = other.stream_id;
                     rebase(other);
                 }
                 return *this;
             }
 
+            // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
             void rebase(const response &fallback) {
                 body = !body_storage.empty() ? std::string_view(body_storage) : fallback.body;
 

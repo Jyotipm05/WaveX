@@ -49,14 +49,29 @@
 namespace wavex::server {
     // ─────────────────────────────────────────────────────────────────────────
     // ThreadPoolConfig
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /**
-     * @class ThreadPoolConfig
-     * @brief Singleton configuration for thread pool limits and scaling thresholds.
-     */
-    class ThreadPoolConfig {
+    // ─────────────────────
+class ThreadPoolConfig {
     public:
+        // ─── 1. Member Variables (Arranged for minimum padding) ──────────────
+        std::vector<std::size_t> upper_thresholds = {10, 25, 50, 100};
+        std::vector<std::size_t> lower_thresholds = {5, 15, 30, 60};
+        std::chrono::milliseconds check_interval{100};
+        std::size_t min_workers = default_min_workers();
+        std::size_t max_workers = default_max_workers();
+        std::size_t scale_up_divider = 2;
+        std::size_t scale_down_cooldown_cycles = 3;
+
+        // ─── 2. Constructors & Destructor ────────────────────────────────────
+        ThreadPoolConfig() {
+            if (upper_thresholds.size() < max_workers - 1)
+                upper_thresholds.resize(max_workers - 1, 50);
+            if (lower_thresholds.size() < max_workers - 1)
+                lower_thresholds.resize(max_workers - 1, 10);
+        }
+
+        ~ThreadPoolConfig() = default;
+
+        // ─── 3. Member Functions & Helpers ───────────────────────────────────
         static ThreadPoolConfig &instance() {
             static ThreadPoolConfig s_config;
             return s_config;
@@ -70,31 +85,6 @@ namespace wavex::server {
         static std::size_t default_min_workers() noexcept {
             return std::max<std::size_t>(1, default_max_workers() / 4);
         }
-
-        ThreadPoolConfig() {
-            if (upper_thresholds.size() < max_workers - 1)
-                upper_thresholds.resize(max_workers - 1, 50);
-            if (lower_thresholds.size() < max_workers - 1)
-                lower_thresholds.resize(max_workers - 1, 10);
-        }
-
-        std::size_t min_workers = default_min_workers();
-        std::size_t max_workers = default_max_workers();
-
-        /// Scale-up divider for proportional step calculation: step = max(1, (target - current) / scale_up_divider)
-        std::size_t scale_up_divider = 2;
-
-        /// Number of consecutive low-load evaluation cycles before decommissioning a worker thread
-        std::size_t scale_down_cooldown_cycles = 3;
-
-        /// Upper load thresholds to trigger scale-up at N threads (index N-1)
-        std::vector<std::size_t> upper_thresholds = {10, 25, 50, 100};
-
-        /// Lower load thresholds to trigger scale-down at N threads (index N-2)
-        std::vector<std::size_t> lower_thresholds = {5, 15, 30, 60};
-
-        /// Interval between hysteresis scaling evaluations
-        std::chrono::milliseconds check_interval{100};
 
         void set_limits(std::size_t min_w, std::size_t max_w) {
             min_workers = min_w;
@@ -116,21 +106,29 @@ namespace wavex::server {
      *        and lifecycle flags.
      */
     struct WorkerNode {
-        std::size_t id = 0;
-        std::shared_ptr<asio::io_context> io_ctx;
-        asio::executor_work_guard<asio::io_context::executor_type> work_guard;
-        std::unique_ptr<LocalQueue> queue; ///< Bounded 256-slot lock-free ring buffer
-        std::atomic<bool> is_retiring{false};
-        std::atomic<bool> is_busy{false};
-        std::atomic<bool> stop_requested{false};
-        std::thread thread;
+        // ─── 1. Member Variables (Arranged for minimum padding) ──────────────
+        std::shared_ptr<asio::io_context> io_ctx;                                 // 16 bytes
+        std::unique_ptr<LocalQueue> queue;                                       // 8 bytes
+        std::thread thread;                                                       // 8 bytes
+        asio::executor_work_guard<asio::io_context::executor_type> work_guard;    // 8 bytes
+        std::size_t id{0};                                                       // 8 bytes
+        std::atomic<bool> is_retiring{false};                                     // 1 byte
+        std::atomic<bool> is_busy{false};                                         // 1 byte
+        std::atomic<bool> stop_requested{false};                                  // 1 byte
 
+        // ─── 2. Constructors & Destructor ────────────────────────────────────
         explicit WorkerNode(const std::size_t worker_id)
-            : id(worker_id),
-              io_ctx(std::make_shared<asio::io_context>()),
+            : io_ctx(std::make_shared<asio::io_context>()),
+              queue(std::make_unique<LocalQueue>()),
+              thread(),
               work_guard(asio::make_work_guard(*io_ctx)),
-              queue(std::make_unique<LocalQueue>()) {
+              id(worker_id),
+              is_retiring(false),
+              is_busy(false),
+              stop_requested(false) {
         }
+
+        ~WorkerNode() = default;
     };
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -145,7 +143,28 @@ namespace wavex::server {
      * shared InjectorQueue for overflow and external task submission.
      */
     class ThreadPool {
+    private:
+        // ─── 1. Nested Types & Constants ─────────────────────────────────────
+        static constexpr std::size_t kMaxWorkerSlots = 128;
+
+        // ─── 2. Member Variables (Arranged for minimum padding) ──────────────
+        ThreadPoolConfig &config_;
+        mutable std::mutex workers_mutex_;
+        mutable std::mutex monitor_mutex_;
+        std::condition_variable cv_monitor_;
+        InjectorQueue injector_; ///< Global overflow & external submission queue
+        std::vector<std::shared_ptr<WorkerNode> > workers_;
+        std::array<std::atomic<WorkerNode *>, kMaxWorkerSlots> worker_table_{};
+        std::thread monitor_thread_;
+        std::atomic<std::size_t> worker_count_{0};
+        std::atomic<std::size_t> burst_spill_count_{0};
+        std::atomic<std::size_t> next_worker_idx_{0};
+        std::size_t scale_down_cooldown_counter_{0};
+        std::atomic<bool> pool_stopping_{false};
+        bool monitor_signal_{false};
+
     public:
+        // ─── 3. Constructors & Destructor ────────────────────────────────────
         explicit ThreadPool(ThreadPoolConfig &config = ThreadPoolConfig::instance())
             : config_(config) {
             start_pool();
@@ -156,8 +175,11 @@ namespace wavex::server {
         }
 
         ThreadPool(const ThreadPool &) = delete;
-
         ThreadPool &operator=(const ThreadPool &) = delete;
+        ThreadPool(ThreadPool &&) = delete;
+        ThreadPool &operator=(ThreadPool &&) = delete;
+
+        // ─── 4. Member Functions ─────────────────────────────────────────────
 
         /**
          * @brief Submit a generic task to the pool.
@@ -278,23 +300,6 @@ namespace wavex::server {
         }
 
     private:
-        static constexpr std::size_t kMaxWorkerSlots = 128;
-
-        ThreadPoolConfig &config_;
-        mutable std::mutex workers_mutex_;
-        std::vector<std::shared_ptr<WorkerNode> > workers_;
-        std::array<std::atomic<WorkerNode *>, kMaxWorkerSlots> worker_table_{};
-        std::atomic<std::size_t> worker_count_{0};
-        std::atomic<std::size_t> burst_spill_count_{0};
-        InjectorQueue injector_; ///< Global overflow & external submission queue
-        std::atomic<bool> pool_stopping_{false};
-        std::thread monitor_thread_;
-        std::condition_variable cv_monitor_;
-        mutable std::mutex monitor_mutex_;
-        bool monitor_signal_{false};
-        std::atomic<std::size_t> next_worker_idx_{0};
-        std::size_t scale_down_cooldown_counter_{0};
-
         void check_burst_spill() noexcept {
             if (burst_spill_count_.fetch_add(1, std::memory_order_relaxed) + 1 >= 8) {
                 burst_spill_count_.store(0, std::memory_order_relaxed);

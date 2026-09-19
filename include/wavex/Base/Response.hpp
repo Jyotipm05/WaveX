@@ -38,9 +38,22 @@ namespace wavex::base {
      */
     class Response {
     protected:
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        /// Response headers — contiguous FlatMap for zero-node allocation.
+        /// Concrete subclasses (HttpResponse) own the backing string storage and
+        /// store string_views into those owned strings inside this map.
+        FlatMap<std::string_view, std::string_view> headers_;
+
+        std::string body_;
+        unsigned int status_code_{200};
+        bool is_sent_{false};
+
+    protected:
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         ~Response() = default;
 
     public:
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
         /// Set the response status code
         template<typename Self>
         decltype(auto) status(this Self &&self, const unsigned int code) {
@@ -146,16 +159,5 @@ namespace wavex::base {
         [[nodiscard]] bool has_header(const std::string_view name) const {
             return headers_.find_ci(name) != headers_.end();
         }
-
-    protected:
-        unsigned int status_code_ = 200;
-
-        /// Response headers — contiguous FlatMap for zero-node allocation.
-        /// Concrete subclasses (HttpResponse) own the backing string storage and
-        /// store string_views into those owned strings inside this map.
-        FlatMap<std::string_view, std::string_view> headers_;
-
-        std::string body_;
-        bool is_sent_ = false;
     };
 } // namespace wavex::base

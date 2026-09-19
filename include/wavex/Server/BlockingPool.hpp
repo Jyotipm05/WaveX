@@ -80,13 +80,35 @@ namespace wavex::server {
      */
     template<typename T>
     class RingQueue {
+    private:
+        // ─── 1. Member Variables (Arranged for minimum padding) ──────────────
+        std::vector<T> buffer_;
+        std::size_t capacity_{0};
+        std::size_t mask_{0};
+        std::size_t head_{0};
+        std::size_t tail_{0};
+        std::size_t count_{0};
+
     public:
+        // ─── 2. Constructors & Destructor ────────────────────────────────────
         explicit RingQueue(std::size_t initial_capacity = 256)
-            : capacity_(std::max<std::size_t>(16, round_up_pow2(initial_capacity))),
-              mask_(capacity_ - 1) {
+            : buffer_(),
+              capacity_(std::max<std::size_t>(16, round_up_pow2(initial_capacity))),
+              mask_(capacity_ - 1),
+              head_(0),
+              tail_(0),
+              count_(0) {
             buffer_.resize(capacity_);
         }
 
+        ~RingQueue() = default;
+
+        RingQueue(RingQueue &&) noexcept = default;
+        RingQueue &operator=(RingQueue &&) noexcept = default;
+        RingQueue(const RingQueue &) = default;
+        RingQueue &operator=(const RingQueue &) = default;
+
+        // ─── 3. Member Functions ─────────────────────────────────────────────
         void push(T &&item) {
             if (count_ == capacity_) {
                 grow();
@@ -148,13 +170,6 @@ namespace wavex::server {
             capacity_ = new_capacity;
             mask_ = capacity_ - 1;
         }
-
-        std::vector<T> buffer_;
-        std::size_t capacity_;
-        std::size_t mask_;
-        std::size_t head_{0};
-        std::size_t tail_{0};
-        std::size_t count_{0};
     };
 
     /**
@@ -164,22 +179,24 @@ namespace wavex::server {
      */
     class BlockingThreadPool {
     public:
+        // ─── 1. Nested Types & Definitions ──────────────────────────────────
         using Task = BlockingTask;
 
-        /**
-         * @brief Global singleton instance for blocking task offloading across the process.
-         */
-        static BlockingThreadPool &instance() {
-            static BlockingThreadPool s_pool;
-            return s_pool;
-        }
+    private:
+        // ─── 2. Member Variables (Arranged for minimum padding) ──────────────
+        const std::size_t min_threads_;
+        const std::size_t max_threads_;
+        const std::chrono::milliseconds idle_timeout_;
+        std::size_t total_count_{0};
+        std::size_t idle_count_{0};
+        mutable std::mutex mutex_;
+        std::condition_variable cv_;
+        RingQueue<Task> tasks_;
+        std::vector<std::thread> threads_;
+        bool stopping_{false};
 
-        /**
-         * @brief Constructs a blocking thread pool.
-         * @param min_threads Minimum baseline threads kept alive (default 2).
-         * @param max_threads Maximum elastic thread ceiling (default 128).
-         * @param idle_timeout Max duration an elastic thread remains idle before termination.
-         */
+    public:
+        // ─── 3. Constructors & Destructor ────────────────────────────────────
         explicit BlockingThreadPool(
             std::size_t min_threads = 2,
             std::size_t max_threads = 128,
@@ -187,7 +204,13 @@ namespace wavex::server {
             : min_threads_(std::max<std::size_t>(1, min_threads)),
               max_threads_(std::max<std::size_t>(min_threads_, max_threads)),
               idle_timeout_(idle_timeout),
-              tasks_(256) {
+              total_count_(0),
+              idle_count_(0),
+              mutex_(),
+              cv_(),
+              tasks_(256),
+              threads_(),
+              stopping_(false) {
             std::lock_guard<std::mutex> lock(mutex_);
             for (std::size_t i = 0; i < min_threads_; ++i) {
                 spawn_worker_unlocked();
@@ -199,12 +222,18 @@ namespace wavex::server {
         }
 
         BlockingThreadPool(const BlockingThreadPool &) = delete;
-
         BlockingThreadPool &operator=(const BlockingThreadPool &) = delete;
-
         BlockingThreadPool(BlockingThreadPool &&) = delete;
-
         BlockingThreadPool &operator=(BlockingThreadPool &&) = delete;
+
+        // ─── 4. Member Functions ─────────────────────────────────────────────
+        /**
+         * @brief Global singleton instance for blocking task offloading across the process.
+         */
+        static BlockingThreadPool &instance() {
+            static BlockingThreadPool s_pool;
+            return s_pool;
+        }
 
         /**
          * @brief Dispatches a blocking task to the pool. Spawns an elastic worker if all
@@ -328,17 +357,5 @@ namespace wavex::server {
                 }
             }
         }
-
-        const std::size_t min_threads_;
-        const std::size_t max_threads_;
-        const std::chrono::milliseconds idle_timeout_;
-
-        mutable std::mutex mutex_;
-        std::condition_variable cv_;
-        RingQueue<Task> tasks_;
-        std::vector<std::thread> threads_;
-        std::size_t total_count_{0};
-        std::size_t idle_count_{0};
-        bool stopping_{false};
     };
 } // namespace wavex::server

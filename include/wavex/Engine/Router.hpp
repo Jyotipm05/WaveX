@@ -93,12 +93,23 @@ namespace wavex::engine {
          * the string_view values slice directly into the request path buffer.
          */
         struct RouteMatch {
+            // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
             Handler handler;
             /// Pre-compiled middleware span into the matched Node's compiled_middlewares.
             /// Valid for the Server's lifetime (route table is never modified after listen()).
             std::span<const MiddlewareFn> middlewares;
             /// Path parameters extracted by the router — views into the request path buffer.
             base::FlatMap<std::string_view, std::string_view> params;
+
+            // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+            RouteMatch() = default;
+            RouteMatch(Handler h, std::span<const MiddlewareFn> mws, base::FlatMap<std::string_view, std::string_view> p)
+                : handler(std::move(h)), middlewares(mws), params(std::move(p)) {}
+            ~RouteMatch() = default;
+            RouteMatch(const RouteMatch &) = default;
+            RouteMatch &operator=(const RouteMatch &) = default;
+            RouteMatch(RouteMatch &&) noexcept = default;
+            RouteMatch &operator=(RouteMatch &&) noexcept = default;
         };
 
         /**
@@ -106,10 +117,69 @@ namespace wavex::engine {
          * @brief A middleware bound to a path prefix.
          */
         struct ScopedMiddleware {
+            // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
             std::string prefix;
             MiddlewareFn fn;
+
+            // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+            ScopedMiddleware() = default;
+            ScopedMiddleware(std::string p, MiddlewareFn f)
+                : prefix(std::move(p)), fn(std::move(f)) {}
+            ~ScopedMiddleware() = default;
+            ScopedMiddleware(const ScopedMiddleware &) = default;
+            ScopedMiddleware &operator=(const ScopedMiddleware &) = default;
+            ScopedMiddleware(ScopedMiddleware &&) noexcept = default;
+            ScopedMiddleware &operator=(ScopedMiddleware &&) noexcept = default;
         };
 
+    protected:
+        /**
+         * @struct Node
+         * @brief A single radix-tree node: a static edge, a param/wildcard
+         *        binder, or both a route leaf (handlers) and an internal
+         *        branch simultaneously.
+         */
+        struct Node {
+            // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+            std::unordered_map<MethodType, Handler> handlers{};
+            std::unordered_map<MethodType, std::vector<MiddlewareFn>> route_middlewares{};
+            /// Pre-compiled, immutable middleware chain for this node keyed by method:
+            /// [global] -> [prefix-scoped] -> [per-route] middlewares.
+            /// Built during freeze(). resolve() returns a std::span into this vector
+            /// — zero heap allocation, zero std::function copies per request.
+            std::unordered_map<MethodType, std::vector<MiddlewareFn>> compiled_middlewares{};
+            std::unordered_map<std::string_view, Node *> static_index{};
+            std::vector<std::unique_ptr<Node>> children{}; // static children (ownership)
+            std::vector<std::unique_ptr<Node>> param_children{}; // dynamic/regex children
+            std::string prefix{}; // segment label for static nodes
+            std::string pattern{}; // original regex pattern string
+            std::string param_name{}; // extracted parameter name
+            std::shared_ptr<re2::RE2> constraint{}; // compiled RE2 regex constraint (shared via regex cache)
+            std::unique_ptr<Node> wildcard_child{}; // * or *name catch-all child
+            bool is_param{false}; // dynamic/wildcard flag (placed at end to minimize padding)
+
+            // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+            Node() = default;
+            ~Node() = default;
+            Node(const Node &) = delete;
+            Node &operator=(const Node &) = delete;
+            Node(Node &&) noexcept = default;
+            Node &operator=(Node &&) noexcept = default;
+        };
+
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        // Cache of compiled RE2 constraints keyed by pattern text.
+        std::unordered_map<std::string, std::shared_ptr<re2::RE2>> regex_cache_{};
+        NotFoundHandler not_found_handler_{[](RequestType &, ResponseType &res) -> asio::awaitable<void> {
+            res.status(404).send("Not Found");
+            co_return;
+        }};
+        std::vector<ScopedMiddleware> middlewares_{};
+        std::unique_ptr<Node> root_{};
+        mutable bool frozen_{false}; ///< set by freeze(); resolve() uses pre-compiled chains when true
+
+    public:
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         /**
          * @brief Constructs an empty router with a single root node at "/".
          */
@@ -118,13 +188,13 @@ namespace wavex::engine {
             root_->prefix = "/";
         }
 
+        ~Router() = default;
         Router(const Router &) = delete;
-
         Router &operator=(const Router &) = delete;
-
         Router(Router &&) noexcept = default;
-
         Router &operator=(Router &&) noexcept = default;
+
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
 
         /**
          * @brief Singleton instance for a given protocol type.
@@ -426,58 +496,7 @@ namespace wavex::engine {
             };
         }
 
-    protected:
-        /**
-         * @struct Node
-         * @brief A single radix-tree node: a static edge, a param/wildcard
-         *        binder, or both a route leaf (handlers) and an internal
-         *        branch simultaneously.
-         */
-        struct Node {
-            Node() = default;
 
-            std::string prefix; // segment label for static nodes
-            bool is_param = false; // dynamic/wildcard flag
-            std::string pattern; // original regex pattern string
-            std::shared_ptr<re2::RE2> constraint; // compiled RE2 regex constraint (shared via regex cache)
-            std::string param_name; // extracted parameter name
-
-            std::unordered_map<MethodType, Handler> handlers{};
-            std::unordered_map<MethodType, std::vector<MiddlewareFn> > route_middlewares{};
-
-            /// Pre-compiled, immutable middleware chain for this node keyed by method:
-            /// [global] -> [prefix-scoped] -> [per-route] middlewares.
-            /// Built during freeze(). resolve() returns a std::span into this vector
-            /// — zero heap allocation, zero std::function copies per request.
-            std::unordered_map<MethodType, std::vector<MiddlewareFn> > compiled_middlewares{};
-            std::vector<std::unique_ptr<Node> > children{}; // static children (ownership)
-            // O(1)-average dispatch index for static children. Keys are
-            // string_views into each child's own `prefix` member; this is
-            // safe because `children` stores unique_ptr<Node>, so a Node's
-            // address — and therefore its `prefix` storage — is stable for
-            // the Node's whole lifetime regardless of how `children` (or
-            // `static_index`) reallocates.
-            std::unordered_map<std::string_view, Node *> static_index{};
-            std::vector<std::unique_ptr<Node> > param_children{}; // dynamic/regex children
-            std::unique_ptr<Node> wildcard_child; // * or *name catch-all child
-        };
-
-        std::unique_ptr<Node> root_;
-        std::vector<ScopedMiddleware> middlewares_;
-        mutable bool frozen_{false}; ///< set by freeze(); resolve() uses pre-compiled chains when true
-
-        // Cache of compiled RE2 constraints keyed by pattern text. Real route
-        // tables commonly reuse the same constraint (e.g. "[0-9]+" for every
-        // ":id"-like param) under many different prefixes; without this,
-        // each occurrence would separately pay RE2's (relatively expensive)
-        // compilation cost at registration time. Not accessed on resolve()'s
-        // hot path — only during route().
-        std::unordered_map<std::string, std::shared_ptr<re2::RE2> > regex_cache_;
-
-        NotFoundHandler not_found_handler_ = [](RequestType &, ResponseType &res) -> asio::awaitable<void> {
-            res.status(404).send("Not Found");
-            co_return;
-        };
 
     private:
         // ---------------------------------------------------------------

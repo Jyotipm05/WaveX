@@ -49,11 +49,14 @@ namespace wavex::protos::http {
     template<typename Codec = wavex::protos::http::http1codec>
     class HttpResponse final : public base::Response {
     public:
+        // ─── 1. Nested Types & Definitions (TOP) ───────────────────────────
         using codec_type = Codec;
         using parser_type = Codec::parser;
         using encoder_type = Codec::encoder;
         using decoder_type = Codec::decoder;
         using response_type = Codec::response;
+        using write_sink_fn = std::function<asio::awaitable<std::expected<void, std::error_code>>(
+            std::string_view, std::chrono::milliseconds)>;
 
         using Response::status_code_;
         using Response::body_;
@@ -63,49 +66,25 @@ namespace wavex::protos::http {
         using Response::remove_header;
         using Response::send;
 
-        /// Set the response status code and automatically update status text from Codec
-        HttpResponse &status(const unsigned int code) {
-            status_code_ = code;
-            status_text_ = Codec::status_text_for(code);
-            return *this;
-        }
+    private:
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        asio::ip::tcp::socket *socket_{nullptr};
+        write_sink_fn write_sink_{nullptr};
+        std::string_view status_text_{"OK"};
+        std::string_view body_view_{};
+        std::string buffer_owner_{};
+        std::string dechunked_body_storage_{};
+        response_type parsed_{};
+        std::vector<std::pair<std::string_view, std::string_view>> headers_views_{};
+        /// Owned string storage for server-built response headers.
+        /// std::vector backed storage with safe post-insertion view synchronization.
+        /// string_views in headers_views_ and base headers_ FlatMap point into these owned strings.
+        std::vector<std::pair<std::string, std::string>> header_store_{};
+        uint32_t stream_id_{1};
+        bool is_headers_sent_{false};
 
-        /// Set the response status code with custom status text
-        HttpResponse &status(const unsigned int code, const std::string_view text) {
-            status_code_ = code;
-            status_text_ = text;
-            return *this;
-        }
-
-        // ── Stream ID for HTTP/2 & Multiplexed Protocols ────────────────────
-        [[nodiscard]] uint32_t stream_id() const noexcept {
-            return stream_id_;
-        }
-
-        HttpResponse &stream_id(const uint32_t id) noexcept {
-            stream_id_ = id;
-            if constexpr (requires { parsed_.stream_id; }) {
-                parsed_.stream_id = id;
-            }
-            return *this;
-        }
-
-        HttpResponse &set_stream_id(const uint32_t id) noexcept {
-            return stream_id(id);
-        }
-
-        using write_sink_fn = std::function<asio::awaitable<std::expected<void, std::error_code> >(
-            std::string_view, std::chrono::milliseconds)>;
-
-        /// Attach a type-erased write sink for stream output (chunked transfers & file streaming)
-        void set_write_sink(write_sink_fn sink) { write_sink_ = std::move(sink); }
-
-        /// Check if a write sink is attached
-        [[nodiscard]] bool has_write_sink() const noexcept { return static_cast<bool>(write_sink_); }
-
-        /// Check if headers or chunked stream have already been flushed to the wire
-        [[nodiscard]] bool is_headers_sent() const noexcept { return is_headers_sent_; }
-
+    public:
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         HttpResponse() = default;
 
         explicit HttpResponse(asio::ip::tcp::socket *socket) : socket_(socket) {
@@ -121,14 +100,14 @@ namespace wavex::protos::http {
             : Response(other),
               socket_(other.socket_),
               write_sink_(other.write_sink_),
-              stream_id_(other.stream_id_),
               status_text_(other.status_text_),
+              body_view_(other.body_view_),
               buffer_owner_(other.buffer_owner_),
               dechunked_body_storage_(other.dechunked_body_storage_),
-              body_view_(other.body_view_),
               parsed_(other.parsed_),
               headers_views_(other.headers_views_),
               header_store_(other.header_store_),
+              stream_id_(other.stream_id_),
               is_headers_sent_(other.is_headers_sent_) {
             const auto buf_base = other.buffer_owner_.data();
             const auto buf_len = other.buffer_owner_.size();
@@ -210,14 +189,14 @@ namespace wavex::protos::http {
                 base::Response::operator=(other);
                 socket_ = other.socket_;
                 write_sink_ = other.write_sink_;
-                stream_id_ = other.stream_id_;
                 status_text_ = other.status_text_;
+                body_view_ = other.body_view_;
                 buffer_owner_ = other.buffer_owner_;
                 dechunked_body_storage_ = other.dechunked_body_storage_;
-                body_view_ = other.body_view_;
                 parsed_ = other.parsed_;
                 headers_views_ = other.headers_views_;
                 header_store_ = other.header_store_;
+                stream_id_ = other.stream_id_;
                 is_headers_sent_ = other.is_headers_sent_;
                 body_ = other.body_;
                 status_code_ = other.status_code_;
@@ -256,14 +235,14 @@ namespace wavex::protos::http {
             : base::Response(std::move(other)),
               socket_(other.socket_),
               write_sink_(std::move(other.write_sink_)),
-              stream_id_(other.stream_id_),
               status_text_(other.status_text_),
+              body_view_(other.body_view_),
               buffer_owner_(std::move(other.buffer_owner_)),
               dechunked_body_storage_(std::move(other.dechunked_body_storage_)),
-              body_view_(other.body_view_),
               parsed_(std::move(other.parsed_)),
               headers_views_(std::move(other.headers_views_)),
               header_store_(std::move(other.header_store_)),
+              stream_id_(other.stream_id_),
               is_headers_sent_(other.is_headers_sent_) {
             if (!header_store_.empty()) {
                 headers_.clear();
@@ -280,14 +259,14 @@ namespace wavex::protos::http {
                 base::Response::operator=(std::move(other));
                 socket_ = other.socket_;
                 write_sink_ = std::move(other.write_sink_);
-                stream_id_ = other.stream_id_;
                 status_text_ = other.status_text_;
+                body_view_ = other.body_view_;
                 buffer_owner_ = std::move(other.buffer_owner_);
                 dechunked_body_storage_ = std::move(other.dechunked_body_storage_);
-                body_view_ = other.body_view_;
                 parsed_ = std::move(other.parsed_);
                 headers_views_ = std::move(other.headers_views_);
                 header_store_ = std::move(other.header_store_);
+                stream_id_ = other.stream_id_;
                 is_headers_sent_ = other.is_headers_sent_;
                 if (!header_store_.empty()) {
                     headers_.clear();
@@ -300,6 +279,47 @@ namespace wavex::protos::http {
             }
             return *this;
         }
+
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
+        /// Set the response status code and automatically update status text from Codec
+        HttpResponse &status(const unsigned int code) {
+            status_code_ = code;
+            status_text_ = Codec::status_text_for(code);
+            return *this;
+        }
+
+        /// Set the response status code with custom status text
+        HttpResponse &status(const unsigned int code, const std::string_view text) {
+            status_code_ = code;
+            status_text_ = text;
+            return *this;
+        }
+
+        // ── Stream ID for HTTP/2 & Multiplexed Protocols ────────────────────
+        [[nodiscard]] uint32_t stream_id() const noexcept {
+            return stream_id_;
+        }
+
+        HttpResponse &stream_id(const uint32_t id) noexcept {
+            stream_id_ = id;
+            if constexpr (requires { parsed_.stream_id; }) {
+                parsed_.stream_id = id;
+            }
+            return *this;
+        }
+
+        HttpResponse &set_stream_id(const uint32_t id) noexcept {
+            return stream_id(id);
+        }
+
+        /// Attach a type-erased write sink for stream output (chunked transfers & file streaming)
+        void set_write_sink(write_sink_fn sink) { write_sink_ = std::move(sink); }
+
+        /// Check if a write sink is attached
+        [[nodiscard]] bool has_write_sink() const noexcept { return static_cast<bool>(write_sink_); }
+
+        /// Check if headers or chunked stream have already been flushed to the wire
+        [[nodiscard]] bool is_headers_sent() const noexcept { return is_headers_sent_; }
 
         /// Attach or update the target socket for immediate response writing
         void set_socket(asio::ip::tcp::socket *socket) { socket_ = socket; }
@@ -703,20 +723,6 @@ namespace wavex::protos::http {
             return encoder_type::serialize(res);
         }
 
-        asio::ip::tcp::socket *socket_ = nullptr;
-        write_sink_fn write_sink_{nullptr};
-        uint32_t stream_id_{1};
-        std::string_view status_text_{"OK"};
-        std::string buffer_owner_;
-        std::string dechunked_body_storage_;
-        std::string_view body_view_;
-        response_type parsed_;
-        std::vector<std::pair<std::string_view, std::string_view> > headers_views_;
-        /// Owned string storage for server-built response headers.
-        /// std::vector backed storage with safe post-insertion view synchronization.
-        /// string_views in headers_views_ and base headers_ FlatMap point into these owned strings.
-        std::vector<std::pair<std::string, std::string> > header_store_;
-        bool is_headers_sent_{false};
     };
 
     /// Concrete default HTTP/1.x response type aliases

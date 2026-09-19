@@ -86,23 +86,29 @@ namespace wavex::memory {
      */
     class RequestArena {
     public:
+        // ─── 1. Constants & Definitions ──────────────────────────────────────
         static constexpr std::size_t kInlineBytes = 4096;
 
+    private:
+        // ─── 2. Member Variables (Arranged for cache-line alignment) ─────────
+        alignas(64) std::array<std::byte, kInlineBytes> buf_{};
+        std::pmr::monotonic_buffer_resource mr_;
+
+    public:
+        // ─── 3. Constructors & Destructor ────────────────────────────────────
         RequestArena() noexcept
-            : mr_(buf_.data(), buf_.size(), &get_thread_local_pool()) {
+            : buf_{}, mr_(buf_.data(), buf_.size(), &get_thread_local_pool()) {
         }
-
-        // Non-copyable, non-movable — lifetime is tied to the request block.
-        RequestArena(const RequestArena &) = delete;
-
-        RequestArena &operator=(const RequestArena &) = delete;
-
-        RequestArena(RequestArena &&) = delete;
-
-        RequestArena &operator=(RequestArena &&) = delete;
 
         ~RequestArena() = default;
 
+        // Non-copyable, non-movable — lifetime is tied to the request block.
+        RequestArena(const RequestArena &) = delete;
+        RequestArena &operator=(const RequestArena &) = delete;
+        RequestArena(RequestArena &&) = delete;
+        RequestArena &operator=(RequestArena &&) = delete;
+
+        // ─── 4. Member Functions ─────────────────────────────────────────────
         /**
          * @brief Returns the PMR memory resource backed by this arena.
          * Pass this pointer to any PMR-aware container or allocator.
@@ -123,12 +129,6 @@ namespace wavex::memory {
         void release() noexcept {
             mr_.release();
         }
-
-    private:
-        /// 4KB inline buffer, cache-line aligned to avoid false sharing
-        alignas(64) std::array<std::byte, kInlineBytes> buf_{};
-        /// Monotonic bump allocator backed by buf_, overflowing to thread-local pool
-        std::pmr::monotonic_buffer_resource mr_;
     };
 
     /**

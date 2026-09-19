@@ -59,9 +59,15 @@ namespace wavex::base {
         // ── Iterators ────────────────────────────────────────────────────────
 
         struct iterator {
-            const FlatMap *map;
-            size_type idx;
+            // ─── 1. Member Variables ─────────────────────────────────────────
+            const FlatMap *map{nullptr};
+            size_type idx{0};
 
+            // ─── 2. Constructors ─────────────────────────────────────────────
+            iterator() = default;
+            iterator(const FlatMap *m, size_type i) : map(m), idx(i) {}
+
+            // ─── 3. Member Functions ─────────────────────────────────────────
             iterator &operator++() noexcept {
                 ++idx;
                 return *this;
@@ -74,6 +80,24 @@ namespace wavex::base {
         };
 
         using const_iterator = iterator;
+
+    private:
+        // ─── 2. Member Variables (Arranged for minimum padding) ──────────────
+        std::array<value_type, InlineCap> inline_{};
+        std::vector<value_type> overflow_;
+        size_type size_{0};
+
+    public:
+        // ─── 3. Constructors & Destructor ────────────────────────────────────
+        FlatMap() = default;
+        ~FlatMap() = default;
+
+        FlatMap(const FlatMap &) = default;
+        FlatMap &operator=(const FlatMap &) = default;
+        FlatMap(FlatMap &&) noexcept = default;
+        FlatMap &operator=(FlatMap &&) noexcept = default;
+
+        // ─── 4. Member Functions ─────────────────────────────────────────────
 
         // ── Capacity ─────────────────────────────────────────────────────────
 
@@ -240,12 +264,6 @@ namespace wavex::base {
         }
 
     private:
-        // Inline storage — zero heap allocation for N ≤ InlineCap
-        std::array<value_type, InlineCap> inline_{};
-        // Overflow storage for N > InlineCap (rare; pathological requests only)
-        std::vector<value_type> overflow_;
-        size_type size_{0};
-
         [[nodiscard]] const value_type &pair_at(size_type idx) const noexcept {
             if (idx < InlineCap) [[likely]]
                 return inline_[idx];

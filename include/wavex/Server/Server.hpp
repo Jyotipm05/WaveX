@@ -79,16 +79,27 @@ namespace wavex::server {
      * @brief Thread-safe registry of active and idle socket connections for graceful drain.
      */
     struct ConnectionTracker {
+        // ─── 1. Nested Types & Definitions ───────────────────────────────────
         struct Entry {
             std::function<void()> cancel;
             std::function<void()> close;
+
+            Entry() = default;
+            Entry(std::function<void()> c, std::function<void()> cl)
+                : cancel(std::move(c)), close(std::move(cl)) {}
         };
 
+        // ─── 2. Member Variables (Arranged for minimum padding) ──────────────
         mutable std::mutex mtx;
-        uint64_t next_id{1};
         std::unordered_map<uint64_t, Entry> all_sockets;
         std::unordered_set<uint64_t> idle_sockets;
+        uint64_t next_id{1};
 
+        // ─── 3. Constructors & Destructor ────────────────────────────────────
+        ConnectionTracker() = default;
+        ~ConnectionTracker() = default;
+
+        // ─── 4. Member Functions ─────────────────────────────────────────────
         uint64_t register_socket(std::function<void()> cancel_fn, std::function<void()> close_fn) {
             std::lock_guard lock(mtx);
             uint64_t id = next_id++;
@@ -163,11 +174,46 @@ namespace wavex::server {
         typename RouterType = wavex::engine::HttpRouter<Codec> >
     class Server {
     public:
+        // ─── 1. Nested Types & Definitions ───────────────────────────────────
         using codec_type = Codec;
         using traits = protos::protocol_traits<Codec>;
         using RequestType = RouterType::RequestType;
         using ResponseType = RouterType::ResponseType;
+        using NotFoundHandler = std::function<asio::awaitable<void>(RequestType &, ResponseType &)>;
 
+    private:
+        // ─── 2. Member Variables (Arranged for minimum padding) ──────────────
+        RouterType &router_;
+        std::string address_;
+        asio::io_context master_io_;
+        asio::ip::tcp::acceptor acceptor_;
+        ThreadPool pool_;
+        ConnectionTracker conn_tracker_;
+        TlsConfig tls_config_;
+        std::optional<NotFoundHandler> server_not_found_handler_{std::nullopt};
+        std::optional<asio::signal_set> signals_;
+        std::optional<asio::steady_timer> shutdown_timer_;
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+        std::unique_ptr<asio::ssl::context> ssl_ctx_;
+#endif
+        std::chrono::milliseconds shutdown_timeout_{10000};
+        std::chrono::seconds keep_alive_timeout_{5};
+        std::size_t max_request_size_{100 * 1024 * 1024}; ///< Default 100MB limit
+        std::size_t max_memory_buffer_{10 * 1024 * 1024}; ///< Default 10MB memory threshold
+        std::size_t max_query_params_{64}; ///< Max query params per request (hard cap → 431)
+        std::size_t max_headers_{100}; ///< Max headers per request (hard cap → 431)
+        std::atomic<std::size_t> active_connections_{0};
+        unsigned max_keep_alive_requests_{1000};
+        unsigned short port_;
+        std::atomic<ServerState> state_{ServerState::Stopped};
+        std::atomic<bool> is_stopped_{false};
+        std::atomic<bool> is_signal_shutdown_{false};
+        bool enable_signals_{true};
+        bool exit_on_signal_{true};
+        bool tls_enabled_{false};
+
+    public:
+        // ─── 3. Constructors & Destructor ────────────────────────────────────
         /**
          * @brief Constructs a Server listening on the specified address and port.
          * @param router Reference to the protocol router.
@@ -177,7 +223,9 @@ namespace wavex::server {
         Server(RouterType &router, std::string address, const unsigned short port)
             : router_(router),
               address_(std::move(address)),
+              master_io_(),
               acceptor_(master_io_, asio::ip::tcp::endpoint(asio::ip::make_address(address_), port)),
+              pool_(),
               port_(port) {
         }
 
@@ -186,8 +234,11 @@ namespace wavex::server {
         }
 
         Server(const Server &) = delete;
-
         Server &operator=(const Server &) = delete;
+        Server(Server &&) = delete;
+        Server &operator=(Server &&) = delete;
+
+        // ─── 4. Member Functions ─────────────────────────────────────────────
 
         /**
          * @brief Enables TLS 1.3 encryption on this server instance using a TlsConfig struct.
@@ -504,32 +555,6 @@ namespace wavex::server {
         }
 
     private:
-        RouterType &router_;
-        std::string address_;
-        asio::io_context master_io_;
-        asio::ip::tcp::acceptor acceptor_;
-        ThreadPool pool_;
-        unsigned short port_;
-        std::atomic<ServerState> state_{ServerState::Stopped};
-        std::atomic<std::size_t> active_connections_{0};
-        std::atomic<bool> is_stopped_{false};
-        std::atomic<bool> is_signal_shutdown_{false};
-        bool enable_signals_{true};
-        bool exit_on_signal_{true};
-        std::chrono::milliseconds shutdown_timeout_{10000};
-        std::optional<asio::signal_set> signals_;
-        std::optional<asio::steady_timer> shutdown_timer_;
-        ConnectionTracker conn_tracker_;
-        bool tls_enabled_{false};
-        TlsConfig tls_config_;
-        std::chrono::seconds keep_alive_timeout_{5};
-        unsigned max_keep_alive_requests_{1000};
-        size_t max_request_size_{100 * 1024 * 1024}; ///< Default 100MB limit
-        size_t max_memory_buffer_{10 * 1024 * 1024}; ///< Default 10MB memory threshold
-        std::size_t max_query_params_{64}; ///< Max query params per request (hard cap → 431)
-        std::size_t max_headers_{100}; ///< Max headers per request (hard cap → 431)
-        std::optional<NotFoundHandler> server_not_found_handler_{std::nullopt};
-
         void start_graceful_shutdown(std::chrono::milliseconds timeout) {
             asio::error_code ec;
             acceptor_.close(ec);
@@ -578,8 +603,6 @@ namespace wavex::server {
         }
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
-        std::unique_ptr<asio::ssl::context> ssl_ctx_;
-
         /**
          * @brief Configures OpenSSL context for strict TLS 1.3 server operation.
          */

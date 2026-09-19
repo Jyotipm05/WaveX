@@ -60,9 +60,9 @@ namespace wavex {
 
     // Specialization to match asio::awaitable and extract the result type
     template<typename T, typename Executor>
-    struct awaitable_traits<asio::awaitable<T, Executor> > {
-        static constexpr bool is_awaitable = true;
+    struct awaitable_traits<asio::awaitable<T, Executor>> {
         using result_type = T;
+        static constexpr bool is_awaitable = true;
     };
 
     /**
@@ -71,8 +71,18 @@ namespace wavex {
      */
     template<typename... Handlers>
     class StaticChain {
+    private:
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
         std::tuple<Handlers...> handlers_;
 
+    public:
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        constexpr explicit StaticChain(Handlers... handlers)
+            : handlers_(std::move(handlers)...) {
+        }
+
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
+    private:
         template<typename T>
         static decltype(auto) unwrap(T &t) { return t; }
 
@@ -83,10 +93,6 @@ namespace wavex {
         static decltype(auto) unwrap(const std::reference_wrapper<T> &rw) { return rw.get(); }
 
     public:
-        constexpr explicit StaticChain(Handlers... handlers)
-            : handlers_(std::move(handlers)...) {
-        }
-
         [[nodiscard]] constexpr const std::tuple<Handlers...> &get_tuple() const {
             return handlers_;
         }
@@ -143,14 +149,18 @@ namespace wavex {
      */
     template<typename Handler>
     class ConditionalChainable : public Chainable {
+    private:
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
         Handler handler_;
-        bool enabled_ = true;
+        bool enabled_{true};
 
     public:
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         constexpr explicit ConditionalChainable(Handler h, bool enabled = true)
             : handler_(std::move(h)), enabled_(enabled) {
         }
 
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
         void set_enabled(bool enabled) { enabled_ = enabled; }
 
         [[nodiscard]] bool is_enabled() const { return enabled_; }

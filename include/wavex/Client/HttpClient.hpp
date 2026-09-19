@@ -63,12 +63,13 @@ namespace wavex::client {
      * @brief Configuration options for HttpClient requests.
      */
     struct ClientOptions {
-        HttpVersion version = HttpVersion::Auto; ///< Protocol version strategy
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
         std::chrono::milliseconds timeout{30000}; ///< Request timeout (default: 30s)
-        bool verify_peer = false; ///< Verify TLS server certificates (default: false for development/self-signed)
-        std::string ca_file; ///< Optional path to CA bundle
-        std::string cert_file; ///< Optional client certificate for mTLS
-        std::string key_file; ///< Optional client private key for mTLS
+        std::string ca_file{}; ///< Optional path to CA bundle
+        std::string cert_file{}; ///< Optional client certificate for mTLS
+        std::string key_file{}; ///< Optional client private key for mTLS
+        HttpVersion version{HttpVersion::Auto}; ///< Protocol version strategy
+        bool verify_peer{false}; ///< Verify TLS server certificates (default: false for development/self-signed)
     };
 
     /// Key-value query parameters alias
@@ -79,21 +80,31 @@ namespace wavex::client {
      * @brief Fluent, protocol-agnostic HTTP request builder.
      */
     class ClientRequest {
+    private:
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        std::string target_{};
+        QueryParams queries_{};
+        std::vector<std::pair<std::string, std::string>> headers_{};
+        std::string body_{};
+        utils::MultipartFormData multipart_builder_{};
+        protos::http::method method_{protos::http::method::GET};
+
     public:
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         ClientRequest() = default;
 
         ClientRequest(const method m, const std::string_view target_url)
-            : method_(m), target_(target_url) {
+            : target_(target_url), method_(m) {
         }
 
         explicit ClientRequest(const std::string_view target_url)
-            : method_(method::GET), target_(target_url) {
+            : target_(target_url), method_(method::GET) {
         }
 
         /// Construct from concrete Http1Request
         explicit ClientRequest(const Http1Request &req) {
-            method_ = req.raw().method_type;
             target_ = req.target();
+            method_ = req.raw().method_type;
             for (const auto &[k, v]: req.raw().headers) {
                 headers_.emplace_back(std::string(k), std::string(v));
             }
@@ -102,13 +113,21 @@ namespace wavex::client {
 
         /// Construct from concrete Http2Request
         explicit ClientRequest(const Http2Request &req) {
-            method_ = req.raw().method_type;
             target_ = req.target();
+            method_ = req.raw().method_type;
             for (const auto &[k, v]: req.raw().headers) {
                 headers_.emplace_back(std::string(k), std::string(v));
             }
             body_ = req.body();
         }
+
+        ~ClientRequest() = default;
+        ClientRequest(const ClientRequest &) = default;
+        ClientRequest &operator=(const ClientRequest &) = default;
+        ClientRequest(ClientRequest &&) noexcept = default;
+        ClientRequest &operator=(ClientRequest &&) noexcept = default;
+
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
 
         ClientRequest &method(const protos::http::method m) noexcept {
             method_ = m;
@@ -277,12 +296,6 @@ namespace wavex::client {
             return true;
         }
 
-        protos::http::method method_{protos::http::method::GET};
-        std::string target_;
-        QueryParams queries_;
-        std::vector<std::pair<std::string, std::string> > headers_;
-        std::string body_;
-        utils::MultipartFormData multipart_builder_;
     };
 
     /**
@@ -293,8 +306,25 @@ namespace wavex::client {
      * to Http1Response and Http2Response for 100% backward compatibility.
      */
     class ClientResponse final : public base::Response {
+    private:
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        std::string status_text_{};
+        std::string body_{};
+        std::string raw_buffer_{}; ///< Stores full HTTP/1.1 wire bytes for raw_response()
+        std::vector<std::pair<std::string, std::string>> headers_storage_{};
+        unsigned int status_code_{0};
+        HttpVersion version_{HttpVersion::Auto};
+
     public:
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         ClientResponse() = default;
+        ~ClientResponse() = default;
+        ClientResponse(const ClientResponse &) = default;
+        ClientResponse &operator=(const ClientResponse &) = default;
+        ClientResponse(ClientResponse &&) noexcept = default;
+        ClientResponse &operator=(ClientResponse &&) noexcept = default;
+
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
 
         // Internal setters used by HttpClient engine
         ClientResponse &status_code(const unsigned int code) noexcept {
@@ -432,13 +462,7 @@ namespace wavex::client {
             return res;
         }
 
-    private:
-        unsigned int status_code_{0};
-        std::string status_text_;
-        std::string body_;
-        std::string raw_buffer_;          ///< Stores full HTTP/1.1 wire bytes for raw_response()
-        std::vector<std::pair<std::string, std::string> > headers_storage_;
-        HttpVersion version_{HttpVersion::Auto};
+
     };
 
     /**

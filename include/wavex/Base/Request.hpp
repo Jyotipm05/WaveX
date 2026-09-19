@@ -42,10 +42,22 @@ namespace wavex::base {
      * `class HttpRequest final : public base::Request`.
      */
     class Request {
+    public:
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        /// Path parameters populated by the router (e.g. :id -> "123")
+        /// Keys and values are string_view slices into the request stream buffer.
+        FlatMap<std::string_view, std::string_view> params;
+
+        /// Query string parameters (e.g. ?key=val -> {"key": "val"})
+        /// Keys and values are string_view slices into arena-backed decoded strings.
+        FlatMap<std::string_view, std::string_view> query;
+
     protected:
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         ~Request() = default;
 
     public:
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
         /// The request path/target, e.g. "/user/123"
         template<typename Self>
         [[nodiscard]] decltype(auto) path(this Self &&self) {
@@ -101,13 +113,5 @@ namespace wavex::base {
         [[nodiscard]] std::string_view query_param(const std::string_view name) const noexcept {
             return query.get(name);
         }
-
-        /// Path parameters populated by the router (e.g. :id -> "123")
-        /// Keys and values are string_view slices into the request stream buffer.
-        FlatMap<std::string_view, std::string_view> params;
-
-        /// Query string parameters (e.g. ?key=val -> {"key": "val"})
-        /// Keys and values are string_view slices into arena-backed decoded strings.
-        FlatMap<std::string_view, std::string_view> query;
     };
 } // namespace wavex::base

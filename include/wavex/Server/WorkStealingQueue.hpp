@@ -51,9 +51,9 @@ namespace wavex::server {
         using InvokerFn = void (*)(void *);
         using ManagerFn = void (*)(Op, void *src, void *dst) noexcept;
 
+        alignas(std::max_align_t) std::byte storage_[Capacity];
         InvokerFn invoker_{nullptr};
         ManagerFn manager_{nullptr};
-        alignas(std::max_align_t) std::byte storage_[Capacity];
 
     public:
         constexpr InlineTask() noexcept = default;
@@ -195,14 +195,32 @@ namespace wavex::server {
      */
     class LocalQueue {
     public:
+        // ─── 1. Nested Types & Constants ─────────────────────────────────────
         static constexpr std::size_t CAPACITY = 256;
 
+    private:
+        static constexpr std::size_t MASK = CAPACITY - 1;
+        static_assert((CAPACITY & MASK) == 0, "CAPACITY must be a power of 2");
+        static constexpr std::size_t WAVEX_CACHE_LINE_SIZE = 64;
+
+        // ─── 2. Member Variables (Arranged for cache-line alignment) ─────────
+        alignas(WAVEX_CACHE_LINE_SIZE) std::atomic<std::size_t> top_{0};
+        alignas(WAVEX_CACHE_LINE_SIZE) std::atomic<std::size_t> bottom_{0};
+        alignas(WAVEX_CACHE_LINE_SIZE) std::array<Task, CAPACITY> slots_;
+
+    public:
+        // ─── 3. Constructors & Destructor ────────────────────────────────────
         LocalQueue() : top_(0), bottom_(0) {
         }
 
-        LocalQueue(const LocalQueue &) = delete;
+        ~LocalQueue() = default;
 
+        LocalQueue(const LocalQueue &) = delete;
         LocalQueue &operator=(const LocalQueue &) = delete;
+        LocalQueue(LocalQueue &&) = delete;
+        LocalQueue &operator=(LocalQueue &&) = delete;
+
+        // ─── 4. Member Functions ─────────────────────────────────────────────
 
         /**
          * @brief Owner-only: push a task onto the back of the ring.
@@ -338,16 +356,6 @@ namespace wavex::server {
             }
             return drained;
         }
-
-    private:
-        static constexpr std::size_t MASK = CAPACITY - 1;
-        static_assert((CAPACITY & MASK) == 0, "CAPACITY must be a power of 2");
-
-        static constexpr std::size_t WAVEX_CACHE_LINE_SIZE = 64;
-
-        alignas(WAVEX_CACHE_LINE_SIZE) std::atomic<std::size_t> top_{0};
-        alignas(WAVEX_CACHE_LINE_SIZE) std::atomic<std::size_t> bottom_{0};
-        alignas(WAVEX_CACHE_LINE_SIZE) std::array<Task, CAPACITY> slots_;
     };
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -367,12 +375,27 @@ namespace wavex::server {
      * and work-stealing from peers have yielded nothing.
      */
     class InjectorQueue {
+    private:
+        // ─── 1. Nested Types & Constants ─────────────────────────────────────
+        static constexpr std::size_t WAVEX_CACHE_LINE_SIZE = 64;
+
+        // ─── 2. Member Variables (Arranged for cache-line alignment) ─────────
+        alignas(WAVEX_CACHE_LINE_SIZE) mutable std::mutex mutex_;
+        alignas(WAVEX_CACHE_LINE_SIZE) std::vector<Task> queue_;
+        alignas(WAVEX_CACHE_LINE_SIZE) std::atomic<std::size_t> size_{0};
+        alignas(WAVEX_CACHE_LINE_SIZE) std::size_t head_{0};
+
     public:
+        // ─── 3. Constructors & Destructor ────────────────────────────────────
         InjectorQueue() = default;
+        ~InjectorQueue() = default;
 
         InjectorQueue(const InjectorQueue &) = delete;
-
         InjectorQueue &operator=(const InjectorQueue &) = delete;
+        InjectorQueue(InjectorQueue &&) = delete;
+        InjectorQueue &operator=(InjectorQueue &&) = delete;
+
+        // ─── 4. Member Functions ─────────────────────────────────────────────
 
         /// Push a task (any thread).
         void push(Task task) {
@@ -411,13 +434,5 @@ namespace wavex::server {
         [[nodiscard]] bool empty() const {
             return size_.load(std::memory_order_relaxed) == 0;
         }
-
-    private:
-        static constexpr std::size_t WAVEX_CACHE_LINE_SIZE = 64;
-
-        alignas(WAVEX_CACHE_LINE_SIZE) mutable std::mutex mutex_;
-        alignas(WAVEX_CACHE_LINE_SIZE) std::vector<Task> queue_;
-        alignas(WAVEX_CACHE_LINE_SIZE) std::size_t head_ = 0;
-        alignas(WAVEX_CACHE_LINE_SIZE) std::atomic<std::size_t> size_{0};
     };
 } // namespace wavex::server

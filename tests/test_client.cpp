@@ -579,7 +579,7 @@ void test_http_client_advanced_features() {
         }
 
         // H. HTTP/2 Cleartext (h2c) with prior knowledge
-        wavex::client::ClientOptions h2_opts{
+        const wavex::client::ClientOptions h2_opts{
             .version = wavex::client::HttpVersion::Http2
         };
         auto h2_res = co_await wavex::client::HttpClient::get("http://127.0.0.1:8088/api/h2_test", h2_opts);

@@ -22,6 +22,11 @@ module;
 #define ASIO_HAS_CO_AWAIT 1
 #include <functional>
 #include <asio/awaitable.hpp>
+#include <wavex/Base/FlatMap.hpp>
+#include <wavex/Base/Event.hpp>
+#include <wavex/Base/Memory.hpp>
+#include <wavex/Base/Uri.hpp>
+#include <wavex/Base/Url.hpp>
 #include <wavex/Base/MimeTypes.hpp>
 #include <wavex/Base/Request.hpp>
 #include <wavex/Base/Response.hpp>
@@ -30,6 +35,12 @@ module;
 export module wavex:middleware;
 
 export namespace wavex::base {
+    using base::FlatMap;
+    using base::Event;
+    using base::EventBus;
+    using base::Subscription;
+    using base::ShutdownEvent;
+    using base::ServerShutdownEvent;
     using base::Request;
     using base::Response;
     using base::mime_type_from_ext;
@@ -48,3 +59,18 @@ export namespace wavex::base {
     using base::sse_stay_active;
     using base::body_limit;
 } // export namespace wavex::base
+
+export namespace wavex::memory {
+    using memory::RequestArena;
+    using memory::get_thread_local_pool;
+} // export namespace wavex::memory
+
+export namespace wavex::uri {
+    using uri::encode;
+    using uri::decode;
+} // export namespace wavex::uri
+
+export namespace wavex::url {
+    using url::Url;
+    using url::parse_query;
+} // export namespace wavex::url

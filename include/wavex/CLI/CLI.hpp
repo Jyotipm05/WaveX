@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2026 Jyotipriya Mondal
+// Copyright (c) 2026 Jyotipriya Mondal
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -34,14 +34,23 @@ namespace wavex::cli {
      * @brief Definition and state of a CLI option/flag.
      */
     struct Option {
-        std::string name; ///< Long option name (e.g. "port")
-        std::string description; ///< Help description
-        std::string default_value; ///< Default value string
-        std::string value; ///< Parsed string value
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        std::string name{}; ///< Long option name (e.g. "port")
+        std::string description{}; ///< Help description
+        std::string default_value{}; ///< Default value string
+        std::string value{}; ///< Parsed string value
         OptionType type{OptionType::Value}; ///< Enum type
         char short_name{'\0'}; ///< Short option character (e.g. 'p')
         bool required{false}; ///< Indicates if required
         bool specified{false}; ///< Indicates if specified in command line
+
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        Option() = default;
+        ~Option() = default;
+        Option(const Option &) = default;
+        Option &operator=(const Option &) = default;
+        Option(Option &&) noexcept = default;
+        Option &operator=(Option &&) noexcept = default;
     };
 
     /**
@@ -49,10 +58,20 @@ namespace wavex::cli {
      * @brief Result of command line parsing.
      */
     struct ParseResult {
-        std::string error_message;
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        std::string error_message{};
         bool success{true};
         bool help_requested{false};
 
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        ParseResult() = default;
+        ~ParseResult() = default;
+        ParseResult(const ParseResult &) = default;
+        ParseResult &operator=(const ParseResult &) = default;
+        ParseResult(ParseResult &&) noexcept = default;
+        ParseResult &operator=(ParseResult &&) noexcept = default;
+
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
         [[nodiscard]] bool ok() const { return success && !help_requested; }
     };
 
@@ -61,12 +80,31 @@ namespace wavex::cli {
      * @brief High-performance, zero-dependency CLI argument parser for WaveX.
      */
     class CliParser {
+    private:
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        std::unordered_map<std::string, Option> options_{};
+        std::unordered_map<char, std::string> short_index_{};
+        std::string program_name_{};
+        std::string description_{};
+        std::vector<std::string> option_order_{};
+        std::vector<Option> positionals_{};
+        std::vector<std::string> extra_positionals_{};
+
     public:
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         explicit CliParser(std::string program_name = "", std::string description = "")
             : program_name_(std::move(program_name)), description_(std::move(description)) {
             // Auto-register built-in help flag
             add_flag("help", 'h', "Display this help message and exit");
         }
+
+        ~CliParser() = default;
+        CliParser(const CliParser &) = default;
+        CliParser &operator=(const CliParser &) = default;
+        CliParser(CliParser &&) noexcept = default;
+        CliParser &operator=(CliParser &&) noexcept = default;
+
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
 
         /// Set program name
         CliParser &set_program_name(std::string name) {
@@ -434,12 +472,6 @@ namespace wavex::cli {
             return nullptr;
         }
 
-        std::string program_name_;
-        std::string description_;
-        std::unordered_map<std::string, Option> options_;
-        std::unordered_map<char, std::string> short_index_;
-        std::vector<std::string> option_order_;
-        std::vector<Option> positionals_;
-        std::vector<std::string> extra_positionals_;
+
     };
 } // namespace wavex::cli

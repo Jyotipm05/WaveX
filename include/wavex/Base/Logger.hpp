@@ -98,7 +98,26 @@ namespace wavex::base {
      * @brief Thread-safe, singleton logger with leveled output and source location support.
      */
     class Logger {
+    private:
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        std::optional<std::ofstream> file_sink_{};
+        std::mutex mutex_{};
+        std::ostream *sink_{&std::cerr};
+        LogLevel min_level_{LogLevel::INFO};
+        bool colored_{true};
+
+    private:
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        Logger() = default;
+
     public:
+        ~Logger() = default;
+        Logger(const Logger &) = delete;
+        Logger &operator=(const Logger &) = delete;
+        Logger(Logger &&) = delete;
+        Logger &operator=(Logger &&) = delete;
+
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
         /// Global singleton access
         static Logger &instance() {
             static Logger inst;
@@ -176,13 +195,7 @@ namespace wavex::base {
             write(lvl, msg);
         }
 
-        Logger(const Logger &) = delete;
-
-        Logger &operator=(const Logger &) = delete;
-
     private:
-        Logger() = default;
-
         static std::string_view extract_filename(std::string_view filepath) {
             auto pos = filepath.find_last_of("/\\");
             return (pos == std::string_view::npos) ? filepath : filepath.substr(pos + 1);
@@ -233,12 +246,6 @@ namespace wavex::base {
             (*sink_) << line;
             sink_->flush();
         }
-
-        LogLevel min_level_ = LogLevel::INFO;
-        bool colored_ = true;
-        std::ostream *sink_ = &std::cerr;
-        std::optional<std::ofstream> file_sink_;
-        std::mutex mutex_;
     };
 } // namespace wavex::base
 

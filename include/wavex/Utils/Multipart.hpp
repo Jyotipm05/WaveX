@@ -38,12 +38,22 @@ namespace wavex::utils {
      * The `TempFileGuard` ensures the file is purged if the connection is aborted.
      */
     struct UploadedFile {
-        std::string name;                          ///< Form field name (e.g. "avatar")
-        std::string filename;                      ///< Original filename sent by client (e.g. "photo.png")
-        std::string content_type;                  ///< MIME type (e.g. "image/png")
-        std::string_view data;                     ///< In-memory data slice (valid if temp_file == nullptr)
-        std::shared_ptr<TempFileGuard> temp_file;  ///< Spooled temporary file on disk (if > max_memory_buffer)
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        std::string name{};                          ///< Form field name (e.g. "avatar")
+        std::string filename{};                      ///< Original filename sent by client (e.g. "photo.png")
+        std::string content_type{};                  ///< MIME type (e.g. "image/png")
+        std::string_view data{};                     ///< In-memory data slice (valid if temp_file == nullptr)
+        std::shared_ptr<TempFileGuard> temp_file{};  ///< Spooled temporary file on disk (if > max_memory_buffer)
 
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        UploadedFile() = default;
+        ~UploadedFile() = default;
+        UploadedFile(const UploadedFile &) = default;
+        UploadedFile &operator=(const UploadedFile &) = default;
+        UploadedFile(UploadedFile &&) noexcept = default;
+        UploadedFile &operator=(UploadedFile &&) noexcept = default;
+
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
         [[nodiscard]] bool is_in_memory() const noexcept { return temp_file == nullptr; }
         [[nodiscard]] bool is_on_disk() const noexcept { return temp_file != nullptr; }
 
@@ -120,23 +130,38 @@ namespace wavex::utils {
      * @brief Represents a non-file key-value form field in multipart/form-data.
      */
     struct FormField {
-        std::string name;
-        std::string value;
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        std::string name{};
+        std::string value{};
+
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        FormField() = default;
+        FormField(std::string n, std::string v) : name(std::move(n)), value(std::move(v)) {}
+        ~FormField() = default;
+        FormField(const FormField &) = default;
+        FormField &operator=(const FormField &) = default;
+        FormField(FormField &&) noexcept = default;
+        FormField &operator=(FormField &&) noexcept = default;
     };
 
-    /**
-     * @class MultipartFormData
-     * @brief Complete RFC 7578 multipart/form-data parser, builder, and disk spooler.
-     */
     /**
      * @struct MultipartLimits
      * @brief Configurable size ceilings and disk spooling thresholds.
      */
     struct MultipartLimits {
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        std::filesystem::path temp_dir{};                 // Empty uses system temp directory
         std::size_t max_memory_buffer{10 * 1024 * 1024}; // 10 MB in RAM; above these spools to disk
         std::size_t max_file_size{500 * 1024 * 1024};     // 500 MB max per file
         std::size_t max_total_size{1024 * 1024 * 1024};   // 1 GB max request payload
-        std::filesystem::path temp_dir;                   // Empty uses system temp directory
+
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        MultipartLimits() = default;
+        ~MultipartLimits() = default;
+        MultipartLimits(const MultipartLimits &) = default;
+        MultipartLimits &operator=(const MultipartLimits &) = default;
+        MultipartLimits(MultipartLimits &&) noexcept = default;
+        MultipartLimits &operator=(MultipartLimits &&) noexcept = default;
     };
 
     /**
@@ -145,11 +170,47 @@ namespace wavex::utils {
      */
     class MultipartFormData {
     public:
+        // ─── 1. Nested Types & Definitions (TOP) ───────────────────────────
         using Limits = MultipartLimits;
 
-        MultipartFormData() = default;
-        explicit MultipartFormData(std::string boundary) : boundary_(std::move(boundary)) {}
+    private:
+        struct ClientFile {
+            // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+            std::string name{};
+            std::string filename{};
+            std::string content_type{};
+            std::string content{};
 
+            // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+            ClientFile() = default;
+            ClientFile(std::string n, std::string fn, std::string ct, std::string c)
+                : name(std::move(n)), filename(std::move(fn)), content_type(std::move(ct)), content(std::move(c)) {}
+            ~ClientFile() = default;
+            ClientFile(const ClientFile &) = default;
+            ClientFile &operator=(const ClientFile &) = default;
+            ClientFile(ClientFile &&) noexcept = default;
+            ClientFile &operator=(ClientFile &&) noexcept = default;
+        };
+
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        mutable std::string boundary_{};
+        std::vector<FormField> fields_{};
+        std::vector<UploadedFile> files_{};
+        std::vector<ClientFile> client_files_{};
+        bool valid_{true};
+
+    public:
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        MultipartFormData() = default;
+        explicit MultipartFormData(std::string boundary)
+            : boundary_(std::move(boundary)), valid_(true) {}
+        ~MultipartFormData() = default;
+        MultipartFormData(const MultipartFormData &) = default;
+        MultipartFormData &operator=(const MultipartFormData &) = default;
+        MultipartFormData(MultipartFormData &&) noexcept = default;
+        MultipartFormData &operator=(MultipartFormData &&) noexcept = default;
+
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
         [[nodiscard]] bool is_valid() const noexcept { return valid_; }
         [[nodiscard]] explicit operator bool() const noexcept { return valid_; }
 
@@ -423,19 +484,7 @@ namespace wavex::utils {
 
         [[nodiscard]] const std::vector<FormField> &fields() const noexcept { return fields_; }
 
-    private:
-        struct ClientFile {
-            std::string name;
-            std::string filename;
-            std::string content_type;
-            std::string content;
-        };
 
-        bool valid_{true};
-        mutable std::string boundary_;
-        std::vector<FormField> fields_;
-        std::vector<UploadedFile> files_;
-        std::vector<ClientFile> client_files_;
 
         // Helper: Extract boundary parameter from Content-Type header
         static std::string extract_boundary(const std::string_view ct) {

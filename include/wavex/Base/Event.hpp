@@ -45,7 +45,13 @@ namespace wavex::base {
      * unless detached or manually released.
      */
     class Subscription {
+    private:
+        // ─── 1. Member Variables (Arranged for minimum padding) ──────────────
+        std::function<void()> unbind_{nullptr};
+        bool active_{false};
+
     public:
+        // ─── 2. Constructors & Destructor ────────────────────────────────────
         Subscription() noexcept = default;
 
         Subscription(std::function<void()> unbind) noexcept
@@ -73,6 +79,7 @@ namespace wavex::base {
         Subscription(const Subscription &) = delete;
         Subscription &operator=(const Subscription &) = delete;
 
+        // ─── 3. Member Functions ─────────────────────────────────────────────
         /// Manually unbind the subscription immediately
         void reset() noexcept {
             if (active_ && unbind_) [[likely]] {
@@ -98,10 +105,6 @@ namespace wavex::base {
         [[nodiscard]] bool is_active() const noexcept {
             return active_;
         }
-
-    private:
-        std::function<void()> unbind_;
-        bool active_{false};
     };
 
     /**
@@ -116,8 +119,26 @@ namespace wavex::base {
     template<typename... Args>
     class Event {
     public:
+        // ─── 1. Nested Types & Definitions ───────────────────────────────────
         using Handler = std::function<void(Args...)>;
 
+    private:
+        struct ListenerEntry {
+            Handler handler;
+            SubscriptionId id{0};
+
+            ListenerEntry() = default;
+            ListenerEntry(SubscriptionId sid, Handler h)
+                : handler(std::move(h)), id(sid) {}
+        };
+
+        // ─── 2. Member Variables (Arranged for minimum padding) ──────────────
+        mutable std::mutex mutex_;
+        std::vector<ListenerEntry> listeners_;
+        SubscriptionId next_id_{1};
+
+    public:
+        // ─── 3. Constructors & Destructor ────────────────────────────────────
         Event() = default;
         ~Event() = default;
 
@@ -125,6 +146,8 @@ namespace wavex::base {
         Event &operator=(const Event &) = delete;
         Event(Event &&) = delete;
         Event &operator=(Event &&) = delete;
+
+        // ─── 4. Member Functions ─────────────────────────────────────────────
 
         /**
          * @brief Subscribes a listener returning an RAII scoped Subscription handle.
@@ -242,16 +265,6 @@ namespace wavex::base {
         [[nodiscard]] bool empty() const {
             return listener_count() == 0;
         }
-
-    private:
-        struct ListenerEntry {
-            SubscriptionId id{0};
-            Handler handler;
-        };
-
-        mutable std::mutex mutex_;
-        std::vector<ListenerEntry> listeners_;
-        SubscriptionId next_id_{1};
     };
 
     /**
@@ -261,7 +274,13 @@ namespace wavex::base {
      * the C++ type of the event payload.
      */
     class EventBus {
+    private:
+        // ─── 1. Member Variables (Arranged for minimum padding) ──────────────
+        mutable std::mutex mutex_;
+        std::unordered_map<std::type_index, std::shared_ptr<void>> channels_;
+
     public:
+        // ─── 2. Constructors & Destructor ────────────────────────────────────
         EventBus() = default;
         ~EventBus() = default;
 
@@ -270,6 +289,7 @@ namespace wavex::base {
         EventBus(EventBus &&) = delete;
         EventBus &operator=(EventBus &&) = delete;
 
+        // ─── 3. Member Functions ─────────────────────────────────────────────
         /**
          * @brief Subscribes a handler to a specific EventType returning RAII Subscription.
          * @tparam EventType Arbitrary C++ struct or class representing the event.
@@ -375,9 +395,6 @@ namespace wavex::base {
             }
             return *std::static_pointer_cast<Event<const EventType &>>(it->second);
         }
-
-        mutable std::mutex mutex_;
-        std::unordered_map<std::type_index, std::shared_ptr<void>> channels_;
     };
 
     /**
@@ -390,7 +407,13 @@ namespace wavex::base {
      * @brief Structured event for publishing shutdown on an EventBus.
      */
     struct ServerShutdownEvent {
+        // ─── 1. Member Variables ─────────────────────────────────────────────
         std::chrono::milliseconds timeout{10000};
+
+        // ─── 2. Constructors & Destructor ────────────────────────────────────
+        ServerShutdownEvent() = default;
+        explicit ServerShutdownEvent(std::chrono::milliseconds t) : timeout(t) {}
+        ~ServerShutdownEvent() = default;
     };
 
 } // namespace wavex::base

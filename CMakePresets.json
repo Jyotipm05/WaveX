@@ -35,6 +35,16 @@
       }
     },
     {
+      "name": "rel-profile",
+      "displayName": "Dev-Rel",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "WAVEX_TEST": "ON",
+        "WAVEX_USE_LLD": "ON"
+      }
+    },
+    {
       "name": "tsan",
       "displayName": "Tests — Thread Sanitizer",
       "inherits": "base",
@@ -99,6 +109,12 @@
       "displayName": "Fast Dev",
       "inherits": ".fast-build",
       "configurePreset": "test-profile"
+    },
+    {
+      "name": "fast-rel-dev",
+      "displayName": "Fast Dev(Rel)",
+      "inherits": ".fast-build",
+      "configurePreset": "rel-profile"
     },
     {
       "name": "max-dev",

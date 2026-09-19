@@ -147,19 +147,39 @@ namespace wavex::protos::http {
      * Both views reference the original parse buffer — no copies made.
      */
     struct header {
-        std::string_view name;
-        std::string_view value;
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        std::string_view name{};
+        std::string_view value{};
+
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        header() = default;
+        constexpr header(std::string_view n, std::string_view v) noexcept : name(n), value(v) {}
+        ~header() = default;
+        header(const header &) = default;
+        header &operator=(const header &) = default;
+        header(header &&) noexcept = default;
+        header &operator=(header &&) noexcept = default;
     };
 
     /**
      * @brief Base for HTTP request and response messages.
      */
     struct message_base {
-        int version_major = 1;
-        int version_minor = 1;
-        std::vector<header> headers;
-        std::string_view body;
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        std::vector<header> headers{};
+        std::string_view body{};
+        int version_major{1};
+        int version_minor{1};
 
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        message_base() = default;
+        ~message_base() = default;
+        message_base(const message_base &) = default;
+        message_base &operator=(const message_base &) = default;
+        message_base(message_base &&) noexcept = default;
+        message_base &operator=(message_base &&) noexcept = default;
+
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
         /**
          * @brief Case-insensitive header lookup.
          *
@@ -176,14 +196,32 @@ namespace wavex::protos::http {
 
     /** @brief HTTP request message. */
     struct request : public message_base {
-        http::method method_type = method::UNKNOWN;
-        std::string_view target;
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        std::string_view target{};
+        http::method method_type{method::UNKNOWN};
+
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        request() = default;
+        ~request() = default;
+        request(const request &) = default;
+        request &operator=(const request &) = default;
+        request(request &&) noexcept = default;
+        request &operator=(request &&) noexcept = default;
     };
 
     /** @brief HTTP response message. */
     struct response : public message_base {
-        unsigned int status_code = 200;
-        std::string_view status_text = "OK";
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        std::string_view status_text{"OK"};
+        unsigned int status_code{200};
+
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        response() = default;
+        ~response() = default;
+        response(const response &) = default;
+        response &operator=(const response &) = default;
+        response(response &&) noexcept = default;
+        response &operator=(response &&) noexcept = default;
     };
 
     // ─────────────────────────────────────────────────────────────────────────────

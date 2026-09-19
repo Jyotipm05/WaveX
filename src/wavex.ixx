@@ -32,4 +32,5 @@ export import :utils;
 export namespace wavex {
     using wavex::_version;
     std::string_view wx_version = ::wx_version;
+    using wavex::spawn_blocking;
 }
