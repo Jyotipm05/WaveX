@@ -24,6 +24,7 @@ export namespace wavex::protos::http {
         using http2::settings_parameter;
         using http2::request;
         using http2::response;
+        using http2::connection_context;
         using http2::parser;
         using http2::encoder;
         using http2::decoder;

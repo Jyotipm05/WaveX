@@ -726,6 +726,7 @@ namespace wavex::server {
             std::string stream_buf;
             stream_buf.reserve(8192);
             std::size_t stream_buf_consumed = 0;
+            typename traits::connection_context conn_ctx{};
             auto executor = co_await asio::this_coro::executor;
 
             try {
@@ -757,7 +758,7 @@ namespace wavex::server {
                     std::string_view unconsumed(stream_buf.data() + stream_buf_consumed,
                                                 stream_buf.size() - stream_buf_consumed);
                     RequestType req;
-                    auto p_res = req.parse_stream(unconsumed);
+                    auto p_res = req.parse_stream(unconsumed, conn_ctx);
 
                     while (p_res == Codec::result::incomplete && state_.load(std::memory_order_acquire) != ServerState::Stopped) {
                         if (state_.load(std::memory_order_acquire) == ServerState::ShuttingDown && stream_buf.empty()) [[unlikely]] {
@@ -809,7 +810,7 @@ namespace wavex::server {
 
                         unconsumed = std::string_view(stream_buf.data() + stream_buf_consumed,
                                                       stream_buf.size() - stream_buf_consumed);
-                        p_res = req.parse_stream(unconsumed);
+                        p_res = req.parse_stream(unconsumed, conn_ctx);
                     }
 
                     if (p_res != Codec::result::success) [[unlikely]] {
@@ -896,16 +897,36 @@ namespace wavex::server {
 
                     res.status(match ? 200 : 404);
 
-                    if (!match) [[unlikely]] {
-                        if (server_not_found_handler_) {
-                            co_await (*server_not_found_handler_)(req, res);
+                    try {
+                        if (!match) [[unlikely]] {
+                            if (server_not_found_handler_) {
+                                co_await (*server_not_found_handler_)(req, res);
+                            } else {
+                                co_await router_.not_found_handler()(req, res);
+                            }
+                        } else if (match->middlewares.empty()) [[likely]] {
+                            co_await match->handler(req, res);
                         } else {
-                            co_await router_.not_found_handler()(req, res);
+                            co_await run_chain(req, res, match->middlewares, match->handler);
                         }
-                    } else if (match->middlewares.empty()) [[likely]] {
-                        co_await match->handler(req, res);
-                    } else {
-                        co_await run_chain(req, res, match->middlewares, match->handler);
+                    } catch (const std::exception &ex) {
+                        wavex::log::error("[Server] Unhandled exception in request handler for {}: {}", req.path(), ex.what());
+                        if (!res.is_headers_sent()) {
+                            res.status(500);
+                            if constexpr (requires { res.set("Content-Type", "text/plain"); }) {
+                                res.set("Content-Type", "text/plain");
+                            }
+                            res.send("Internal Server Error");
+                        }
+                    } catch (...) {
+                        wavex::log::error("[Server] Unknown exception in request handler for {}", req.path());
+                        if (!res.is_headers_sent()) {
+                            res.status(500);
+                            if constexpr (requires { res.set("Content-Type", "text/plain"); }) {
+                                res.set("Content-Type", "text/plain");
+                            }
+                            res.send("Internal Server Error");
+                        }
                     }
 
                     // Check shutdown state after handler execution

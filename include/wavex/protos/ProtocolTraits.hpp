@@ -42,6 +42,9 @@ namespace wavex::protos {
      */
     template<typename Codec>
     struct protocol_traits {
+        /// Connection-scoped session context (e.g. stateful compression tables)
+        struct connection_context {};
+
         /// True if the protocol requires a connection-level opening exchange.
         static constexpr bool has_connection_preface = false;
 
@@ -86,6 +89,8 @@ namespace wavex::protos {
 namespace wavex::protos {
     template<>
     struct protocol_traits<wavex::protos::http::http1codec> {
+        struct connection_context {};
+
         static constexpr bool has_connection_preface = false;
 
         template<typename Stream>
@@ -140,6 +145,8 @@ namespace wavex::protos {
 namespace wavex::protos {
     template<>
     struct protocol_traits<wavex::protos::http::http2codec> {
+        using connection_context = wavex::protos::http::http2::connection_context;
+
         static constexpr bool has_connection_preface = true;
 
         /**

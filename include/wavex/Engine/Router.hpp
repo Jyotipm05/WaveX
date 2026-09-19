@@ -800,7 +800,6 @@ namespace wavex::engine {
                     const char *w_begin = segments[depth].data();
                     const char *w_end = segments.back().data() + segments.back().size();
                     assert(w_begin <= w_end && "Segments must be contiguous slices of the same path buffer");
-                    [[assume(w_begin <= w_end)]];
                     std::string_view wildcard_slice(w_begin, static_cast<size_t>(w_end - w_begin));
                     params.insert_or_assign(
                         std::string_view(node->wildcard_child->param_name),

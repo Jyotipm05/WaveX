@@ -163,6 +163,7 @@ void test_server_persistent_connection() {
 
     const unsigned short port = 19095;
     wavex::server::Http1Server server(router, "127.0.0.1", port);
+    server.enable_signal_handling(false);
     server.set_keep_alive_timeout(std::chrono::seconds(3));
     server.set_max_keep_alive_requests(10);
 
@@ -227,6 +228,76 @@ void test_server_persistent_connection() {
     }
 }
 
+// ─── Test 6: Integration Test - 204 No Content Keep-Alive Framing ─────────────
+
+void test_server_204_keepalive() {
+    std::cout << "\n[Test 6] Integration Test: 204 No Content Keep-Alive Framing\n";
+
+    auto router = wavex::engine::Http1Router::make_instance();
+    router.post("/delete-item", [](wavex::protos::http::Http1Request &,
+                                   wavex::protos::http::Http1Response &res) -> asio::awaitable<void> {
+        res.status(204).send("");
+        co_return;
+    });
+
+    router.get("/status", [](wavex::protos::http::Http1Request &,
+                             wavex::protos::http::Http1Response &res) -> asio::awaitable<void> {
+        res.status(200).send("OK Status");
+        co_return;
+    });
+
+    const unsigned short port = 19096;
+    wavex::server::Http1Server server(router, "127.0.0.1", port);
+    server.enable_signal_handling(false);
+    server.set_keep_alive_timeout(std::chrono::seconds(3));
+    server.set_max_keep_alive_requests(10);
+
+    std::thread server_thread([&server] {
+        server.run();
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    try {
+        asio::io_context client_ioc;
+        asio::ip::tcp::socket client_socket(client_ioc);
+        client_socket.connect(asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), port));
+
+        // 1. Send POST /delete-item returning 204 No Content
+        std::string req1 = "POST /delete-item HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n";
+        asio::write(client_socket, asio::buffer(req1));
+
+        char buf[2048];
+        std::size_t n1 = client_socket.read_some(asio::buffer(buf));
+        std::string resp1(buf, n1);
+
+        check(resp1.find("HTTP/1.1 204 No Content") != std::string::npos, "Request 1 responded 204 No Content");
+        check(resp1.find("Content-Length") == std::string::npos, "204 response has no Content-Length header");
+        check(resp1.find("Connection: keep-alive") != std::string::npos, "204 response kept connection alive");
+
+        // 2. Send second request on the SAME socket - verifies that 204 response framing did not desync
+        std::string req2 = "GET /status HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+        asio::write(client_socket, asio::buffer(req2));
+
+        std::size_t n2 = client_socket.read_some(asio::buffer(buf));
+        std::string resp2(buf, n2);
+
+        check(resp2.find("HTTP/1.1 200 OK") != std::string::npos, "Request 2 after 204 responded 200 OK");
+        check(resp2.find("OK Status") != std::string::npos, "Request 2 returned expected payload");
+        check(resp2.find("Connection: close") != std::string::npos, "Request 2 completed cleanly with Connection: close");
+
+        client_socket.close();
+    } catch (const std::exception &ex) {
+        std::cerr << "Client error: " << ex.what() << "\n";
+        check(false, "204 keep-alive test failed with exception");
+    }
+
+    server.stop();
+    if (server_thread.joinable()) {
+        server_thread.join();
+    }
+}
+
 int main() {
     std::cout << "==================================================\n";
     std::cout << " WaveX HTTP Stay-Active / Keep-Alive Unit Tests    \n";
@@ -237,6 +308,7 @@ int main() {
     test_chainable_keep_alive();
     test_middleware_keep_alive();
     test_server_persistent_connection();
+    test_server_204_keepalive();
 
     std::cout << "\n==================================================\n";
     std::cout << " Results: " << tests_passed << " / " << tests_run << " passed\n";

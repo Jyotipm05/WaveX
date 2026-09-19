@@ -69,6 +69,10 @@ namespace wavex {
                 asio::use_awaitable
             );
 
+            if (state->error) {
+                std::rethrow_exception(state->error);
+            }
+
             co_return std::move(*state->result);
         }
 
@@ -101,6 +105,10 @@ namespace wavex {
                 },
                 asio::use_awaitable
             );
+
+            if (state->error) {
+                std::rethrow_exception(state->error);
+            }
 
             co_return;
         }

@@ -427,6 +427,82 @@ void test_symmetrical_codec_api() {
     check(h2_res.stream_id() == 42, "Http2Response stream_id getter/setter");
 }
 
+// ─── Test 11: HPACK Dynamic Table Persistence Across Connection Requests ─────
+
+void test_hpack_dynamic_table_persistence() {
+    std::cout << "\n[Test 11] HPACK Dynamic Table Multi-Request Persistence (Connection Context)\n";
+
+    wavex::protos::http::http2codec::connection_context conn_ctx;
+
+    // ── Request 1: Literal header with incremental indexing (RFC 7541 §6.2.1)
+    std::string block1;
+    block1.push_back(static_cast<char>(0x82)); // :method: GET
+    block1.push_back(static_cast<char>(0x84)); // :path: /
+    block1.push_back(static_cast<char>(0x40)); // 01000000: literal with incremental indexing, new name
+    block1.push_back(static_cast<char>(14));   // name length = 14
+    block1.append("x-custom-token");
+    block1.push_back(static_cast<char>(9));    // value length = 9
+    block1.append("secret123");
+
+    h2::frame_header hdr1;
+    hdr1.length = static_cast<uint32_t>(block1.size());
+    hdr1.type = h2::frame_type::HEADERS;
+    hdr1.flags = h2::flags::END_HEADERS | h2::flags::END_STREAM;
+    hdr1.stream_id = 1;
+
+    std::array<uint8_t, h2::frame_header::HEADER_SIZE> hdr1_bytes{};
+    h2::pack_frame_header(hdr1, hdr1_bytes);
+
+    std::string wire1;
+    wire1.append(reinterpret_cast<const char *>(hdr1_bytes.data()), hdr1_bytes.size());
+    wire1.append(block1);
+
+    h2::request req1;
+    std::size_t consumed1 = 0;
+    auto res1 = wavex::protos::http::http2codec::parse_request(wire1, req1, consumed1, conn_ctx);
+    check(res1 == wavex::protos::http::http2codec::result::success, "Request 1 with incremental indexing parsed successfully");
+    check(req1.stream_id == 1, "Request 1 stream ID is 1");
+    auto h1 = req1.get_header("x-custom-token");
+    check(h1.has_value() && *h1 == "secret123", "Request 1 decoded x-custom-token header");
+    check(conn_ctx.decode_table.size() == 1, "Dynamic table stored 1 entry after request 1");
+
+    // ── Request 2: Uses Indexed Header Field referencing index 62 (first dynamic entry)
+    // Static table size is 61 (indices 1..61). Dynamic table entry 0 is index 62.
+    // 0x80 | 62 = 0xBE (10111110)
+    std::string block2;
+    block2.push_back(static_cast<char>(0x82)); // :method: GET
+    block2.push_back(static_cast<char>(0x84)); // :path: /
+    block2.push_back(static_cast<char>(0x80 | 62)); // Indexed field: index 62
+
+    h2::frame_header hdr2;
+    hdr2.length = static_cast<uint32_t>(block2.size());
+    hdr2.type = h2::frame_type::HEADERS;
+    hdr2.flags = h2::flags::END_HEADERS | h2::flags::END_STREAM;
+    hdr2.stream_id = 3;
+
+    std::array<uint8_t, h2::frame_header::HEADER_SIZE> hdr2_bytes{};
+    h2::pack_frame_header(hdr2, hdr2_bytes);
+
+    std::string wire2;
+    wire2.append(reinterpret_cast<const char *>(hdr2_bytes.data()), hdr2_bytes.size());
+    wire2.append(block2);
+
+    // 1. Parse with connection_context (persisted dynamic table)
+    h2::request req2;
+    std::size_t consumed2 = 0;
+    auto res2 = wavex::protos::http::http2codec::parse_request(wire2, req2, consumed2, conn_ctx);
+    check(res2 == wavex::protos::http::http2codec::result::success, "Request 2 on same connection parsed index 62 successfully");
+    check(req2.stream_id == 3, "Request 2 stream ID is 3");
+    auto h2 = req2.get_header("x-custom-token");
+    check(h2.has_value() && *h2 == "secret123", "Request 2 retrieved dynamic table entry for index 62");
+
+    // 2. Standalone parse without persistent dynamic table fails on index 62
+    h2::request req2_isolated;
+    std::size_t consumed2_iso = 0;
+    auto res2_isolated = wavex::protos::http::http2codec::parse_request(wire2, req2_isolated, consumed2_iso);
+    check(res2_isolated == wavex::protos::http::http2codec::result::error, "Standalone parse without persistent dynamic table fails on index 62");
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -444,6 +520,7 @@ int main() {
     test_client_preface_parsing();
     test_http2_request_response_types();
     test_symmetrical_codec_api();
+    test_hpack_dynamic_table_persistence();
 
     std::cout << "\n--------------------------------------------------------\n";
     std::cout << "Tests Summary: " << tests_passed << " / " << tests_run << " passed.\n";

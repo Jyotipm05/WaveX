@@ -711,6 +711,22 @@ namespace wavex::protos::http {
             };
         } // namespace hpack
 
+        /**
+         * @brief Persistent connection context for HTTP/2 sessions (scoped to TCP/TLS connection lifetime).
+         */
+        struct connection_context {
+            // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+            hpack::dynamic_table decode_table{};
+
+            // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+            connection_context() = default;
+            ~connection_context() = default;
+            connection_context(const connection_context &) = default;
+            connection_context &operator=(const connection_context &) = default;
+            connection_context(connection_context &&) noexcept = default;
+            connection_context &operator=(connection_context &&) noexcept = default;
+        };
+
         // ─── HTTP/2 Messages ───────────────────────────────────────────────────────
 
         /**
@@ -937,14 +953,15 @@ namespace wavex::protos::http {
             }
 
             /**
-             * @brief Parse an incoming HTTP/2 client request from a network buffer.
+             * @brief Parse an incoming HTTP/2 client request from a network buffer using a persistent dynamic table.
              * Handles connection preface, initial SETTINGS, HEADERS, and DATA frames.
              */
             [[nodiscard]]
             static result parse_request(
                 const std::string_view buffer,
                 request &req,
-                std::size_t &bytes_consumed) {
+                std::size_t &bytes_consumed,
+                hpack::dynamic_table &dt) {
                 bytes_consumed = 0;
                 std::size_t cursor = 0;
 
@@ -953,7 +970,6 @@ namespace wavex::protos::http {
                     cursor += CONNECTION_PREFACE.size();
                 }
 
-                hpack::dynamic_table dt;
                 hpack::decoder dec(dt);
 
                 std::vector<std::pair<std::string, std::string> > decoded_headers;
@@ -1072,17 +1088,41 @@ namespace wavex::protos::http {
             }
 
             /**
-             * @brief Parse an incoming HTTP/2 server response from a network buffer.
+             * @brief Parse an incoming HTTP/2 client request from a network buffer using a connection context.
+             */
+            [[nodiscard]]
+            static result parse_request(
+                const std::string_view buffer,
+                request &req,
+                std::size_t &bytes_consumed,
+                connection_context &ctx) {
+                return parse_request(buffer, req, bytes_consumed, ctx.decode_table);
+            }
+
+            /**
+             * @brief Parse an incoming HTTP/2 client request from a network buffer (standalone fallback).
+             */
+            [[nodiscard]]
+            static result parse_request(
+                const std::string_view buffer,
+                request &req,
+                std::size_t &bytes_consumed) {
+                hpack::dynamic_table local_dt;
+                return parse_request(buffer, req, bytes_consumed, local_dt);
+            }
+
+            /**
+             * @brief Parse an incoming HTTP/2 server response from a network buffer using a persistent dynamic table.
              */
             [[nodiscard]]
             static result parse_response(
                 const std::string_view buffer,
                 response &res,
-                std::size_t &bytes_consumed) {
+                std::size_t &bytes_consumed,
+                hpack::dynamic_table &dt) {
                 bytes_consumed = 0;
                 std::size_t cursor = 0;
 
-                hpack::dynamic_table dt;
                 hpack::decoder dec(dt);
 
                 std::vector<std::pair<std::string, std::string> > decoded_headers;
@@ -1176,6 +1216,30 @@ namespace wavex::protos::http {
 
                 bytes_consumed = cursor;
                 return result::success;
+            }
+
+            /**
+             * @brief Parse an incoming HTTP/2 server response from a network buffer using a connection context.
+             */
+            [[nodiscard]]
+            static result parse_response(
+                const std::string_view buffer,
+                response &res,
+                std::size_t &bytes_consumed,
+                connection_context &ctx) {
+                return parse_response(buffer, res, bytes_consumed, ctx.decode_table);
+            }
+
+            /**
+             * @brief Parse an incoming HTTP/2 server response from a network buffer (standalone fallback).
+             */
+            [[nodiscard]]
+            static result parse_response(
+                const std::string_view buffer,
+                response &res,
+                std::size_t &bytes_consumed) {
+                hpack::dynamic_table local_dt;
+                return parse_response(buffer, res, bytes_consumed, local_dt);
             }
         };
 
@@ -1512,6 +1576,24 @@ namespace wavex::protos::http {
             static parser::result decode_response(
                 const std::string_view buffer,
                 response &res,
+                std::size_t &bytes_consumed,
+                hpack::dynamic_table &dt) {
+                return parser::parse_response(buffer, res, bytes_consumed, dt);
+            }
+
+            [[nodiscard]]
+            static parser::result decode_response(
+                const std::string_view buffer,
+                response &res,
+                std::size_t &bytes_consumed,
+                connection_context &ctx) {
+                return parser::parse_response(buffer, res, bytes_consumed, ctx.decode_table);
+            }
+
+            [[nodiscard]]
+            static parser::result decode_response(
+                const std::string_view buffer,
+                response &res,
                 std::size_t &bytes_consumed) {
                 return parser::parse_response(buffer, res, bytes_consumed);
             }
@@ -1537,6 +1619,8 @@ namespace wavex::protos::http {
         using decoder = wavex::protos::http::http2::decoder;
         using request = wavex::protos::http::http2::request;
         using response = wavex::protos::http::http2::response;
+        using connection_context = wavex::protos::http::http2::connection_context;
+        using dynamic_table = wavex::protos::http::http2::hpack::dynamic_table;
         using result = parser::result;
 
         static std::string_view status_text_for(const unsigned int code) noexcept {
@@ -1555,14 +1639,44 @@ namespace wavex::protos::http {
             return encoder::serialize_request(req);
         }
 
+        /** @brief Parse raw buffer into an HTTP/2 request using a persistent dynamic table. */
+        static result parse_request(const std::string_view buffer, request &req, std::size_t &bytes_consumed, dynamic_table &dt) {
+            return parser::parse_request(buffer, req, bytes_consumed, dt);
+        }
+
+        /** @brief Parse raw buffer into an HTTP/2 request using a connection context. */
+        static result parse_request(const std::string_view buffer, request &req, std::size_t &bytes_consumed, connection_context &ctx) {
+            return parser::parse_request(buffer, req, bytes_consumed, ctx);
+        }
+
         /** @brief Parse raw buffer into an HTTP/2 request. */
         static result parse_request(const std::string_view buffer, request &req, std::size_t &bytes_consumed) {
             return parser::parse_request(buffer, req, bytes_consumed);
         }
 
+        /** @brief Parse raw buffer into an HTTP/2 response using a persistent dynamic table. */
+        static result parse_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed, dynamic_table &dt) {
+            return parser::parse_response(buffer, res, bytes_consumed, dt);
+        }
+
+        /** @brief Parse raw buffer into an HTTP/2 response using a connection context. */
+        static result parse_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed, connection_context &ctx) {
+            return parser::parse_response(buffer, res, bytes_consumed, ctx);
+        }
+
         /** @brief Parse raw buffer into an HTTP/2 response. */
         static result parse_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed) {
             return parser::parse_response(buffer, res, bytes_consumed);
+        }
+
+        /** @brief Decode a raw HTTP/2 response buffer using a persistent dynamic table. */
+        static result decode_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed, dynamic_table &dt) {
+            return decoder::decode_response(buffer, res, bytes_consumed, dt);
+        }
+
+        /** @brief Decode a raw HTTP/2 response buffer using a connection context. */
+        static result decode_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed, connection_context &ctx) {
+            return decoder::decode_response(buffer, res, bytes_consumed, ctx);
         }
 
         /** @brief Decode a raw HTTP/2 response buffer. */

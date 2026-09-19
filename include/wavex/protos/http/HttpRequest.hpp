@@ -166,6 +166,27 @@ namespace wavex::protos::http {
         }
 
         /**
+         * @brief Parse directly from an external stream buffer view using a connection-scoped context.
+         * @param stream_buf Stream buffer view containing wire data.
+         * @param ctx Connection context (e.g. holding persistent HPACK dynamic table for HTTP/2).
+         * @return parser_type::result (success, incomplete, error).
+         */
+        template<typename Context>
+        typename parser_type::result parse_stream(const std::string_view stream_buf, Context &ctx) {
+            consumed_ = 0;
+            typename parser_type::result result = parser_type::result::error;
+            if constexpr (requires { parser_type::parse_request(stream_buf, parsed_, consumed_, ctx); }) {
+                result = parser_type::parse_request(stream_buf, parsed_, consumed_, ctx);
+            } else {
+                result = parser_type::parse_request(stream_buf, parsed_, consumed_);
+            }
+            if (result == parser_type::result::success) {
+                extract_path_query(parsed_.target);
+            }
+            return result;
+        }
+
+        /**
          * @brief Parse directly from an external stream buffer view without copying.
          * @param stream_buf Stream buffer view containing wire data.
          * @return parser_type::result (success, incomplete, error).
