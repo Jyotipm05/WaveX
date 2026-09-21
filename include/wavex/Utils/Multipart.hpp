@@ -27,7 +27,43 @@
 #include <wavex/Utils/TempFile.hpp>
 #include <wavex/Utils/Compression.hpp>
 
+#ifndef ASIO_HAS_CO_AWAIT
+#define ASIO_HAS_CO_AWAIT 1
+#endif
+
+#include <asio/awaitable.hpp>
+#include <asio/use_awaitable.hpp>
+#include <asio/async_result.hpp>
+#include <asio/post.hpp>
+#include <asio/associated_executor.hpp>
+#include <wavex/Server/BlockingPool.hpp>
+#include <wavex/Async/SpawnBlocking.hpp>
+
 namespace wavex::utils {
+
+    namespace detail {
+
+        struct SpoolTask {
+            // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+            std::shared_ptr<TempFileGuard> guard{};
+            std::string_view data{};
+
+            // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+            SpoolTask() = default;
+            SpoolTask(std::shared_ptr<TempFileGuard> g, const std::string_view d)
+                : guard(std::move(g)), data(d) {}
+        };
+
+        struct BatchSpoolState {
+            // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+            std::atomic<std::size_t> remaining{0};
+            std::atomic<bool> success{true};
+
+            // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+            BatchSpoolState() = default;
+        };
+
+    } // namespace detail
 
     /**
      * @struct UploadedFile
@@ -99,6 +135,40 @@ namespace wavex::utils {
         }
 
         /**
+         * @brief Asynchronously persists the file to a specified filesystem destination.
+         *
+         * If the file is spooled on disk, this performs an atomic filesystem move/rename.
+         * If the file is in-memory, it writes to disk offloaded to the background blocking pool.
+         */
+        [[nodiscard]] asio::awaitable<bool> save_to_async(
+            const std::filesystem::path &destination, const bool overwrite = true) const {
+            if (is_on_disk()) {
+                co_return temp_file->move_to(destination, overwrite);
+            }
+
+            auto res = co_await wavex::spawn_blocking([dest = destination, d = std::string(data), overwrite]() -> bool {
+                std::error_code ec;
+                if (dest.has_parent_path()) {
+                    std::filesystem::create_directories(dest.parent_path(), ec);
+                    if (ec) return false;
+                }
+
+                if (overwrite && std::filesystem::exists(dest, ec)) {
+                    std::filesystem::remove(dest, ec);
+                }
+
+                std::ofstream ofs(dest, std::ios::binary);
+                if (!ofs.is_open()) return false;
+
+                if (!d.empty()) {
+                    ofs.write(d.data(), static_cast<std::streamsize>(d.size()));
+                }
+                return ofs.good();
+            });
+            co_return res;
+        }
+
+        /**
          * @brief Opens an input stream to read the file contents.
          */
         [[nodiscard]] std::unique_ptr<std::istream> open_stream() const {
@@ -154,6 +224,8 @@ namespace wavex::utils {
         std::size_t max_memory_buffer{10 * 1024 * 1024}; // 10 MB in RAM; above these spools to disk
         std::size_t max_file_size{500 * 1024 * 1024};     // 500 MB max per file
         std::size_t max_total_size{1024 * 1024 * 1024};   // 1 GB max request payload
+        std::size_t max_files{1000};                       // 1000 max files per request
+        std::size_t max_parts{2000};                       // 2000 max total parts (fields + files)
 
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         MultipartLimits() = default;
@@ -300,7 +372,17 @@ namespace wavex::utils {
                 auto filename = extract_parameter(disposition, "filename");
 
                 if (!name.empty()) {
+                    if (result.files_.size() + result.fields_.size() >= limits.max_parts) {
+                        result.valid_ = false;
+                        return result; // Exceeded total parts limit
+                    }
+
                     if (!filename.empty()) {
+                        if (result.files_.size() >= limits.max_files) {
+                            result.valid_ = false;
+                            return result; // Exceeded max files limit
+                        }
+
                         // It's a file upload
                         if (part_body.size() > limits.max_file_size) {
                             result.valid_ = false;
@@ -338,6 +420,173 @@ namespace wavex::utils {
             }
 
             return result;
+        }
+
+        /**
+         * @brief Asynchronously parses an RFC 7578 multipart body from an HTTP request.
+         *
+         * Performs boundary scanning in-memory and offloads large file disk spooling
+         * concurrently across the dedicated BlockingThreadPool, never blocking the async
+         * connection worker thread.
+         *
+         * @param body Request body raw string view.
+         * @param content_type_header Value of the Content-Type header (containing boundary).
+         * @param limits Limits and spooling configuration.
+         * @return Awaitable yielding parsed MultipartFormData containing fields and uploaded files.
+         */
+        static asio::awaitable<MultipartFormData> parse_async(
+            const std::string_view body,
+            const std::string_view content_type_header,
+            const MultipartLimits &limits = {}) {
+
+            MultipartFormData result;
+
+            if (body.size() > limits.max_total_size) {
+                result.valid_ = false;
+                co_return result;
+            }
+
+            // 1. Extract boundary from Content-Type: multipart/form-data; boundary=...
+            const auto boundary = extract_boundary(content_type_header);
+            if (boundary.empty()) {
+                result.valid_ = false;
+                co_return result;
+            }
+
+            result.boundary_ = std::string(boundary);
+            const std::string delimiter = "--" + std::string(boundary);
+            const std::string close_delimiter = "--" + std::string(boundary) + "--";
+
+            std::size_t pos = 0;
+            pos = body.find(delimiter, pos);
+            if (pos == std::string_view::npos) {
+                result.valid_ = false;
+                co_return result;
+            }
+            pos += delimiter.size();
+
+            std::vector<detail::SpoolTask> spool_tasks;
+
+            while (pos < body.size()) {
+                // Check for closing delimiter
+                if (pos + 2 <= body.size() && body.substr(pos, 2) == "--") {
+                    break;
+                }
+
+                // Skip CRLF or LF after boundary
+                if (pos < body.size() && body[pos] == '\r') ++pos;
+                if (pos < body.size() && body[pos] == '\n') ++pos;
+
+                // Find header-body separation (\r\n\r\n or \n\n)
+                std::size_t header_end = body.find("\r\n\r\n", pos);
+                std::size_t body_start = header_end + 4;
+                if (header_end == std::string_view::npos) {
+                    header_end = body.find("\n\n", pos);
+                    if (header_end == std::string_view::npos) break;
+                    body_start = header_end + 2;
+                }
+
+                std::string_view headers_part = body.substr(pos, header_end - pos);
+
+                // Find next boundary marking end of part body
+                std::size_t next_boundary = body.find(delimiter, body_start);
+                if (next_boundary == std::string_view::npos) {
+                    break;
+                }
+
+                // Trim trailing CRLF before next boundary
+                std::size_t part_end = next_boundary;
+                if (part_end >= 2 && body.substr(part_end - 2, 2) == "\r\n") {
+                    part_end -= 2;
+                } else if (part_end >= 1 && body[part_end - 1] == '\n') {
+                    part_end -= 1;
+                }
+
+                std::string_view part_body = body.substr(body_start, part_end - body_start);
+
+                // Parse Content-Disposition and Content-Type from headers_part
+                auto disposition = extract_header_value(headers_part, "Content-Disposition");
+                auto content_type = extract_header_value(headers_part, "Content-Type");
+
+                auto name = extract_parameter(disposition, "name");
+                auto filename = extract_parameter(disposition, "filename");
+
+                if (!name.empty()) {
+                    if (result.files_.size() + result.fields_.size() >= limits.max_parts) {
+                        result.valid_ = false;
+                        co_return result;
+                    }
+
+                    if (!filename.empty()) {
+                        if (result.files_.size() >= limits.max_files) {
+                            result.valid_ = false;
+                            co_return result;
+                        }
+
+                        if (part_body.size() > limits.max_file_size) {
+                            result.valid_ = false;
+                            co_return result;
+                        }
+
+                        UploadedFile file;
+                        file.name = std::string(name);
+                        file.filename = std::string(filename);
+                        file.content_type = content_type.empty() ? "application/octet-stream" : std::string(content_type);
+
+                        if (part_body.size() > limits.max_memory_buffer) {
+                            auto guard = std::make_shared<TempFileGuard>(TempFileGuard::create(limits.temp_dir));
+                            file.temp_file = guard;
+                            spool_tasks.push_back(detail::SpoolTask{guard, part_body});
+                        } else {
+                            file.data = part_body;
+                        }
+
+                        result.files_.push_back(std::move(file));
+                    } else {
+                        result.fields_.push_back(FormField{std::string(name), std::string(part_body)});
+                    }
+                }
+
+                pos = next_boundary + delimiter.size();
+            }
+
+            // If any files require disk spooling, execute writes concurrently on the BlockingThreadPool
+            if (!spool_tasks.empty()) {
+                auto state = std::make_shared<detail::BatchSpoolState>();
+                state->remaining.store(spool_tasks.size(), std::memory_order_relaxed);
+
+                co_await asio::async_initiate<const asio::use_awaitable_t<>&, void()>(
+                    [state, &spool_tasks](auto handler) {
+                        using HandlerType = std::decay_t<decltype(handler)>;
+                        auto executor = asio::get_associated_executor(handler);
+                        auto shared_handler = std::make_shared<HandlerType>(std::move(handler));
+                        auto &pool = server::BlockingThreadPool::instance();
+
+                        for (const auto &task : spool_tasks) {
+                            pool.dispatch([state, guard = task.guard, data = task.data, executor, shared_handler]() {
+                                std::ofstream ofs(guard->path(), std::ios::binary);
+                                const bool ok = ofs.is_open() &&
+                                    ofs.write(data.data(), static_cast<std::streamsize>(data.size())).good();
+                                if (!ok) {
+                                    state->success.store(false, std::memory_order_relaxed);
+                                }
+                                if (state->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                                    asio::post(executor, [shared_handler]() {
+                                        (*shared_handler)();
+                                    });
+                                }
+                            });
+                        }
+                    },
+                    asio::use_awaitable
+                );
+
+                if (!state->success.load(std::memory_order_acquire)) {
+                    result.valid_ = false;
+                }
+            }
+
+            co_return result;
         }
 
         // ── Client-Side Builder ─────────────────────────────────────────

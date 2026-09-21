@@ -110,7 +110,8 @@ namespace wavex {
 
         template<typename... Args>
         asio::awaitable<bool> process_all_async(Args &&... args) {
-            auto run_one = [&]<typename H>(H &h) -> asio::awaitable<bool> {
+            auto run_one = [&](auto &h) -> asio::awaitable<bool> {
+                using H = std::remove_cvref_t<decltype(h)>;
                 using Ret = std::remove_cvref_t<decltype(unwrap(h).handle(args...))>;
 
                 if constexpr (std::same_as<Ret, bool>) {

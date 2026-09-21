@@ -20,6 +20,11 @@
 #include <utility>
 #include <optional>
 
+#ifndef ASIO_HAS_CO_AWAIT
+#define ASIO_HAS_CO_AWAIT 1
+#endif
+#include <asio/awaitable.hpp>
+
 #include <wavex/Base/Request.hpp>
 #include <wavex/Base/Url.hpp>
 #include <wavex/Base/Uri.hpp>
@@ -311,6 +316,18 @@ namespace wavex::protos::http {
         [[nodiscard]] utils::MultipartFormData multipart(const utils::MultipartLimits &limits = {}) const {
             const auto ct = header_impl("Content-Type");
             return utils::MultipartFormData::parse(body_impl(), ct.value_or(""), limits);
+        }
+
+        /**
+         * @brief Asynchronously parses the multipart/form-data body according to RFC 7578.
+         * Offloads disk spooling for files > max_memory_buffer to the background blocking pool.
+         * @param limits Size and count thresholds for memory buffering and spooling.
+         * @return Awaitable yielding parsed MultipartFormData containing fields and uploaded files.
+         */
+        [[nodiscard]] asio::awaitable<utils::MultipartFormData> multipart_async(
+            const utils::MultipartLimits &limits = {}) const {
+            const auto ct = header_impl("Content-Type");
+            return utils::MultipartFormData::parse_async(body_impl(), ct.value_or(""), limits);
         }
 
         /**

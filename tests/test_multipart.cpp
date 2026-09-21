@@ -3,6 +3,10 @@
 #include <string>
 #include <vector>
 #include <filesystem>
+#include <asio/io_context.hpp>
+#include <asio/co_spawn.hpp>
+#include <asio/detached.hpp>
+#include <asio/use_awaitable.hpp>
 #include <wavex/Utils/Multipart.hpp>
 #include <wavex/protos/http/HttpRequest.hpp>
 
@@ -103,6 +107,123 @@ int main() {
     assert(all_files.size() == 1);
     assert(all_files[0].name == "avatar");
     std::cout << "  [PASS] HttpRequest multipart methods verified.\n";
+
+    // 6. Resource protection: Part and file count limits (DoS mitigation)
+    {
+        wavex::utils::MultipartFormData multi_part_form("---BoundaryCountLimits");
+        for (int i = 0; i < 5; ++i) {
+            multi_part_form.add_file("file" + std::to_string(i), "test" + std::to_string(i) + ".txt", "data");
+        }
+        std::string count_composed = multi_part_form.compose();
+        std::string count_ct = multi_part_form.content_type_header();
+
+        // Limit max_files = 3
+        wavex::utils::MultipartLimits file_limited;
+        file_limited.max_files = 3;
+        auto rejected_files = wavex::utils::MultipartFormData::parse(count_composed, count_ct, file_limited);
+        assert(!rejected_files.is_valid());
+
+        // Limit max_parts = 4
+        wavex::utils::MultipartLimits parts_limited;
+        parts_limited.max_parts = 4;
+        auto rejected_parts = wavex::utils::MultipartFormData::parse(count_composed, count_ct, parts_limited);
+        assert(!rejected_parts.is_valid());
+
+        // Limits generous -> accepted
+        wavex::utils::MultipartLimits ok_limits;
+        ok_limits.max_files = 10;
+        ok_limits.max_parts = 10;
+        auto accepted = wavex::utils::MultipartFormData::parse(count_composed, count_ct, ok_limits);
+        assert(accepted.is_valid());
+        assert(accepted.files().size() == 5);
+        std::cout << "  [PASS] Resource protection: max_files and max_parts ceilings verified.\n";
+    }
+
+    // 7. Async coroutine verification: parse_async, parallel spooling, HttpRequest async & save_to_async
+    {
+        asio::io_context io;
+        bool async_tests_passed = false;
+
+        asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+            // A. parse_async in-memory
+            auto async_parsed = co_await wavex::utils::MultipartFormData::parse_async(composed, content_type, in_mem_limits);
+            assert(async_parsed.is_valid());
+            assert(async_parsed.field("username") == "alice");
+            auto async_avatar = async_parsed.file("avatar");
+            assert(async_avatar.has_value());
+            assert(async_avatar->is_in_memory());
+            assert(async_avatar->size() == 22);
+
+            // B. save_to_async for in-memory file
+            std::filesystem::path in_mem_dest = std::filesystem::temp_directory_path() / "wavex_async_avatar_out.png";
+            if (std::filesystem::exists(in_mem_dest)) std::filesystem::remove(in_mem_dest);
+            bool in_mem_save_ok = co_await async_avatar->save_to_async(in_mem_dest);
+            assert(in_mem_save_ok);
+            assert(std::filesystem::exists(in_mem_dest));
+            assert(std::filesystem::file_size(in_mem_dest) == 22);
+            std::filesystem::remove(in_mem_dest);
+
+            // C. Multi-file parallel spooling via parse_async
+            wavex::utils::MultipartFormData multi_upload("---ParallelSpoolBoundary");
+            std::string payload1(3000, 'A');
+            std::string payload2(4000, 'B');
+            std::string payload3(5000, 'C');
+            multi_upload.add_file("photo1", "pic1.jpg", payload1, "image/jpeg");
+            multi_upload.add_file("photo2", "pic2.jpg", payload2, "image/jpeg");
+            multi_upload.add_file("photo3", "pic3.jpg", payload3, "image/jpeg");
+            multi_upload.add_field("album", "Summer 2026");
+
+            std::string multi_composed = multi_upload.compose();
+            std::string multi_ct = multi_upload.content_type_header();
+
+            wavex::utils::MultipartLimits parallel_limits;
+            parallel_limits.max_memory_buffer = 1000; // Force all 3 files to spool to disk in parallel
+
+            auto spooled_multi = co_await wavex::utils::MultipartFormData::parse_async(multi_composed, multi_ct, parallel_limits);
+            assert(spooled_multi.is_valid());
+            assert(spooled_multi.field("album") == "Summer 2026");
+            assert(spooled_multi.files().size() == 3);
+
+            auto f1 = spooled_multi.file("photo1");
+            auto f2 = spooled_multi.file("photo2");
+            auto f3 = spooled_multi.file("photo3");
+            assert(f1 && f1->is_on_disk() && f1->size() == 3000);
+            assert(f2 && f2->is_on_disk() && f2->size() == 4000);
+            assert(f3 && f3->is_on_disk() && f3->size() == 5000);
+
+            // D. save_to_async for disk-spooled file (atomic move)
+            std::filesystem::path spooled_async_dest = std::filesystem::temp_directory_path() / "wavex_async_spooled.bin";
+            if (std::filesystem::exists(spooled_async_dest)) std::filesystem::remove(spooled_async_dest);
+            bool spooled_save_ok = co_await f1->save_to_async(spooled_async_dest);
+            assert(spooled_save_ok);
+            assert(std::filesystem::exists(spooled_async_dest));
+            assert(std::filesystem::file_size(spooled_async_dest) == 3000);
+            std::filesystem::remove(spooled_async_dest);
+
+            // E. HttpRequest async methods
+            wavex::protos::http::Http1Request async_req;
+            async_req.set_header("Content-Type", multi_ct);
+            async_req.set_body(multi_composed);
+
+            auto req_form = co_await async_req.multipart_async(parallel_limits);
+            assert(req_form.is_valid());
+            assert(req_form.field("album") == "Summer 2026");
+
+            auto async_f2 = req_form.file("photo2");
+            assert(async_f2.has_value());
+            assert(async_f2->size() == 4000);
+
+            auto async_all = req_form.files();
+            assert(async_all.size() == 3);
+
+            async_tests_passed = true;
+            co_return;
+        }, asio::detached);
+
+        io.run();
+        assert(async_tests_passed);
+        std::cout << "  [PASS] Async parsing, parallel spooling, save_to_async, and HttpRequest async APIs verified.\n";
+    }
 
     std::cout << "[Test Multipart] All tests passed!\n";
     return 0;
