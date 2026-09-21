@@ -683,6 +683,50 @@ namespace wavex::server {
             }
         }
 
+        template<typename Stream>
+        static decltype(auto) get_stream_socket(Stream &s) noexcept {
+            if constexpr (requires { s.next_layer(); }) {
+                return s.next_layer();
+            } else {
+                return s;
+            }
+        }
+
+        /**
+         * @brief Half-close socket for sending and drain lingering inbound data before closing.
+         * Prevents TCP RST / ECONNRESET on client when closing with unread data in kernel receive buffer.
+         */
+        template<typename Stream>
+        static asio::awaitable<void> drain_and_abort(Stream &s) {
+            auto &sock = get_stream_socket(s);
+            asio::error_code ec;
+            std::ignore = sock.shutdown(asio::ip::tcp::socket::shutdown_send, ec);
+            if (ec) co_return;
+
+            char discard_buf[4096];
+            auto ex = co_await asio::this_coro::executor;
+            asio::steady_timer drain_timer(ex, std::chrono::milliseconds(200));
+            bool timed_out = false;
+            drain_timer.async_wait([&](const std::error_code timer_ec) {
+                if (!timer_ec) {
+                    timed_out = true;
+                    std::error_code cancel_ec;
+                    std::ignore = sock.cancel(cancel_ec);
+                }
+            });
+
+            while (!timed_out) {
+                auto [read_ec, bytes] = co_await sock.async_read_some(
+                    asio::buffer(discard_buf), asio::as_tuple(asio::use_awaitable));
+                if (read_ec || bytes == 0) {
+                    break;
+                }
+            }
+            std::error_code cancel_ec;
+            std::ignore = drain_timer.cancel(cancel_ec);
+            co_return;
+        }
+
         /**
          * @brief Unified connection handler — written once for every protocol and transport.
          */
@@ -722,6 +766,28 @@ namespace wavex::server {
                     }
                 }
             } conn_guard{*this, conn_id};
+
+            struct TransportGuard {
+                // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+                Stream &s;
+                bool closed{false};
+
+                // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+                explicit TransportGuard(Stream &stream) : s(stream) {}
+                ~TransportGuard() {
+                    close();
+                }
+
+                // ─── 4. Member Functions (LAST) ────────────────────────────────────
+                void close() noexcept {
+                    if (closed) return;
+                    closed = true;
+                    auto &sock = get_stream_socket(s);
+                    asio::error_code ec;
+                    std::ignore = sock.shutdown(asio::ip::tcp::socket::shutdown_send, ec);
+                    std::ignore = sock.close(ec);
+                }
+            } transport_guard{stream};
 
             std::string stream_buf;
             stream_buf.reserve(8192);
@@ -794,8 +860,14 @@ namespace wavex::server {
 
                         conn_tracker_.mark_active(conn_id);
 
-                        if (timed_out || read_ec == asio::error::operation_aborted) [[unlikely]] co_return;
-                        if (read_ec || bytes_read == 0) [[unlikely]] co_return;
+                        if (timed_out || read_ec == asio::error::operation_aborted) [[unlikely]] {
+                            co_await drain_and_abort(stream);
+                            co_return;
+                        }
+                        if (read_ec || bytes_read == 0) [[unlikely]] {
+                            // Peer closed or transport error — no bytes to drain, just exit
+                            co_return;
+                        }
 
                         stream_buf.append(buffer, bytes_read);
 
@@ -805,6 +877,7 @@ namespace wavex::server {
                             std::string err_wire = err_res.serialize();
                             co_await asio::async_write(stream, asio::buffer(err_wire),
                                                        asio::use_awaitable);
+                            co_await drain_and_abort(stream);
                             co_return;
                         }
 
@@ -819,6 +892,7 @@ namespace wavex::server {
                         std::string err_wire = err_res.serialize();
                         co_await asio::async_write(stream, asio::buffer(err_wire),
                                                    asio::use_awaitable);
+                        co_await drain_and_abort(stream);
                         co_return;
                     }
 
@@ -840,7 +914,10 @@ namespace wavex::server {
                             stream_buf.erase(0, stream_buf_consumed);
                             stream_buf_consumed = 0;
                         }
-                        if (!keep) break;
+                        if (!keep) {
+                            co_await drain_and_abort(stream);
+                            break;
+                        }
                         continue;
                     }
 
@@ -965,7 +1042,8 @@ namespace wavex::server {
                 wavex::log::trace("[Server] Connection closed or stream error: {}", e.what());
             }
 
-            // Graceful transport shutdown
+            // Graceful transport shutdown — drain any pipelined bytes the client sent
+            // while we were processing so the OS sends FIN not RST.
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
             if constexpr (requires { stream.async_shutdown(asio::use_awaitable); }) {
                 asio::error_code ignore_ec;
@@ -973,11 +1051,9 @@ namespace wavex::server {
             } else
 #endif
             {
-                asio::error_code ignore_ec;
-                std::ignore = stream.shutdown(asio::ip::tcp::socket::shutdown_send, ignore_ec);
+                co_await drain_and_abort(stream);
             }
-            asio::error_code ignore_ec;
-            std::ignore = stream.lowest_layer().close(ignore_ec);
+            transport_guard.close();
             co_return;
         }
 

@@ -970,7 +970,8 @@ namespace wavex::protos::http {
                     cursor += CONNECTION_PREFACE.size();
                 }
 
-                hpack::decoder dec(dt);
+                hpack::dynamic_table working_dt = dt;
+                hpack::decoder dec(working_dt);
 
                 std::vector<std::pair<std::string, std::string> > decoded_headers;
                 bool headers_received = false;
@@ -1083,6 +1084,7 @@ namespace wavex::protos::http {
                 req.body_storage = std::move(body_accumulator);
                 req.body = req.body_storage;
 
+                dt = std::move(working_dt);
                 bytes_consumed = cursor;
                 return result::success;
             }
@@ -1123,7 +1125,8 @@ namespace wavex::protos::http {
                 bytes_consumed = 0;
                 std::size_t cursor = 0;
 
-                hpack::decoder dec(dt);
+                hpack::dynamic_table working_dt = dt;
+                hpack::decoder dec(working_dt);
 
                 std::vector<std::pair<std::string, std::string> > decoded_headers;
                 bool headers_received = false;
@@ -1214,6 +1217,7 @@ namespace wavex::protos::http {
                 res.body_storage = std::move(body_accumulator);
                 res.body = res.body_storage;
 
+                dt = std::move(working_dt);
                 bytes_consumed = cursor;
                 return result::success;
             }
