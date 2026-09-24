@@ -27,8 +27,9 @@
 #include <utility>
 #include <memory>
 #include <optional>
-#include <filesystem>
-#include <fstream>
+#include <wavex/Utils/FsUtils.hpp>
+#include <wavex/Utils/BinaryFile.hpp>
+
 #include <chrono>
 #include <atomic>
 #include <functional>
@@ -85,8 +86,10 @@ namespace wavex::server {
             std::function<void()> close;
 
             Entry() = default;
+
             Entry(std::function<void()> c, std::function<void()> cl)
-                : cancel(std::move(c)), close(std::move(cl)) {}
+                : cancel(std::move(c)), close(std::move(cl)) {
+            }
         };
 
         // ─── 2. Member Variables (Arranged for minimum padding) ──────────────
@@ -97,6 +100,7 @@ namespace wavex::server {
 
         // ─── 3. Constructors & Destructor ────────────────────────────────────
         ConnectionTracker() = default;
+
         ~ConnectionTracker() = default;
 
         // ─── 4. Member Functions ─────────────────────────────────────────────
@@ -120,40 +124,38 @@ namespace wavex::server {
             }
         }
 
-        void mark_active(uint64_t id) {
+        void mark_active(const uint64_t id) {
             std::lock_guard lock(mtx);
             idle_sockets.erase(id);
         }
 
         void cancel_all_idle() {
-            std::vector<std::function<void()>> to_cancel;
-            {
+            std::vector<std::function<void()> > to_cancel; {
                 std::lock_guard lock(mtx);
                 to_cancel.reserve(idle_sockets.size());
-                for (uint64_t id : idle_sockets) {
+                for (uint64_t id: idle_sockets) {
                     if (auto it = all_sockets.find(id); it != all_sockets.end()) {
                         to_cancel.push_back(it->second.cancel);
                     }
                 }
                 idle_sockets.clear();
             }
-            for (auto &fn : to_cancel) {
+            for (auto &fn: to_cancel) {
                 if (fn) fn();
             }
         }
 
         void force_close_all() {
-            std::vector<std::function<void()>> to_close;
-            {
+            std::vector<std::function<void()> > to_close; {
                 std::lock_guard lock(mtx);
                 to_close.reserve(all_sockets.size());
-                for (auto &[id, entry] : all_sockets) {
+                for (auto &entry: all_sockets | std::views::values) {
                     to_close.push_back(entry.close);
                 }
                 all_sockets.clear();
                 idle_sockets.clear();
             }
-            for (auto &fn : to_close) {
+            for (auto &fn: to_close) {
                 if (fn) fn();
             }
         }
@@ -163,6 +165,7 @@ namespace wavex::server {
             return all_sockets.size();
         }
     };
+
     /**
      * @class Server
      * @brief Completely protocol-agnostic coroutine TCP/TLS server.
@@ -234,8 +237,11 @@ namespace wavex::server {
         }
 
         Server(const Server &) = delete;
+
         Server &operator=(const Server &) = delete;
+
         Server(Server &&) = delete;
+
         Server &operator=(Server &&) = delete;
 
         // ─── 4. Member Functions ─────────────────────────────────────────────
@@ -277,7 +283,8 @@ namespace wavex::server {
         /// Start master acceptor loop and run event loop
         void run() {
             ServerState expected = ServerState::Stopped;
-            if (!state_.compare_exchange_strong(expected, ServerState::Running, std::memory_order_acq_rel)) [[unlikely]] {
+            if (!state_.compare_exchange_strong(expected, ServerState::Running, std::memory_order_acq_rel)) [[unlikely]
+            ] {
                 std::cerr << "Critical: Duplicate run() invocation detected!\n";
                 return;
             }
@@ -376,7 +383,9 @@ namespace wavex::server {
 
         /// Immediately stop the server, force-close sockets, and stop thread pool
         void stop() {
-            if (is_stopped_.exchange(true, std::memory_order_acq_rel)) return;
+            if (is_stopped_.exchange(true, std::memory_order_acq_rel)) {
+                return;
+            }
             state_.store(ServerState::Stopped, std::memory_order_release);
             asio::error_code ec;
             acceptor_.close(ec);
@@ -509,8 +518,6 @@ namespace wavex::server {
             pool_.post_all([] { wavex::memory::get_thread_local_pool().release(); });
         }
 
-        using NotFoundHandler = std::function<asio::awaitable<void>(RequestType &, ResponseType &)>;
-
         /**
          * @brief Configures a custom coroutine handler for 404 Not Found responses on this server.
          * @param h Custom handler lambda or function.
@@ -540,16 +547,11 @@ namespace wavex::server {
          * @brief Configures a static file from disk for 404 Not Found responses on this server.
          * @param file_path Path to the error page file.
          */
-        void set_not_found_page(const std::filesystem::path &file_path) {
-            if (std::filesystem::exists(file_path)) {
-                std::ifstream file(file_path, std::ios::binary);
-                if (file) {
-                    std::string content((std::istreambuf_iterator<char>(file)),
-                                        std::istreambuf_iterator<char>());
-                    std::string mime = std::string(base::mime_type_from_path(file_path.string()));
-                    set_not_found(std::move(content), std::move(mime));
-                    return;
-                }
+        void set_not_found_page(const std::string &file_path) {
+            if (auto res = utils::BinaryFile::read_all(file_path)) {
+                auto mime = std::string(base::mime_type_from_path(file_path));
+                set_not_found(std::move(*res), std::move(mime));
+                return;
             }
             set_not_found("Not Found", "text/plain");
         }
@@ -625,22 +627,25 @@ namespace wavex::server {
             std::string cert_path = tls_config_.cert_file;
             std::string key_path = tls_config_.key_file;
 
-            if (!std::filesystem::exists(cert_path)) {
+            std::error_code ec;
+            if (!wavex::utils::fs_utils::exists(cert_path, ec)) {
 #ifdef PROJECT_DIR
                 std::string alt = std::string(PROJECT_DIR) + "/" + cert_path;
-                if (std::filesystem::exists(alt)) cert_path = alt;
+                if (wavex::utils::fs_utils::exists(alt, ec)) cert_path = alt;
 #endif
-                if (!std::filesystem::exists(cert_path) && std::filesystem::exists("../" + tls_config_.cert_file)) {
+                if (!wavex::utils::fs_utils::exists(cert_path, ec) && wavex::utils::fs_utils::exists(
+                        "../" + tls_config_.cert_file, ec)) {
                     cert_path = "../" + tls_config_.cert_file;
                 }
             }
 
-            if (!std::filesystem::exists(key_path)) {
+            if (!wavex::utils::fs_utils::exists(key_path, ec)) {
 #ifdef PROJECT_DIR
                 std::string alt = std::string(PROJECT_DIR) + "/" + key_path;
-                if (std::filesystem::exists(alt)) key_path = alt;
+                if (wavex::utils::fs_utils::exists(alt, ec)) key_path = alt;
 #endif
-                if (!std::filesystem::exists(key_path) && std::filesystem::exists("../" + tls_config_.key_file)) {
+                if (!wavex::utils::fs_utils::exists(key_path, ec) && wavex::utils::fs_utils::exists(
+                        "../" + tls_config_.key_file, ec)) {
                     key_path = "../" + tls_config_.key_file;
                 }
             }
@@ -695,35 +700,39 @@ namespace wavex::server {
         /**
          * @brief Half-close socket for sending and drain lingering inbound data before closing.
          * Prevents TCP RST / ECONNRESET on client when closing with unread data in kernel receive buffer.
+         *
+         * Trade-off: Uses a synchronous wall-clock deadline (std::chrono::steady_clock) rather than
+         * an asio::steady_timer to ensure zero pending async operations on the executor, eliminating
+         * Windows IOCP timer-thread deadlocks on shutdown. In the rare case of an active adversarial
+         * stream, this may occupy the worker thread for up to 200ms before hard-closing.
          */
         template<typename Stream>
         static asio::awaitable<void> drain_and_abort(Stream &s) {
             auto &sock = get_stream_socket(s);
             asio::error_code ec;
             std::ignore = sock.shutdown(asio::ip::tcp::socket::shutdown_send, ec);
-            if (ec) co_return;
+            if (ec || !sock.is_open()) co_return;
+
+            constexpr auto kDrainLimit = std::chrono::milliseconds(200);
+            constexpr std::size_t kMaxDrainBytes = 64 * 1024; // 64 KB cap
+            const auto deadline = std::chrono::steady_clock::now() + kDrainLimit;
 
             char discard_buf[4096];
-            auto ex = co_await asio::this_coro::executor;
-            asio::steady_timer drain_timer(ex, std::chrono::milliseconds(200));
-            bool timed_out = false;
-            drain_timer.async_wait([&](const std::error_code timer_ec) {
-                if (!timer_ec) {
-                    timed_out = true;
-                    std::error_code cancel_ec;
-                    std::ignore = sock.cancel(cancel_ec);
-                }
-            });
+            std::size_t total_drained = 0;
 
-            while (!timed_out) {
-                auto [read_ec, bytes] = co_await sock.async_read_some(
-                    asio::buffer(discard_buf), asio::as_tuple(asio::use_awaitable));
-                if (read_ec || bytes == 0) {
-                    break;
-                }
+            while (sock.is_open()) {
+                if (std::chrono::steady_clock::now() >= deadline) break;
+
+                std::size_t avail = sock.available(ec);
+                if (ec || avail == 0) break;
+
+                std::size_t to_read = std::min({avail, sizeof(discard_buf), kMaxDrainBytes - total_drained});
+                std::size_t n = sock.read_some(asio::buffer(discard_buf, to_read), ec);
+                if (ec || n == 0) break;
+
+                total_drained += n;
+                if (total_drained >= kMaxDrainBytes) break;
             }
-            std::error_code cancel_ec;
-            std::ignore = drain_timer.cancel(cancel_ec);
             co_return;
         }
 
@@ -755,6 +764,7 @@ namespace wavex::server {
             struct ConnectionGuard {
                 Server &srv;
                 uint64_t id;
+
                 ~ConnectionGuard() {
                     srv.conn_tracker_.unregister_socket(id);
                     if (srv.active_connections_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
@@ -773,7 +783,9 @@ namespace wavex::server {
                 bool closed{false};
 
                 // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
-                explicit TransportGuard(Stream &stream) : s(stream) {}
+                explicit TransportGuard(Stream &stream) : s(stream) {
+                }
+
                 ~TransportGuard() {
                     close();
                 }
@@ -817,7 +829,8 @@ namespace wavex::server {
 
                 unsigned request_count = 0;
                 while (state_.load(std::memory_order_acquire) != ServerState::Stopped) {
-                    if (state_.load(std::memory_order_acquire) == ServerState::ShuttingDown && stream_buf.empty()) [[unlikely]] {
+                    if (state_.load(std::memory_order_acquire) == ServerState::ShuttingDown && stream_buf.empty()) [[
+                        unlikely]] {
                         break;
                     }
 
@@ -826,8 +839,10 @@ namespace wavex::server {
                     RequestType req;
                     auto p_res = req.parse_stream(unconsumed, conn_ctx);
 
-                    while (p_res == Codec::result::incomplete && state_.load(std::memory_order_acquire) != ServerState::Stopped) {
-                        if (state_.load(std::memory_order_acquire) == ServerState::ShuttingDown && stream_buf.empty()) [[unlikely]] {
+                    while (p_res == Codec::result::incomplete && state_.load(std::memory_order_acquire) !=
+                           ServerState::Stopped) {
+                        if (state_.load(std::memory_order_acquire) == ServerState::ShuttingDown && stream_buf.empty()) [
+                            [unlikely]] {
                             co_return;
                         }
 
@@ -860,12 +875,7 @@ namespace wavex::server {
 
                         conn_tracker_.mark_active(conn_id);
 
-                        if (timed_out || read_ec == asio::error::operation_aborted) [[unlikely]] {
-                            co_await drain_and_abort(stream);
-                            co_return;
-                        }
-                        if (read_ec || bytes_read == 0) [[unlikely]] {
-                            // Peer closed or transport error — no bytes to drain, just exit
+                        if (timed_out || read_ec || bytes_read == 0) [[unlikely]] {
                             co_return;
                         }
 
@@ -987,7 +997,8 @@ namespace wavex::server {
                             co_await run_chain(req, res, match->middlewares, match->handler);
                         }
                     } catch (const std::exception &ex) {
-                        wavex::log::error("[Server] Unhandled exception in request handler for {}: {}", req.path(), ex.what());
+                        wavex::log::error("[Server] Unhandled exception in request handler for {}: {}", req.path(),
+                                          ex.what());
                         if (!res.is_headers_sent()) {
                             res.status(500);
                             if constexpr (requires { res.set("Content-Type", "text/plain"); }) {

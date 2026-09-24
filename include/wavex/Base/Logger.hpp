@@ -18,15 +18,14 @@
 #include <string>
 #include <string_view>
 #include <iostream>
-#include <fstream>
+#include <wavex/Utils/BinaryFile.hpp>
 #include <mutex>
 #include <optional>
 #include <format>
 #include <chrono>
-#include <thread>
 #include <source_location>
 #include <cstdlib>
-#include <filesystem>
+
 #include <type_traits>
 
 // Windows SDK headers (pulled in via ASIO/winsock) define these names as macros.
@@ -91,7 +90,7 @@ namespace wavex::base {
         }
     }
 
-    constexpr std::string_view ansi_reset = "\033[0m";
+    inline constexpr std::string_view ansi_reset = "\033[0m";
 
     /**
      * @class Logger
@@ -100,7 +99,7 @@ namespace wavex::base {
     class Logger {
     private:
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
-        std::optional<std::ofstream> file_sink_{};
+        std::optional<wavex::utils::BinaryFile> file_sink_{};
         std::mutex mutex_{};
         std::ostream *sink_{&std::cerr};
         LogLevel min_level_{LogLevel::INFO};
@@ -112,9 +111,13 @@ namespace wavex::base {
 
     public:
         ~Logger() = default;
+
         Logger(const Logger &) = delete;
+
         Logger &operator=(const Logger &) = delete;
+
         Logger(Logger &&) = delete;
+
         Logger &operator=(Logger &&) = delete;
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
@@ -144,11 +147,12 @@ namespace wavex::base {
         }
 
         /// Direct output to a file
-        void set_output(const std::filesystem::path &path = "./logs/wavex.log") {
+        void set_output(const std::string &path = "./logs/wavex.log") {
             std::lock_guard lock(mutex_);
-            file_sink_.emplace(path, std::ios::app);
+            wavex::utils::BinaryFile::write_all(path, "", true); // Ensure dirs exist
+            file_sink_.emplace(path, wavex::utils::FileMode::Append);
             if (file_sink_->is_open()) {
-                sink_ = &*file_sink_;
+                sink_ = nullptr;
             }
         }
 
@@ -196,56 +200,11 @@ namespace wavex::base {
         }
 
     private:
-        static std::string_view extract_filename(std::string_view filepath) {
-            auto pos = filepath.find_last_of("/\\");
-            return (pos == std::string_view::npos) ? filepath : filepath.substr(pos + 1);
-        }
+        static std::string_view extract_filename(std::string_view filepath);
 
-        void write_loc(const LogLevel lvl, const std::source_location &loc, std::string_view msg) {
-            const auto now = std::chrono::system_clock::now();
-            auto time = std::chrono::floor<std::chrono::milliseconds>(now);
-            auto tid = std::this_thread::get_id();
-            auto filename = extract_filename(loc.file_name());
+        void write_loc(LogLevel lvl, const std::source_location &loc, std::string_view msg);
 
-            std::string line;
-            if (colored_ && !file_sink_.has_value()) {
-                // Format: [2026-06-13 15:30:05.123] [INFO ] [tid:1234] [file.cpp:42] message
-                line = std::format("{}[{}] [{}] [tid:{}] [{}:{}] {}{}\n",
-                                   log_level_color(lvl),
-                                   time, log_level_tag(lvl), tid,
-                                   filename, loc.line(),
-                                   msg, ansi_reset);
-            } else {
-                line = std::format("[{}] [{}] [tid:{}] [{}:{}] {}\n",
-                                   time, log_level_tag(lvl), tid,
-                                   filename, loc.line(), msg);
-            }
-
-            std::lock_guard lock(mutex_);
-            (*sink_) << line;
-            sink_->flush();
-        }
-
-        void write(const LogLevel lvl, std::string_view msg) {
-            const auto now = std::chrono::system_clock::now();
-            auto time = std::chrono::floor<std::chrono::milliseconds>(now);
-            auto tid = std::this_thread::get_id();
-
-            std::string line;
-            if (colored_ && !file_sink_.has_value()) {
-                line = std::format("{}[{}] [{}] [tid:{}] {}{}\n",
-                                   log_level_color(lvl),
-                                   time, log_level_tag(lvl), tid,
-                                   msg, ansi_reset);
-            } else {
-                line = std::format("[{}] [{}] [tid:{}] {}\n",
-                                   time, log_level_tag(lvl), tid, msg);
-            }
-
-            std::lock_guard lock(mutex_);
-            (*sink_) << line;
-            sink_->flush();
-        }
+        void write(LogLevel lvl, std::string_view msg);
     };
 } // namespace wavex::base
 
@@ -274,13 +233,13 @@ namespace wavex::log {
         std::source_location loc;
 
         template<typename T>
-            requires std::constructible_from < std::format_string < Args
+            requires std::constructible_from<std::format_string<Args
 
-        ...
-        >
-        ,
-        T
-        >
+                    ...
+                >
+                ,
+                T
+            >
         consteval format_with_loc(const T &s, std::source_location l = std::source_location::current())
             : fmt(s), loc(l) {
         }

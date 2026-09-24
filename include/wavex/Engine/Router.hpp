@@ -21,7 +21,7 @@
  * module imports according to the C++ standard ODR rules.
  *
  * Performance notes (resolve() hot path):
- *  - Path normalisation is allocation-free when the incoming path is already
+ *  - Path normalization is allocation-free when the incoming path is already
  *    well-formed (leading '/', no trailing '/'), which is the common case for
  *    paths coming straight off an HTTP request line.
  *  - Segments are std::string_view slices into the (possibly caller-owned)
@@ -47,8 +47,7 @@
 #include <memory>
 #include <functional>
 #include <algorithm>
-#include <filesystem>
-#include <fstream>
+#include <wavex/Utils/BinaryFile.hpp>
 #include <array>
 #include <span>
 
@@ -103,12 +102,20 @@ namespace wavex::engine {
 
             // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
             RouteMatch() = default;
-            RouteMatch(Handler h, std::span<const MiddlewareFn> mws, base::FlatMap<std::string_view, std::string_view> p)
-                : handler(std::move(h)), middlewares(mws), params(std::move(p)) {}
+
+            RouteMatch(Handler h, std::span<const MiddlewareFn> mws,
+                       base::FlatMap<std::string_view, std::string_view> p)
+                : handler(std::move(h)), middlewares(mws), params(std::move(p)) {
+            }
+
             ~RouteMatch() = default;
+
             RouteMatch(const RouteMatch &) = default;
+
             RouteMatch &operator=(const RouteMatch &) = default;
+
             RouteMatch(RouteMatch &&) noexcept = default;
+
             RouteMatch &operator=(RouteMatch &&) noexcept = default;
         };
 
@@ -123,12 +130,19 @@ namespace wavex::engine {
 
             // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
             ScopedMiddleware() = default;
+
             ScopedMiddleware(std::string p, MiddlewareFn f)
-                : prefix(std::move(p)), fn(std::move(f)) {}
+                : prefix(std::move(p)), fn(std::move(f)) {
+            }
+
             ~ScopedMiddleware() = default;
+
             ScopedMiddleware(const ScopedMiddleware &) = default;
+
             ScopedMiddleware &operator=(const ScopedMiddleware &) = default;
+
             ScopedMiddleware(ScopedMiddleware &&) noexcept = default;
+
             ScopedMiddleware &operator=(ScopedMiddleware &&) noexcept = default;
         };
 
@@ -142,15 +156,15 @@ namespace wavex::engine {
         struct Node {
             // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
             std::unordered_map<MethodType, Handler> handlers{};
-            std::unordered_map<MethodType, std::vector<MiddlewareFn>> route_middlewares{};
+            std::unordered_map<MethodType, std::vector<MiddlewareFn> > route_middlewares{};
             /// Pre-compiled, immutable middleware chain for this node keyed by method:
             /// [global] -> [prefix-scoped] -> [per-route] middlewares.
             /// Built during freeze(). resolve() returns a std::span into this vector
             /// — zero heap allocation, zero std::function copies per request.
-            std::unordered_map<MethodType, std::vector<MiddlewareFn>> compiled_middlewares{};
+            std::unordered_map<MethodType, std::vector<MiddlewareFn> > compiled_middlewares{};
             std::unordered_map<std::string_view, Node *> static_index{};
-            std::vector<std::unique_ptr<Node>> children{}; // static children (ownership)
-            std::vector<std::unique_ptr<Node>> param_children{}; // dynamic/regex children
+            std::vector<std::unique_ptr<Node> > children{}; // static children (ownership)
+            std::vector<std::unique_ptr<Node> > param_children{}; // dynamic/regex children
             std::string prefix{}; // segment label for static nodes
             std::string pattern{}; // original regex pattern string
             std::string param_name{}; // extracted parameter name
@@ -160,20 +174,27 @@ namespace wavex::engine {
 
             // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
             Node() = default;
+
             ~Node() = default;
+
             Node(const Node &) = delete;
+
             Node &operator=(const Node &) = delete;
+
             Node(Node &&) noexcept = default;
+
             Node &operator=(Node &&) noexcept = default;
         };
 
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
         // Cache of compiled RE2 constraints keyed by pattern text.
-        std::unordered_map<std::string, std::shared_ptr<re2::RE2>> regex_cache_{};
-        NotFoundHandler not_found_handler_{[](RequestType &, ResponseType &res) -> asio::awaitable<void> {
-            res.status(404).send("Not Found");
-            co_return;
-        }};
+        std::unordered_map<std::string, std::shared_ptr<re2::RE2> > regex_cache_{};
+        NotFoundHandler not_found_handler_{
+            [](RequestType &, ResponseType &res) -> asio::awaitable<void> {
+                res.status(404).send("Not Found");
+                co_return;
+            }
+        };
         std::vector<ScopedMiddleware> middlewares_{};
         std::unique_ptr<Node> root_{};
         mutable bool frozen_{false}; ///< set by freeze(); resolve() uses pre-compiled chains when true
@@ -189,9 +210,13 @@ namespace wavex::engine {
         }
 
         ~Router() = default;
+
         Router(const Router &) = delete;
+
         Router &operator=(const Router &) = delete;
+
         Router(Router &&) noexcept = default;
+
         Router &operator=(Router &&) noexcept = default;
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
@@ -249,7 +274,7 @@ namespace wavex::engine {
          */
         void route(MethodType m, const std::string_view pattern,
                    std::vector<MiddlewareFn> mws, Handler h) {
-            // Normalise + split without allocating for the common case of an
+            // Normalize + split without allocating for the common case of an
             // already-well-formed literal pattern (e.g. "/api/users/:id").
             // `insert_segment` only allocates an owned std::string when it
             // actually needs to create a *new* node — matching an existing
@@ -298,7 +323,7 @@ namespace wavex::engine {
 
         /**
          * @brief Registers a scoped middleware, applied only to routes whose
-         *        normalised path starts with `prefix`.
+         *        normalized path starts with `prefix`.
          * @param prefix Path prefix to scope the middleware to; empty behaves
          *        like the global overload.
          * @param mw Middleware function to add to the chain.
@@ -375,16 +400,11 @@ namespace wavex::engine {
          *
          * @param file_path Path to the error page file.
          */
-        void not_found_page(const std::filesystem::path &file_path) {
-            if (std::filesystem::exists(file_path)) {
-                std::ifstream file(file_path, std::ios::binary);
-                if (file) {
-                    std::string content((std::istreambuf_iterator<char>(file)),
-                                        std::istreambuf_iterator<char>());
-                    std::string mime = std::string(base::mime_type_from_path(file_path.string()));
-                    not_found(std::move(content), std::move(mime));
-                    return;
-                }
+        void not_found_page(const std::string &file_path) {
+            if (auto res = wavex::utils::BinaryFile::read_all(file_path)) {
+                auto mime = std::string(base::mime_type_from_path(file_path));
+                not_found(std::move(*res), std::move(mime));
+                return;
             }
             not_found("Not Found", "text/plain");
         }
@@ -428,7 +448,7 @@ namespace wavex::engine {
         /**
          * @brief Resolves a method + path to a registered handler.
          * @param m Method to look up.
-         * @param path Request path to resolve; need not be pre-normalised.
+         * @param path Request path to resolve; need not be pre-normalized.
          * @return A RouteMatch (handler, resolved params, and the full ordered
          *         middleware chain as a std::span) on success, or std::nullopt
          *         if no route matches.
@@ -439,7 +459,7 @@ namespace wavex::engine {
             }
 
             // `scratch` only actually allocates when `path` isn't already
-            // normalised (no leading '/', or a trailing '/'); the common
+            // normalized (no leading '/', or a trailing '/'); the common
             // case coming off a parsed HTTP request line needs no copy.
             std::string scratch;
             const std::string_view normalized = normalize_path_view(path, scratch);
@@ -496,8 +516,6 @@ namespace wavex::engine {
             };
         }
 
-
-
     private:
         // ---------------------------------------------------------------
         //  Middleware chain compilation (called once by freeze())
@@ -551,9 +569,9 @@ namespace wavex::engine {
         // ---------------------------------------------------------------
 
         /**
-         * @brief Normalises a path into an owned string: ensures a leading
+         * @brief Normalizes a path into an owned string: ensures a leading
          *        '/' and strips any trailing '/'.
-         * @param path Path to normalise.
+         * @param path Path to normalize.
          * @return Owned, normalized copy of `path`.
          */
         static std::string normalize_path(const std::string_view path) {
@@ -566,12 +584,12 @@ namespace wavex::engine {
 
         // ---------------------------------------------------------------
         //  Path utilities — shared by registration and resolve(): allocation-
-        //  free normalisation when possible, string_view segments (no "per-
-        //  segment" heap allocation). Used by both route() and resolve().
+        //  free normalization when possible, string_view segments (no "per-segment"
+        //  heap allocation). Used by both route() and resolve().
         // ---------------------------------------------------------------
 
         /**
-         * @brief Normalises `path`, writing into `scratch` only if needed,
+         * @brief Normalizes `path`, writing into `scratch` only if needed,
          *        and returns a view of the result.
          *
          * `scratch` is owned by the caller so the returned view is valid for
@@ -582,10 +600,10 @@ namespace wavex::engine {
          * thread-local scratch pool) — it never relies on the caller having
          * passed in an empty string.
          *
-         * @param path Path to normalise; need not already be well-formed.
+         * @param path Path to normalize; need not already be well-formed.
          * @param scratch Caller-owned buffer used only if `path` isn't
-         *        already normalised (no leading '/', or has a trailing '/').
-         * @return A view of the normalised path — either `path` unchanged
+         *        already normalized (no leading '/', or has a trailing '/').
+         * @return A view of the normalized path — either `path` unchanged
          *         (zero-copy fast path) or `scratch`.
          */
         [[nodiscard]] static std::string_view normalize_path_view(const std::string_view path, std::string &scratch) {
@@ -596,7 +614,7 @@ namespace wavex::engine {
 
             if (!needs_front && !needs_trim) [[likely]] {
                 // ReSharper disable once CppDFALocalValueEscapesFunction
-                return path; // zero-copy: caller's buffer is already normalised
+                return path; // zero-copy: caller's buffer is already normalized
             }
 
             scratch.clear();
@@ -610,8 +628,8 @@ namespace wavex::engine {
         }
 
         /**
-         * @brief Splits an already-normalised path into segment views.
-         * @param path Normalized path (see normalise_path_view()).
+         * @brief Splits an already-normalized path into segment views.
+         * @param path Normalized path (see normalize_path_view()).
          * @return Segments as views into `path`; empty for "/" or an empty path.
          */
         [[nodiscard]] static std::vector<std::string_view> split_path_view(std::string_view path) {
@@ -636,7 +654,7 @@ namespace wavex::engine {
         //  Tree insertion (registration-time, but startup-cost-sensitive
         //  for large route tables). `segment` is a view — no allocation
         //  happens on the (common) path where it matches an existing
-        //  child; a std::string is only materialised when a genuinely new
+        //  child; a std::string is only materialized when a genuinely new
         //  node needs to own its label/param name/pattern.
         // ---------------------------------------------------------------
 
@@ -645,7 +663,7 @@ namespace wavex::engine {
          *
          * `segment` is a view — no allocation happens on the common path
          * where it matches an existing child; a std::string is only
-         * materialised when a genuinely new node needs to own its
+         * materialized when a genuinely new node needs to own its
          * label/param name/pattern.
          *
          * @param parent Node to insert under.
@@ -757,8 +775,9 @@ namespace wavex::engine {
                                  const std::span<const std::string_view> &segments,
                                  const size_t depth,
                                  base::FlatMap<std::string_view, std::string_view> &params) const {
-            [[assume(depth <= segments.size())]];
-            if (depth == segments.size()) {
+            const size_t seg_count = segments.size();
+            [[assume(depth <= seg_count)]];
+            if (depth == seg_count) {
                 if (!node->handlers.empty()) return node;
                 return nullptr;
             }

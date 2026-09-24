@@ -12,6 +12,7 @@
 #include <iostream>
 #include <memory_resource>
 #include <string>
+#include <cstring>
 
 namespace {
     int tests_run{0};

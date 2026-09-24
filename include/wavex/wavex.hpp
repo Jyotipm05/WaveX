@@ -13,6 +13,7 @@
 
 #pragma once
 
+#include <wavex/Version.hpp>
 #include <wavex/Base/Logger.hpp>
 #include <wavex/Base/Chainable.hpp>
 #include <wavex/Base/MimeTypes.hpp>
@@ -27,20 +28,3 @@
 #include <wavex/CLI/CLI.hpp>
 #include <wavex/Async/SpawnBlocking.hpp>
 #include <wavex/Utils/Utils.hpp>
-
-/**
- * @brief Macro representing the current version of the WaveX framework.
- */
-// #define wx_version "@PROJECT_VERSION@"
-inline std::string_view wx_version = "@PROJECT_VERSION@";
-
-/**
- * @namespace wavex
- * @brief The main namespace for all WaveX classes, functions, and symbols.
- */
-namespace wavex {
-    /**
-     * @brief Prints the current version of the WaveX library/framework to standard output.
-     */
-    void _version();
-}

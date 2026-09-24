@@ -2,8 +2,14 @@
   "name": "wavex",
   "version": "0.0.0",
   "dependencies": [
-    "vcpkg-cmake-config",
-    "vcpkg-cmake",
+    {
+      "name": "vcpkg-cmake",
+      "host": true
+    },
+    {
+      "name": "vcpkg-cmake-config",
+      "host": true
+    },
     "asio",
     "nlohmann-json",
     "re2",

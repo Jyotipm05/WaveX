@@ -9,17 +9,19 @@
  *        domainless IPv4/IPv6 client endpoints, and query parameter handling.
  */
 
-#include <coroutine>
 #include <utility>
 #include <vector>
 #include <string>
 #include <string_view>
 #include <charconv>
 #include <algorithm>
-#include <cctype>
 
 #include <wavex/Client/HttpClient.hpp>
 #include <wavex/protos/http/http2codec.hpp>
+#include <wavex/Utils/BinaryFile.hpp>
+#include <wavex/Utils/FsUtils.hpp>
+#include <wavex/Utils/Compression.hpp>
+#include <wavex/Base/MimeTypes.hpp>
 #include <asio/write.hpp>
 #include <asio/connect.hpp>
 #include <asio/redirect_error.hpp>
@@ -49,7 +51,6 @@ namespace wavex::client {
             const std::string &host_header,
             const ClientRequest &req,
             const std::string &path_target) {
-
             ClientResponse res;
             res.http_version(HttpVersion::Http1_1);
 
@@ -166,7 +167,6 @@ namespace wavex::client {
             const std::string &host_header,
             const ClientRequest &req,
             const std::string &path_target) {
-
             namespace h2 = protos::http::http2;
 
             ClientResponse res;
@@ -487,14 +487,19 @@ namespace wavex::client {
                 unsigned char alpn_protos[32];
                 unsigned int alpn_len = 0;
                 if (options.version == HttpVersion::Http2) {
-                    alpn_protos[0] = 2; alpn_protos[1] = 'h'; alpn_protos[2] = '2';
+                    alpn_protos[0] = 2;
+                    alpn_protos[1] = 'h';
+                    alpn_protos[2] = '2';
                     alpn_len = 3;
                 } else if (options.version == HttpVersion::Http1_1) {
                     alpn_protos[0] = 8;
                     std::memcpy(&alpn_protos[1], "http/1.1", 8);
                     alpn_len = 9;
-                } else { // Auto
-                    alpn_protos[0] = 2; alpn_protos[1] = 'h'; alpn_protos[2] = '2';
+                } else {
+                    // Auto
+                    alpn_protos[0] = 2;
+                    alpn_protos[1] = 'h';
+                    alpn_protos[2] = '2';
                     alpn_protos[3] = 8;
                     std::memcpy(&alpn_protos[4], "http/1.1", 8);
                     alpn_len = 12;
@@ -594,5 +599,128 @@ namespace wavex::client {
         }
 
         co_return res;
+    }
+
+    // ── ClientRequest Methods ───────────────────────────────────────────────
+
+    ClientRequest &ClientRequest::set_header(const std::string_view key, const std::string_view value) {
+        for (auto &[k, v]: headers_) {
+            if (detail_case_equal(k, key)) {
+                v = std::string(value);
+                return *this;
+            }
+        }
+        headers_.emplace_back(std::string(key), std::string(value));
+        return *this;
+    }
+
+    std::optional<std::string_view> ClientRequest::header(const std::string_view key) const noexcept {
+        for (const auto &[k, v]: headers_) {
+            if (detail_case_equal(k, key)) return v;
+        }
+        return std::nullopt;
+    }
+
+    ClientRequest &ClientRequest::set_body(const std::string_view body, const std::string_view content_type) {
+        body_ = std::string(body);
+        if (!content_type.empty()) {
+            set_header("Content-Type", content_type);
+        }
+        return *this;
+    }
+
+    ClientRequest &ClientRequest::json(const nlohmann::json &j) {
+        body_ = j.dump();
+        set_header("Content-Type", "application/json");
+        return *this;
+    }
+
+    ClientRequest &ClientRequest::multipart(const utils::MultipartFormData &form) {
+        body_ = form.compose();
+        set_header("Content-Type", form.content_type_header());
+        return *this;
+    }
+
+    ClientRequest &ClientRequest::add_field(const std::string_view name, const std::string_view value) {
+        multipart_builder_.add_field(name, value);
+        return multipart(multipart_builder_);
+    }
+
+    ClientRequest &ClientRequest::add_file(const std::string_view name,
+                                           const std::string_view filename,
+                                           const std::string_view data,
+                                           const std::string_view content_type) {
+        std::string ct(content_type);
+        if (ct.empty()) {
+            ct = std::string(base::mime_type_from_path(filename));
+        }
+        multipart_builder_.add_file(name, filename, data, ct);
+        return multipart(multipart_builder_);
+    }
+
+    ClientRequest &ClientRequest::add_file_from_path(const std::string_view name,
+                                                     const std::string &filepath,
+                                                     const std::string_view content_type) {
+        if (auto res = wavex::utils::BinaryFile::read_all(filepath)) {
+            std::string &content = *res;
+            std::string filename = wavex::utils::fs_utils::filename(filepath);
+            std::string ct(content_type);
+            if (ct.empty()) {
+                ct = std::string(base::mime_type_from_path(filepath));
+            }
+            multipart_builder_.add_file(name, filename, content, ct);
+            multipart(multipart_builder_);
+        }
+        return *this;
+    }
+
+    ClientRequest &ClientRequest::file_body(const std::string &filepath,
+                                            const std::string_view content_type) {
+        if (auto res = wavex::utils::BinaryFile::read_all(filepath)) {
+            body_ = std::move(*res);
+            std::string ct(content_type);
+            if (ct.empty()) {
+                ct = std::string(base::mime_type_from_path(filepath));
+            }
+            set_header("Content-Type", ct);
+        }
+        return *this;
+    }
+
+    ClientRequest &ClientRequest::compress(const utils::CompressionFormat format) {
+        if (auto compressed = utils::Compressor::compress(body_, format); compressed.has_value()) {
+            body_ = std::move(*compressed);
+            set_header("Content-Encoding",
+                       format == utils::CompressionFormat::Gzip ? "gzip" : "deflate");
+        }
+        return *this;
+    }
+
+    // ── ClientResponse Methods ──────────────────────────────────────────────
+
+    nlohmann::json ClientResponse::json() const {
+        return nlohmann::json::parse(body_);
+    }
+
+    std::optional<std::string> ClientResponse::decompressed_body(
+        const utils::CompressionFormat format) const {
+        auto decompress_helper = [](const std::string_view d,
+                                    const utils::CompressionFormat fmt) -> std::optional<std::string> {
+            if (auto res = utils::Compressor::decompress(d, fmt)) return *res;
+            return std::nullopt;
+        };
+        if (const auto enc = header("Content-Encoding"); enc.has_value()) {
+            if (enc->find("gzip") != std::string_view::npos) {
+                return decompress_helper(body_, utils::CompressionFormat::Gzip);
+            }
+            if (enc->find("deflate") != std::string_view::npos) {
+                return decompress_helper(body_, utils::CompressionFormat::Deflate);
+            }
+        }
+        return decompress_helper(body_, format);
+    }
+
+    bool ClientResponse::save_to_file(const std::string &dest_path) const {
+        return wavex::utils::BinaryFile::write_all(dest_path, body_);
     }
 } // namespace wavex::client

@@ -20,8 +20,6 @@ module;
 // outside this translation unit but their declarations are available
 // to the module body below.
 #define ASIO_HAS_CO_AWAIT 1
-#include <functional>
-#include <asio/awaitable.hpp>
 #include <wavex/Base/FlatMap.hpp>
 #include <wavex/Base/Event.hpp>
 #include <wavex/Base/Memory.hpp>
@@ -46,15 +44,8 @@ export namespace wavex::base {
     using base::mime_type_from_ext;
     using base::mime_type_from_path;
 
-    /// Callable that invokes the next middleware or the final handler.
-    using Next = std::function<asio::awaitable<void>()>;
-
-    /**
-     * @brief Generic middleware function signature for CRTP Request and Response types.
-     */
-    template<typename ReqT, typename ResT>
-    using GenericMiddlewareFn = std::function<asio::awaitable<void>(ReqT &, ResT &, Next)>;
-
+    using base::Next;
+    using base::GenericMiddlewareFn;
     using base::keep_alive;
     using base::sse_stay_active;
     using base::body_limit;

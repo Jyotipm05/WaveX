@@ -51,7 +51,7 @@ WaveX draws inspiration from **Rust's Actix Web** (hybrid radix-tree routing), *
 
 The absolute simplest WaveX server in under 15 lines of code:
 
-```cpp
+```c++
 #include <wavex/wavex.hpp>
 
 int main() {
@@ -76,7 +76,7 @@ int main() {
 
 Returning structured JSON and reading dynamic path parameters (`:name`):
 
-```cpp
+```c++
 #include <wavex/wavex.hpp>
 
 int main() {
@@ -110,7 +110,7 @@ int main() {
 
 WaveX provides native HTTP/2 server support via `Http2Server` and `Http2Router`, implementing RFC 7540 binary framing and RFC 7541 HPACK header compression:
 
-```cpp
+```c++
 #include <wavex/wavex.hpp>
 
 int main() {
@@ -142,7 +142,7 @@ int main() {
 
 ### 4. Full HTTP Server & Coroutine Middleware
 
-```cpp
+```c++
 #include <iostream>
 #include <wavex/wavex.hpp>
 
@@ -197,7 +197,7 @@ int main() {
 
 Zero-macro, high-performance logging with automatic `std::source_location` call-site capture and ANSI terminal colors:
 
-```cpp
+```c++
 #include <wavex/Base/Logger.hpp>
 
 int main() {
@@ -225,7 +225,7 @@ int main() {
 
 Build compile-time static dispatch pipelines without vtables or dynamic heap allocations using `StaticChain` and `make_chain`:
 
-```cpp
+```c++
 #include <wavex/Base/Chainable.hpp>
 #include <wavex/Engine/HttpRouter.hpp>
 #include <iostream>
@@ -271,7 +271,7 @@ int main() {
 
 WaveX provides a protocol-agnostic, coroutine-native HTTP client (`HttpClient`) supporting ALPN auto-negotiation, cleartext `h2c`, TLS 1.3 `h2`, domainless IPv4/IPv6 endpoints, query parameter builders, and multi-payload posting:
 
-```cpp
+```c++
 #include <iostream>
 #include <asio.hpp>
 #include <wavex/wavex.hpp>
@@ -309,7 +309,7 @@ asio::awaitable<void> run_client_examples() {
 
 ### 8. Command-Line Interface (CLI) Engine
 
-```cpp
+```c++
 #include <wavex/Cli/Cli.hpp>
 #include <iostream>
 
@@ -343,7 +343,7 @@ int main(int argc, char* argv[]) {
 
 Enable strict TLS 1.3 HTTPS server encryption using `server.enable_tls()` with custom certificate/key paths or a `wavex::server::TlsConfig` struct:
 
-```cpp
+```c++
 #include <wavex/wavex.hpp>
 #include <wavex/Server/TlsConfig.hpp>
 
@@ -384,7 +384,7 @@ WaveX natively supports RFC 7230 / RFC 9112 persistent connections (`Keep-Alive`
 
 Configure idle timeout thresholds and sequential request limits per persistent connection directly on `Server`:
 
-```cpp
+```c++
 wavex::server::Http1Server server(router, "0.0.0.0", 8080);
 
 // Inactivity timeout: close socket if client is idle for > 10 seconds
@@ -400,7 +400,7 @@ server.run();
 
 Control keep-alive persistence dynamically in route handlers:
 
-```cpp
+```c++
 router.get("/stream", [](auto &, auto &res) -> asio::awaitable<void> {
     // Advertise keep-alive with custom timeout (seconds) and remaining request count
     res.set_keep_alive(true, /*timeout_sec=*/15, /*max_requests=*/200);
@@ -420,7 +420,7 @@ router.get("/logout", [](auto &, auto &res) -> asio::awaitable<void> {
 
 Use compile-time static chain policies or dynamic middlewares:
 
-```cpp
+```c++
 // 1. StaticChain KeepAlivePolicy (zero runtime overhead)
 router.get("/api/fast", wavex::make_chain(wavex::KeepAlivePolicy<10, 1000>{}, MyHandler{}));
 
@@ -437,7 +437,7 @@ By default, any unmatched route automatically responds with HTTP status 404 and 
 
 #### Option A: Custom String, HTML, or JSON
 
-```cpp
+```c++
 // Custom plain text or HTML on Router
 router.not_found("<h1>404 - Page Not Found</h1>", "text/html");
 
@@ -447,7 +447,7 @@ server.set_not_found("Custom 404 text", "text/plain");
 
 #### Option B: Load Error Page from File (Auto-MIME Detection)
 
-```cpp
+```c++
 // Reads static file from disk and infers Content-Type via wavex::base::mime_type_from_path
 router.not_found_page("public/404.html");
 
@@ -457,7 +457,7 @@ server.set_not_found_page("public/404.html");
 
 #### Option C: Full Dynamic Coroutine Handler
 
-```cpp
+```c++
 router.not_found([](auto &req, auto &res) -> asio::awaitable<void> {
     nlohmann::json j = {
         {"error", "Not Found"},
@@ -473,7 +473,7 @@ router.not_found([](auto &req, auto &res) -> asio::awaitable<void> {
 
 WaveX fully supports C++23 module imports for ultra-fast compilation:
 
-```cpp
+```c++
 import wavex;
 #include <iostream>
 
@@ -487,7 +487,7 @@ int main() {
 
 Express- and Fastify-compatible redirections with zero boilerplate:
 
-```cpp
+```c++
 #include <wavex/wavex.hpp>
 
 int main() {
@@ -527,7 +527,7 @@ int main() {
 
 Parse uploaded files and form fields with transparent in-memory and disk spooling thresholds:
 
-```cpp
+```c++
 #include <wavex/wavex.hpp>
 
 int main() {
@@ -577,7 +577,7 @@ int main() {
 
 Compose multipart files, compress client payloads, and save binary responses to disk:
 
-```cpp
+```c++
 #include <wavex/Client/HttpClient.hpp>
 #include <wavex/Utils/Utils.hpp>
 
@@ -610,7 +610,7 @@ asio::awaitable<void> upload_file() {
 
 To keep low-latency network I/O threads from starving when handling CPU-intensive operations (cryptography, image manipulation, heavy math) or blocking legacy libraries (synchronous SQLite, `<fstream>`), WaveX provides Tokio-equivalent asynchronous offloading:
 
-```cpp
+```c++
 #include <wavex/wavex.hpp>
 
 // 1. Offload heavy computation or blocking legacy libraries to the dedicated thread pool
@@ -645,7 +645,7 @@ WaveX natively supports the RFC 9110 HTTP `QUERY` method (safe structured querie
 
 An asynchronous coroutine handler querying DNS records without blocking worker threads:
 
-```cpp
+```c++
 #include <wavex/wavex.hpp>
 #include <nlohmann/json.hpp>
 #include <asio/ip/tcp.hpp>
@@ -744,17 +744,21 @@ curl -k --http2 -X POST https://127.0.0.1:8444/api/query \
 WaveX delivers zero-allocation request handling in the hot path using a three-tier memory architecture and contiguous data structures:
 
 #### 1. Per-Request Bump Allocator (`RequestArena`)
+
 - **4KB Inline Buffer (`alignas(64)`)**: Sized to fit 95%+ of standard web requests (headers, query parameters, path segments, and response formatting) directly inside the arena without touching the global heap.
 - **Thread-Local Slab Pool**: Spills exceeding 4KB seamlessly allocate from a thread-local `std::pmr::unsynchronized_pool_resource` without global lock contention.
 - **O(1) Bulk Reclamation**: `arena.release()` resets the bump pointer at the end of the request coroutine lifecycle with zero calls to `free()`.
 
 #### 2. Cache-Line Contiguous `FlatMap`
+
 Replaces node-based `std::unordered_map` with a contiguous array for `req.params`, `req.query`, and `res.headers_`:
+
 - **Inline Array for N ≤ 16**: Zero heap allocation for standard routes and query strings.
 - **O(N) Linear Scans**: Outperforms hash maps for N ≤ 16 due to sequential hardware prefetching and CPU cache-line locality.
 - **RFC 7230 Header Conformance**: Case-insensitive lookups and mutations via `.find_ci()` and `.insert_or_assign_ci()`.
 
 #### 3. Resource Protection & Hard Caps (DoS Mitigation)
+
 - **Max Query Params (64)**: Hard-capped via `kMaxQueryParams`. Exceeding parameters triggers `431 Request Header Fields Too Large` before routing.
 - **Max Headers (100)**: Configurable server ceilings (`server.set_max_headers()`, `server.set_max_query_params()`).
 - **Idle Buffer Trimming**: Socket read buffers (`stream_buf`) exceeding 64KB automatically call `shrink_to_fit()` when empty. Idle thread-local pool memory can be purged across all workers via `server.trim_memory()`.
@@ -771,7 +775,7 @@ Zero-copy `std::string_view` accessors provide maximum performance with clear li
 | **In-Turn (Zero-Copy)**    | Path/query filtering, validation, numeric conversion (`std::from_chars`), JSON parsing, direct DB queries executed within the current handler turn  | **Use `std::string_view` directly.** Zero copies, zero heap overhead.                 |
 | **Escaping (Owning Copy)** | Offloading to worker threads via `wavex::spawn_blocking`, caching across requests, inserting into global state, storing in async background structs | **Explicitly copy to `std::string`**: `std::string(req.param("id"))` at the boundary. |
 
-```cpp
+```c++
 // Example: In-turn zero-copy vs escaping
 router.get("/users/:id", [](auto &req, auto &res) -> asio::awaitable<void> {
     // 1. In-turn: zero-copy validation
@@ -794,23 +798,26 @@ router.get("/users/:id", [](auto &req, auto &res) -> asio::awaitable<void> {
 WaveX provides enterprise-grade graceful termination that ensures zero dropped in-flight requests during server updates, container lifecycle events (Kubernetes `SIGTERM`), or developer-triggered remote maintenance.
 
 #### 1. OS Signal Interception (`Ctrl+C` / `SIGTERM`)
+
 By default, `Server` intercepts `SIGINT` and `SIGTERM` via `asio::signal_set`. When a signal arrives:
+
 1. **Acceptor Closes**: The TCP listener immediately stops accepting new incoming connections.
-2. **Idle Keep-Alive Sockets Cancelled**: Persistent connections idling between requests are proactively aborted to avoid hanging the drain sequence.
+2. **Idle Keep-Alive Sockets Canceled**: Persistent connections idling between requests are proactively aborted to avoid hanging the drain sequence.
 3. **In-Flight Requests Complete**: Active requests continue processing. Their outgoing responses are automatically stamped with `Connection: close`.
 4. **Deadline Guard**: If in-flight requests exceed the configurable grace period (default 10s via `server.set_shutdown_timeout()`), remaining sockets are force-closed.
 5. **OS Default Signals Restored**: Signal handlers are restored to `SIG_DFL` and the process exits cleanly via `std::exit(0)`.
 
-```cpp
+```c++
 server.set_shutdown_timeout(std::chrono::seconds(5));
 server.enable_signal_handling(true); // Default true
 server.run();
 ```
 
 #### 2. Programmatic Remote Shutdown (`server.exit()` / Route Handlers)
+
 Developers can trigger graceful shutdown directly inside any custom route handler or background worker without deadlocking worker threads:
 
-```cpp
+```c++
 // Remote shutdown endpoint (authentication omitted for brevity)
 router.post("/api/admin/exit", [&](auto &, auto &res) -> asio::awaitable<void> {
     res.status(200).send("Server draining. Goodbye!");
@@ -828,13 +835,14 @@ wavex::log::info("Server stopped. Performing database backups...");
 ```
 
 #### 3. Generic C++23 Pub-Sub Event Architecture
+
 WaveX includes a high-performance, thread-safe publish-subscribe event system in `wavex/Base/Event.hpp`:
 
 - **`Event<Args...>`**: Multicast typed event with snapshot-isolated dispatch (no deadlocks or iterator invalidation). Supports RAII `Subscription` handles (`sub.unsubscribe()`).
 - **`EventBus`**: Heterogeneous event broker dispatching events based on the C++ struct/class type (`bus.publish(MyEvent{})`, `bus.subscribe<MyEvent>(...)`).
 - **`ShutdownEvent` / `ServerShutdownEvent`**: Decouple shutdown triggers from the server instance.
 
-```cpp
+```c++
 #include <wavex/Base/Event.hpp>
 
 // 1. Standalone multicast event
@@ -862,9 +870,10 @@ shutdown_event.publish(std::chrono::seconds(3));
 ```
 
 #### 4. Server Restartability
+
 Calling `server.exit()` unblocks `server.run()` while leaving the process running. The same `Server` instance can be re-run cleanly (`server.run()`), automatically re-initializing worker thread pools and network listeners:
 
-```cpp
+```c++
 server.run();  // Cycle 1: runs until exit()
 // Perform updates, reloads, or migrations...
 server.run();  // Cycle 2: re-opens acceptor and thread pool cleanly
@@ -1074,7 +1083,7 @@ flowchart TD
 
 ### Requirements
 
-- **C++ Compiler**: GCC 13+, Clang 16+, or MSVC 19.36+ with C++23 enabled.
+- **C++ Compiler**: GCC 16+, Clang 18.1+, or MSVC 19.44+ with C++23 enabled.
 - **Build System**: CMake 4.0+, [Ninja](https://ninja-build.org/) generator.
 - **Package Manager**: [vcpkg](https://vcpkg.io/) with `VCPKG_ROOT` environment variable configured.
 
@@ -1196,6 +1205,108 @@ curl -k --http2 -H "Authorization: Bearer secret123" https://127.0.0.1:8444/api/
 | [Google RE2](https://github.com/google/re2)       | Linear-time regex for route pattern constraints | BSD 3-Clause |
 | [OpenSSL](https://www.openssl.org/)               | TLS 1.3 encryption & ALPN negotiation           | Apache-2.0   |
 | [Zlib](https://zlib.net/) *(optional)*            | Payload & body compression (Gzip / Deflate)     | Zlib         |
+
+---
+
+## Building & Supported Compilers
+
+WaveX is a pure C++23 framework requiring a conforming modern C++23 compiler and CMake 4.0+.
+
+### Supported Toolchains
+
+| Compiler / Toolchain                         | Minimum Version    |  C++20 Modules (`WAVEX_USE_MODULE`)  | Header Usage (`#include <wavex/wavex.hpp>`) |
+|:---------------------------------------------|:-------------------|:------------------------------------:|:-------------------------------------------:|
+| **MSVC** (Visual Studio 2022 / 2026)         | 19.44+ (VS 17.10+) |    ✅ Supported (`ON` by default)     |                 ✅ Supported                 |
+| **MinGW GCC** (MSYS2 / winlibs UCRT / POSIX) | 16+                | ⚠️ Recommended `OFF` (compiler bugs) |    ✅ Fully Supported (`OFF` by default)     |
+| **Clang** / **Apple Clang**                  | 18.1+              |             Experimental             |                 ✅ Supported                 |
+
+---
+
+### Quick Build with CMake Presets
+
+WaveX provides standard CMake presets for fast developer builds and test suites:
+
+#### MSVC (Windows)
+
+```powershell
+# Configure (Visual Studio / MSVC)
+cmake --preset fast-dev
+
+# Build All Targets
+cmake --build --preset fast-dev
+
+# Run Test Suite
+ctest --preset run-tests --output-on-failure
+```
+
+#### MinGW GCC (Windows)
+
+```powershell
+# Configure (MinGW GCC toolchain)
+cmake --preset fast-dev-mingw
+
+# Build All Targets
+cmake --build --preset fast-dev-mingw
+
+# Run Test Suite
+ctest --preset run-tests-mingw --output-on-failure
+```
+
+---
+
+### Compiler-Specific Guidelines & Upstream Issue Tracking
+
+#### MinGW GCC (Windows)
+
+When compiling WaveX under MinGW GCC on Windows, please observe the following compiler-specific behaviors and known upstream GCC/GNU issues:
+
+##### 1. C++20 Module Assembly Collision on PE/COFF (ISO P2808R0)
+
+- **Compiler Bug**: GCC's `-fmodules-ts` on Windows (PE/COFF targets) exhibits a known defect when aggregating multiple module partitions (`export import :partition;`) that include third-party headers in their Global Module Fragment (`module;`). Internal-linkage entities (such as Asio customization point objects `query`, `prefer`, and `require` in unnamed namespaces) are duplicated across partition assembly outputs, causing the GNU assembler (`as`) to fail with:
+
+  ```text
+  Error: symbol `_ZN4asio12_GLOBAL__N_1L5queryE' is already defined
+  ```
+
+- **Upstream Bugzilla References**:
+  - **[GCC Bugzilla PR 98718](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=98718)**: *Internal linkage in the global module fragment causes multiple definition errors.*
+  - **[GCC Bugzilla PR 99242](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=99242)**: *Duplicate symbols emitted for unnamed-namespace entities across module partitions on PE/COFF.*
+  - **[GCC Bugzilla PR 105440](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=105440)**: *Multiple definition of symbols with internal linkage from module partitions on Windows.*
+  - **ISO C++ Standards Proposal**: [P2808R0: "Internal linkage in the global module"](https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2023/p2808r0.html).
+
+- **Guideline & Mitigation**:
+  - WaveX introduces the CMake option `-DWAVEX_USE_MODULE=OFF` (enabled by default in `fast-dev-mingw`).
+  - When targeting MinGW GCC, compile with `WAVEX_USE_MODULE=OFF` and consume WaveX via `#include <wavex/wavex.hpp>`. The traditional header-based library is 100% feature-complete with identical performance.
+
+##### 2. Winsock Socket Library Linkage
+
+- **Compiler Difference**: MSVC automatically resolves Winsock functions (`WSAStartup`, `WSACleanup`, `WSASend`, `WSARecv`, `closesocket`, etc.) via `#pragma comment(lib, "ws2_32.lib")` embedded in Asio's headers. **MinGW's GNU `ld` ignores `#pragma comment(lib, ...)` directives.**
+
+- **WaveX Solution**: WaveX's `CMakeLists.txt` automatically links `ws2_32` and `mswsock` to `wavex PUBLIC` on all Windows platforms, ensuring that all consumer binaries and test suites link without unresolved symbol errors.
+
+##### 3. Pthreads Support for Asio
+
+- **Requirement**: MinGW GCC builds with POSIX threading require `-DASIO_HAS_PTHREADS=1` to enable thread synchronization in Asio. WaveX's `CMakeLists.txt` automatically injects this definition when `MINGW` is detected.
+
+##### 4. Asio C++20 Completion Executors
+
+- **Invariant**: Never define `-DASIO_USE_TS_EXECUTOR_AS_DEFAULT=1`. Defining this macro forces Asio to revert `any_completion_executor` to a Networking TS typedef, causing type redefinition conflicts (`error C2371` under MSVC and ABI mismatches under GCC) with C++20 coroutine awaitables.
+
+---
+
+#### MSVC / Visual Studio (Windows)
+
+##### 1. Rare Internal Compiler Error C1001 in Header-Heavy ASTs ([VS Developer Community #11155591](https://developercommunity.visualstudio.com/t/MSVC-1444-compiler-error-regarding-C100/11155591))
+
+- **Rare Compiler Defect**: In rare scenarios when compiling complex, header-heavy C++23 template codebases (particularly involving deducing-this and extensive template metaprogramming) using MSVC toolsets 14.44 (VS 17.10+) through 19.51 previews, MSVC's C++ front-end parser can encounter an internal AST parse-tree buffer exhaustion:
+
+  ```text
+  fatal error C1001: Internal compiler error. (compiler file '...\CxxFE\sl\p1\c\ParseTree...')
+  ```
+
+- **Tracked Issue**: [Developer Community #11155591: MSVC 14.44 compiler error regarding C1001](https://developercommunity.visualstudio.com/t/MSVC-1444-compiler-error-regarding-C100/11155591).
+- **Status**: Confirmed and marked as **Fixed - Pending Release** by Microsoft compiler engineers.
+- **Architectural Safeguard in WaveX**: While this bug only surfaces in edge cases, WaveX proactively avoids it by keeping non-template member function and method implementations out of header files and placing them into dedicated `.cpp` translation units (such as [`src/Utils/Multipart.cpp`](src/Utils/Multipart.cpp), [`src/Utils/AsyncFs.cpp`](src/Utils/AsyncFs.cpp), [`src/Utils/BinaryFile.cpp`](src/Utils/BinaryFile.cpp), and [`src/Client/HttpClient.cpp`](src/Client/HttpClient.cpp)), ensuring header ASTs remain shallow and compiler memory stays well within bounds.
 
 ---
 

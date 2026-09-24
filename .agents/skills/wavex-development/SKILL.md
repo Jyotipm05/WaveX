@@ -17,7 +17,7 @@ This skill provides essential domain context for developing, extending, and debu
     - `MiddleWare.hpp`: Runtime coroutine middleware chains (`run_chain`, `keep_alive`, `sse_stay_active`,
       `body_limit`).
     - `MimeTypes.hpp`: High-speed binary-searched MIME lookup (`mime_type_from_path`, `mime_type_from_ext`).
-    - `Logger.hpp`: Zero-macro levelled logger with `std::source_location` and ANSI colors.
+    - `Logger.hpp`: Zero-macro leveled logger with `std::source_location` and ANSI colors.
     - `Uri.hpp`, `Url.hpp`: RFC 3986 URI and query string parsers.
     - `FlatMap.hpp`: Cache-line contiguous key-value container (`FlatMap<K, V>`) used for request `params`, `query`, and
       response `headers_`. Backed by a contiguous array of `std::pair<std::string_view, std::string_view>`. Drop-in API
@@ -202,3 +202,22 @@ This skill provides essential domain context for developing, extending, and debu
 21. **Unit Test Signal Guard Isolation**:
     - Automated unit tests running multiple short-lived server instances concurrently or sequentially can conflict over the process's OS signal table (`SIGINT`/`SIGTERM`).
     - Test servers should always configure `server.enable_signal_handling(false)` to ensure clean test isolation.
+
+22. **MinGW Winsock Missing Link Libraries (`ws2_32`, `mswsock`)**:
+    - Under MinGW GCC, GNU `ld` ignores MSVC's `#pragma comment(lib, "ws2_32.lib")` auto-linking pragmas.
+    - Always ensure `target_link_libraries(wavex PUBLIC ws2_32 mswsock)` is present under `if (WIN32)` in `CMakeLists.txt`.
+
+23. **Header-Polluting `ASIO_USE_TS_EXECUTOR_AS_DEFAULT` causing MSVC `C2371`**:
+    - Defining `ASIO_USE_TS_EXECUTOR_AS_DEFAULT` in headers pollutes downstream translation units. If an earlier header forward-declares `class any_completion_executor;`, a subsequent macro definition attempts to define it as `typedef executor any_completion_executor;`, producing `error C2371: 'asio::any_completion_executor': redefinition; different basic types`.
+    - Never define this macro; use modern C++20 Asio defaults.
+
+24. **MinGW GCC C++20 Module Assembly Collision on PE/COFF (GCC PR 98718, ISO P2808R0)**:
+    - GCC's `-fmodules-ts` on Windows duplicates unnamed-namespace symbols from the GMF when assembling partition aggregations, yielding `Error: symbol '...queryE' is already defined`.
+    - Always respect the `WAVEX_USE_MODULE=OFF` setting on MinGW builds, consuming WaveX through `<wavex/wavex.hpp>`.
+
+25. **Header AST Bloat & MSVC Front-End ParseTree C1001 Crash**:
+    - Inlining large non-template functions into header files can trigger MSVC Front-End AST buffer exhaustion (`fatal error C1001` in `ParseTree...`, VS Developer Community #11155591).
+    - Always place non-template implementations into `.cpp` files in `src/` rather than defining them entirely in `include/wavex/`.
+
+26. **Unsupported Pre-C++23 Compilers (GCC < 16, Clang < 18.1, MSVC < 19.44)**:
+    - As specified in `README.md`, attempting to compile WaveX on pre-baseline compilers (GCC < 16, Clang < 18.1, or MSVC < 19.44) is unsupported and fails due to missing C++23 explicit object parameter ("deducing this", P0847R7), missing `<print>` (P2093R14), or module partition regressions.

@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <wavex/Utils/BinaryFile.hpp>
 #include <wavex/Utils/TempFile.hpp>
 #include <wavex/Utils/Compression.hpp>
 #include <wavex/Utils/Multipart.hpp>

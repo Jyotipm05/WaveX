@@ -29,10 +29,10 @@
 #define ASIO_HAS_CO_AWAIT 1
 #endif
 
-
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <random>
@@ -50,7 +50,7 @@ namespace wavex::server {
     // ─────────────────────────────────────────────────────────────────────────
     // ThreadPoolConfig
     // ─────────────────────
-class ThreadPoolConfig {
+    class ThreadPoolConfig {
     public:
         // ─── 1. Member Variables (Arranged for minimum padding) ──────────────
         std::vector<std::size_t> upper_thresholds = {10, 25, 50, 100};
@@ -107,14 +107,14 @@ class ThreadPoolConfig {
      */
     struct WorkerNode {
         // ─── 1. Member Variables (Arranged for minimum padding) ──────────────
-        std::shared_ptr<asio::io_context> io_ctx;                                 // 16 bytes
-        std::unique_ptr<LocalQueue> queue;                                       // 8 bytes
-        std::thread thread;                                                       // 8 bytes
-        asio::executor_work_guard<asio::io_context::executor_type> work_guard;    // 8 bytes
-        std::size_t id{0};                                                       // 8 bytes
-        std::atomic<bool> is_retiring{false};                                     // 1 byte
-        std::atomic<bool> is_busy{false};                                         // 1 byte
-        std::atomic<bool> stop_requested{false};                                  // 1 byte
+        std::shared_ptr<asio::io_context> io_ctx; // 16 bytes
+        std::unique_ptr<LocalQueue> queue; // 8 bytes
+        std::thread thread; // 8 bytes
+        asio::executor_work_guard<asio::io_context::executor_type> work_guard; // 8 bytes
+        std::size_t id{0}; // 8 bytes
+        std::atomic<bool> is_retiring{false}; // 1 byte
+        std::atomic<bool> is_busy{false}; // 1 byte
+        std::atomic<bool> stop_requested{false}; // 1 byte
 
         // ─── 2. Constructors & Destructor ────────────────────────────────────
         explicit WorkerNode(const std::size_t worker_id)
@@ -175,8 +175,11 @@ class ThreadPoolConfig {
         }
 
         ThreadPool(const ThreadPool &) = delete;
+
         ThreadPool &operator=(const ThreadPool &) = delete;
+
         ThreadPool(ThreadPool &&) = delete;
+
         ThreadPool &operator=(ThreadPool &&) = delete;
 
         // ─── 4. Member Functions ─────────────────────────────────────────────
@@ -329,7 +332,7 @@ class ThreadPoolConfig {
         // ── Worker loop ────────────────────────────────────────────────────
 
         void worker_loop(const std::shared_ptr<WorkerNode> &w) {
-            // Seed per-thread RNG for randomised steal target selection.
+            // Seed per-thread RNG for randomized steal target selection.
             std::mt19937 rng{std::random_device{}()};
 
             while (!w->stop_requested && !w->is_retiring) {
@@ -397,7 +400,9 @@ class ThreadPoolConfig {
                 cv_monitor_.wait_for(lock, config_.check_interval, [this] {
                     return pool_stopping_ || monitor_signal_;
                 });
-                if (pool_stopping_) break;
+                if (pool_stopping_) {
+                    break;
+                }
                 monitor_signal_ = false;
                 lock.unlock();
 

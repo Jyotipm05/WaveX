@@ -19,9 +19,6 @@ module;
 
 export module wavex:server;
 
-export import :server_queue;
-export import :server_pool;
-
 export namespace wavex::server {
     using server::TlsConfig;
     using server::Task;

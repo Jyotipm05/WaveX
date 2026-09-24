@@ -19,6 +19,7 @@
 #include <array>
 #include <utility>
 #include <optional>
+#include <type_traits>
 
 #ifndef ASIO_HAS_CO_AWAIT
 #define ASIO_HAS_CO_AWAIT 1
@@ -30,6 +31,7 @@
 #include <wavex/Base/Uri.hpp>
 
 #include <wavex/protos/http/http1codec.hpp>
+#include <wavex/Utils/BinaryFile.hpp>
 #include <wavex/Utils/Multipart.hpp>
 #include <wavex/Utils/Compression.hpp>
 
@@ -48,10 +50,10 @@ namespace wavex::protos::http {
         using encoder_type = Codec::encoder;
         using request_type = Codec::request;
 
-        using base::Request::query;
-        using base::Request::params;
-        using base::Request::param;
-        using base::Request::query_param;
+        using Request::query;
+        using Request::params;
+        using Request::param;
+        using Request::query_param;
 
         /// Maximum query parameters accepted per request (hard cap).
         /// Requests exceeding this are rejected with 431 in Server::handle_connection.
@@ -68,13 +70,14 @@ namespace wavex::protos::http {
         /// Contiguous linear buffer owning all decoded query key-value characters.
         /// FlatMap `query` holds string_views slicing directly into this buffer.
         std::string query_decoded_buf_{};
-        std::vector<std::pair<std::string, std::string>> headers_owned_{}; ///< owned headers (client)
+        std::vector<std::pair<std::string, std::string> > headers_owned_{}; ///< owned headers (client)
         size_t consumed_{0}; ///< byte count consumed by parser
         bool query_param_overflow_{false}; ///< set when >kMaxQueryParams were present
 
     public:
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         HttpRequest() = default;
+
         ~HttpRequest() = default;
 
         /// Construct from a raw buffer (server side).
@@ -90,7 +93,7 @@ namespace wavex::protos::http {
         }
 
         HttpRequest(const HttpRequest &other)
-            : base::Request(other),
+            : Request(other),
               buffer_(other.buffer_),
               parsed_(other.parsed_),
               path_(other.path_),
@@ -106,7 +109,7 @@ namespace wavex::protos::http {
 
         HttpRequest &operator=(const HttpRequest &other) {
             if (this != &other) {
-                base::Request::operator=(other);
+                Request::operator=(other);
                 buffer_ = other.buffer_;
                 parsed_ = other.parsed_;
                 path_ = other.path_;
@@ -123,7 +126,7 @@ namespace wavex::protos::http {
         }
 
         HttpRequest(HttpRequest &&other) noexcept
-            : base::Request(std::move(other)),
+            : Request(std::move(other)),
               buffer_(std::move(other.buffer_)),
               parsed_(std::move(other.parsed_)),
               path_(std::move(other.path_)),
@@ -141,7 +144,7 @@ namespace wavex::protos::http {
             if (this != &other) {
                 const char *old_base = other.query_decoded_buf_.data();
                 const size_t old_len = other.query_decoded_buf_.size();
-                base::Request::operator=(std::move(other));
+                Request::operator=(std::move(other));
                 buffer_ = std::move(other.buffer_);
                 parsed_ = std::move(other.parsed_);
                 path_ = std::move(other.path_);
@@ -177,7 +180,7 @@ namespace wavex::protos::http {
          * @return parser_type::result (success, incomplete, error).
          */
         template<typename Context>
-        typename parser_type::result parse_stream(const std::string_view stream_buf, Context &ctx) {
+        parser_type::result parse_stream(const std::string_view stream_buf, Context &ctx) {
             consumed_ = 0;
             typename parser_type::result result = parser_type::result::error;
             if constexpr (requires { parser_type::parse_request(stream_buf, parsed_, consumed_, ctx); }) {
@@ -327,7 +330,7 @@ namespace wavex::protos::http {
         [[nodiscard]] asio::awaitable<utils::MultipartFormData> multipart_async(
             const utils::MultipartLimits &limits = {}) const {
             const auto ct = header_impl("Content-Type");
-            return utils::MultipartFormData::parse_async(body_impl(), ct.value_or(""), limits);
+            co_return co_await utils::MultipartFormData::parse_async(body_impl(), ct.value_or(""), limits);
         }
 
         /**
@@ -373,12 +376,18 @@ namespace wavex::protos::http {
          * @param dest_path Target file path.
          * @return True if saved successfully, false otherwise.
          */
-        bool save_body_to_file(const std::filesystem::path &dest_path) const {
-            std::ofstream out(dest_path, std::ios::binary);
-            if (!out) return false;
-            const auto b = body_impl();
-            out.write(b.data(), static_cast<std::streamsize>(b.size()));
-            return out.good();
+        bool save_body_to_file(const std::string &dest_path) const {
+            return utils::BinaryFile::write_all(dest_path, body_impl());
+        }
+
+        template<typename PathLike>
+            requires (!std::is_convertible_v<PathLike, const std::string &>)
+        bool save_body_to_file(const PathLike &dest_path) const {
+            if constexpr (requires { dest_path.string(); }) {
+                return save_body_to_file(dest_path.string());
+            } else {
+                return save_body_to_file(std::string(dest_path));
+            }
         }
 
         /**
@@ -519,8 +528,6 @@ namespace wavex::protos::http {
                 parsed_.headers.emplace_back(k, v);
             }
         }
-
-
     };
 
     /// Concrete default HTTP/1.x request type aliases

@@ -19,6 +19,25 @@ namespace {
     int tests_run = 0;
     int tests_passed = 0;
 
+    inline bool is_test_verbose() {
+        static const bool verbose = [] {
+#if defined(WAVEX_TEST_VERBOSE)
+            return true;
+#else
+            const char *env = std::getenv("WAVEX_TEST_VERBOSE");
+            return env != nullptr && std::string_view(env) != "0";
+#endif
+        }();
+        return verbose;
+    }
+
+#define TEST_LOG(msg) \
+    do { \
+        if (is_test_verbose()) { \
+            std::cout << "  [DEBUG] " << msg << std::endl; \
+        } \
+    } while (false)
+
     void check(const bool condition, const char *name) {
         ++tests_run;
         if (condition) {
@@ -33,7 +52,7 @@ namespace {
 // ─── Test 1: HttpRequest should_keep_alive & consumed_bytes ───────────────────
 
 void test_request_keep_alive() {
-    std::cout << "\n[Test 1] HttpRequest keep-alive detection and consumed_bytes\n";
+    std::cout << "\n[Test 1] HttpRequest keep-alive detection and consumed_bytes" << std::endl;
 
     // HTTP/1.1 without Connection header -> should keep alive by default
     std::string req1_str = "GET /test HTTP/1.1\r\nHost: localhost\r\n\r\n";
@@ -72,7 +91,7 @@ void test_request_keep_alive() {
 // ─── Test 2: HttpResponse set_keep_alive & should_keep_alive ──────────────────
 
 void test_response_keep_alive() {
-    std::cout << "\n[Test 2] HttpResponse set_keep_alive & should_keep_alive\n";
+    std::cout << "\n[Test 2] HttpResponse set_keep_alive & should_keep_alive" << std::endl;
 
     wavex::protos::http::Http1Response res;
     res.set_keep_alive(true, 10, 500);
@@ -88,12 +107,9 @@ void test_response_keep_alive() {
 // ─── Test 3: StaticChain & KeepAlivePolicy ───────────────────────────────────
 
 void test_chainable_keep_alive() {
-    std::cout << "\n[Test 3] StaticChain KeepAlivePolicy static handler\n";
+    std::cout << "\n[Test 3] StaticChain KeepAlivePolicy static handler" << std::endl;
 
-    auto chain = wavex::make_chain(wavex::KeepAlivePolicy < 15, 200 > {
-    }
-    )
-    ;
+    auto chain = wavex::make_chain(wavex::KeepAlivePolicy<15, 200>{});
     wavex::protos::http::Http1Request req("GET /api HTTP/1.1\r\nHost: localhost\r\n\r\n");
     check(req.parse(), "Parse request for chain");
 
@@ -108,7 +124,7 @@ void test_chainable_keep_alive() {
 // ─── Test 4: Middleware keep_alive & sse_stay_active ─────────────────────────
 
 void test_middleware_keep_alive() {
-    std::cout << "\n[Test 4] MiddleWare keep_alive and sse_stay_active\n";
+    std::cout << "\n[Test 4] MiddleWare keep_alive and sse_stay_active" << std::endl;
 
     auto mw = wavex::base::keep_alive<wavex::protos::http::Http1Request, wavex::protos::http::Http1Response>(5, 100);
     wavex::protos::http::Http1Request req("GET /data HTTP/1.1\r\nHost: localhost\r\n\r\n");
@@ -144,7 +160,7 @@ void test_middleware_keep_alive() {
 // ─── Test 5: Integration Test - Persistent TCP Connection ─────────────────────
 
 void test_server_persistent_connection() {
-    std::cout << "\n[Test 5] Integration Test: Sequential requests on single persistent TCP socket\n";
+    std::cout << "\n[Test 5] Integration Test: Sequential requests on single persistent TCP socket" << std::endl;
 
     auto router = wavex::engine::Http1Router::make_instance();
     router.get("/hello", [](wavex::protos::http::Http1Request &,
@@ -161,31 +177,35 @@ void test_server_persistent_connection() {
         co_return;
     });
 
-    const unsigned short port = 19095;
+    constexpr unsigned short port = 19095;
     wavex::server::Http1Server server(router, "127.0.0.1", port);
     server.enable_signal_handling(false);
     server.set_keep_alive_timeout(std::chrono::seconds(3));
     server.set_max_keep_alive_requests(10);
 
+    TEST_LOG("[Test 5] Starting server thread...");
     std::thread server_thread([&server] {
         server.run();
     });
 
-    // Allow server to start listening
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     try {
         asio::io_context client_ioc;
         asio::ip::tcp::socket client_socket(client_ioc);
+        TEST_LOG("[Test 5] Connecting client socket...");
         client_socket.connect(asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), port));
 
         // 1. Send first request on this socket
         std::string req1 = "GET /hello HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+        TEST_LOG("[Test 5] Writing request 1...");
         asio::write(client_socket, asio::buffer(req1));
 
         char buf[2048];
+        TEST_LOG("[Test 5] Reading response 1...");
         std::size_t n1 = client_socket.read_some(asio::buffer(buf));
         std::string resp1(buf, n1);
+        TEST_LOG("[Test 5] Read " << n1 << " bytes.");
 
         check(resp1.find("HTTP/1.1 200 OK") != std::string::npos, "Request 1 responded 200 OK");
         check(resp1.find("Hello KeepAlive") != std::string::npos, "Request 1 returned expected body");
@@ -193,20 +213,26 @@ void test_server_persistent_connection() {
 
         // 2. Send second request on the EXACT SAME socket (verifies connection stayed active)
         std::string req2 = "GET /counter HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+        TEST_LOG("[Test 5] Writing request 2...");
         asio::write(client_socket, asio::buffer(req2));
 
+        TEST_LOG("[Test 5] Reading response 2...");
         std::size_t n2 = client_socket.read_some(asio::buffer(buf));
         std::string resp2(buf, n2);
+        TEST_LOG("[Test 5] Read " << n2 << " bytes.");
 
         check(resp2.find("HTTP/1.1 200 OK") != std::string::npos, "Request 2 on same socket responded 200 OK");
         check(resp2.find("Connection: keep-alive") != std::string::npos, "Request 2 still kept alive");
 
         // 3. Send third request with Connection: close to cleanly finish
         std::string req3 = "GET /hello HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+        TEST_LOG("[Test 5] Writing request 3 (close)...");
         asio::write(client_socket, asio::buffer(req3));
 
+        TEST_LOG("[Test 5] Reading response 3...");
         std::size_t n3 = client_socket.read_some(asio::buffer(buf));
         std::string resp3(buf, n3);
+        TEST_LOG("[Test 5] Read " << n3 << " bytes.");
 
         check(resp3.find("Connection: close") != std::string::npos, "Request 3 closed connection gracefully");
 
@@ -216,22 +242,24 @@ void test_server_persistent_connection() {
         check(ec == asio::error::eof || ec == asio::error::connection_reset,
               "Server closed socket after Connection: close");
 
+        TEST_LOG("[Test 5] Closing client socket...");
         client_socket.close();
-    } catch (const std::exception &ex) {
-        std::cerr << "Client error: " << ex.what() << "\n";
+    } catch (...) {
         check(false, "Persistent connection test failed with exception");
     }
 
+    TEST_LOG("[Test 5] Calling server.stop()...");
     server.stop();
     if (server_thread.joinable()) {
         server_thread.join();
+        TEST_LOG("[Test 5] Server thread joined.");
     }
 }
 
 // ─── Test 6: Integration Test - 204 No Content Keep-Alive Framing ─────────────
 
 void test_server_204_keepalive() {
-    std::cout << "\n[Test 6] Integration Test: 204 No Content Keep-Alive Framing\n";
+    std::cout << "\n[Test 6] Integration Test: 204 No Content Keep-Alive Framing" << std::endl;
 
     auto router = wavex::engine::Http1Router::make_instance();
     router.post("/delete-item", [](wavex::protos::http::Http1Request &,
@@ -246,30 +274,35 @@ void test_server_204_keepalive() {
         co_return;
     });
 
-    const unsigned short port = 19096;
+    constexpr unsigned short port = 19096;
     wavex::server::Http1Server server(router, "127.0.0.1", port);
     server.enable_signal_handling(false);
     server.set_keep_alive_timeout(std::chrono::seconds(3));
     server.set_max_keep_alive_requests(10);
 
+    TEST_LOG("[Test 6] Starting server thread...");
     std::thread server_thread([&server] {
         server.run();
     });
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     try {
         asio::io_context client_ioc;
         asio::ip::tcp::socket client_socket(client_ioc);
+        TEST_LOG("[Test 6] Connecting client socket...");
         client_socket.connect(asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), port));
 
         // 1. Send POST /delete-item returning 204 No Content
         std::string req1 = "POST /delete-item HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n";
+        TEST_LOG("[Test 6] Writing request 1...");
         asio::write(client_socket, asio::buffer(req1));
 
         char buf[2048];
+        TEST_LOG("[Test 6] Reading response 1...");
         std::size_t n1 = client_socket.read_some(asio::buffer(buf));
         std::string resp1(buf, n1);
+        TEST_LOG("[Test 6] Read " << n1 << " bytes.");
 
         check(resp1.find("HTTP/1.1 204 No Content") != std::string::npos, "Request 1 responded 204 No Content");
         check(resp1.find("Content-Length") == std::string::npos, "204 response has no Content-Length header");
@@ -277,42 +310,54 @@ void test_server_204_keepalive() {
 
         // 2. Send second request on the SAME socket - verifies that 204 response framing did not desync
         std::string req2 = "GET /status HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+        TEST_LOG("[Test 6] Writing request 2...");
         asio::write(client_socket, asio::buffer(req2));
 
+        TEST_LOG("[Test 6] Reading response 2...");
         std::size_t n2 = client_socket.read_some(asio::buffer(buf));
         std::string resp2(buf, n2);
+        TEST_LOG("[Test 6] Read " << n2 << " bytes.");
 
         check(resp2.find("HTTP/1.1 200 OK") != std::string::npos, "Request 2 after 204 responded 200 OK");
         check(resp2.find("OK Status") != std::string::npos, "Request 2 returned expected payload");
-        check(resp2.find("Connection: close") != std::string::npos, "Request 2 completed cleanly with Connection: close");
+        check(resp2.find("Connection: close") != std::string::npos,
+              "Request 2 completed cleanly with Connection: close");
 
+        TEST_LOG("[Test 6] Closing client socket...");
         client_socket.close();
-    } catch (const std::exception &ex) {
-        std::cerr << "Client error: " << ex.what() << "\n";
+    } catch (...) {
         check(false, "204 keep-alive test failed with exception");
     }
 
+    TEST_LOG("[Test 6] Calling server.stop()...");
     server.stop();
     if (server_thread.joinable()) {
         server_thread.join();
+        TEST_LOG("[Test 6] Server thread joined.");
     }
 }
 
 int main() {
     std::cout << "==================================================\n";
     std::cout << " WaveX HTTP Stay-Active / Keep-Alive Unit Tests    \n";
-    std::cout << "==================================================\n";
+    std::cout << "==================================================\n" << std::endl;
 
+    std::cout << "[Runner] Executing Test 1..." << std::endl;
     test_request_keep_alive();
+    std::cout << "[Runner] Executing Test 2..." << std::endl;
     test_response_keep_alive();
+    std::cout << "[Runner] Executing Test 3..." << std::endl;
     test_chainable_keep_alive();
+    std::cout << "[Runner] Executing Test 4..." << std::endl;
     test_middleware_keep_alive();
+    std::cout << "[Runner] Executing Test 5..." << std::endl;
     test_server_persistent_connection();
+    std::cout << "[Runner] Executing Test 6..." << std::endl;
     test_server_204_keepalive();
 
     std::cout << "\n==================================================\n";
     std::cout << " Results: " << tests_passed << " / " << tests_run << " passed\n";
-    std::cout << "==================================================\n";
+    std::cout << "==================================================\n" << std::endl;
 
     return (tests_passed == tests_run) ? 0 : 1;
 }

@@ -3,16 +3,44 @@
 # This file is committed to version control. Every developer who opens this
 # project gets correct clangd analysis automatically — no manual setup needed.
 #
-# Why this file exists:
-#   CMake's compile_commands.json is generated in the build directory.
-#   The `clangd_sync` build target copies it to the project root so clangd
-#   can find it without any per-developer IDE configuration.
+# Supports both CMake presets:
+#   - test-profile-mingw  (MinGW GCC 16+)
+#   - test-profile        (MSVC 19.44+ / Visual Studio 2022/2026)
+#
+# Compilation Database:
+#   Synchronized to project root '.' via the 'clangd_sync' CMake target on every build.
+#   Clangd reads compile_commands.json directly from the workspace root for whichever
+#   preset (test-profile or test-profile-mingw) was built last.
 
 CompileFlags:
-  # Read compile_commands.json from build/test-profile or project root
-  CompilationDatabase: build/test-profile
-  # Remove:
-  #   - -std:*
-  #   - -external:*
+  CompilationDatabase: .
+
+  # Remove compiler-specific flags that Clangd cannot parse or that trigger diagnostics:
+  Remove:
+    # --- MinGW GCC (test-profile-mingw) specific flags ---
+    - -fmodule-mapper=*
+    - -fdeps-format=*
+    - -fmodules-ts
+    - -fdiagnostics-color=*
+
+    # --- MSVC (test-profile) specific flags ---
+    - -external:W*
+    - /external:W*
+    - -RTC*
+    - /RTC*
+    - "@*"
+    - /TP
+    - /nologo
+    - /FS
+
+  # Suppress compiler driver warnings across toolchains:
   Add:
-    - -std=c++23
+    - -Wno-unknown-argument
+    - -Wno-unknown-warning-option
+
+Diagnostics:
+  Suppress:
+    - drv_unknown_argument
+    - unknown_argument
+    - access_dtor_temp
+

@@ -16,7 +16,12 @@
 
 #include <string>
 #include <string_view>
-#include <cstring>
+#ifndef ASIO_HAS_CO_AWAIT
+#define ASIO_HAS_CO_AWAIT 1
+#endif
+#if defined(__MINGW32__) && !defined(ASIO_HAS_PTHREADS)
+#define ASIO_HAS_PTHREADS 1
+#endif
 #include <asio/awaitable.hpp>
 #include <asio/as_tuple.hpp>
 #include <asio/use_awaitable.hpp>
@@ -43,7 +48,8 @@ namespace wavex::protos {
     template<typename Codec>
     struct protocol_traits {
         /// Connection-scoped session context (e.g. stateful compression tables)
-        struct connection_context {};
+        struct connection_context {
+        };
 
         /// True if the protocol requires a connection-level opening exchange.
         static constexpr bool has_connection_preface = false;
@@ -55,7 +61,7 @@ namespace wavex::protos {
          * @return true to continue, false to drop the connection.
          */
         template<typename Stream>
-        static asio::awaitable<bool> on_connection_start(Stream &, std::string &) {
+        static asio::awaitable<bool> on_connection_start(Stream &stream, std::string &stream_buf) {
             co_return true;
         }
 
@@ -88,8 +94,9 @@ namespace wavex::protos {
 
 namespace wavex::protos {
     template<>
-    struct protocol_traits<wavex::protos::http::http1codec> {
-        struct connection_context {};
+    struct protocol_traits<http::http1codec> {
+        struct connection_context {
+        };
 
         static constexpr bool has_connection_preface = false;
 
@@ -119,14 +126,14 @@ namespace wavex::protos {
         static void configure_alpn(SSL_CTX *ctx) {
             SSL_CTX_set_alpn_select_cb(
                 ctx,
-                [](SSL *, const unsigned char **out, unsigned char *outlen,
-                   const unsigned char *in, unsigned int inlen, void *) -> int {
+                [](SSL *, const unsigned char **out, unsigned char *outLen,
+                   const unsigned char *in, unsigned int inLen, void *) -> int {
                     const unsigned char *p = in;
-                    while (p < in + inlen) {
+                    while (p < in + inLen) {
                         const unsigned char len = *p++;
                         if (len == 8 && std::memcmp(p, "http/1.1", 8) == 0) {
                             *out = p;
-                            *outlen = 8;
+                            *outLen = 8;
                             return SSL_TLSEXT_ERR_OK;
                         }
                         p += len;
@@ -144,8 +151,8 @@ namespace wavex::protos {
 
 namespace wavex::protos {
     template<>
-    struct protocol_traits<wavex::protos::http::http2codec> {
-        using connection_context = wavex::protos::http::http2::connection_context;
+    struct protocol_traits<http::http2codec> {
+        using connection_context = http::http2::connection_context;
 
         static constexpr bool has_connection_preface = true;
 
@@ -198,15 +205,15 @@ namespace wavex::protos {
         static void configure_alpn(SSL_CTX *ctx) {
             SSL_CTX_set_alpn_select_cb(
                 ctx,
-                [](SSL *, const unsigned char **out, unsigned char *outlen,
-                   const unsigned char *in, unsigned int inlen, void *) -> int {
+                [](SSL *, const unsigned char **out, unsigned char *outLen,
+                   const unsigned char *in, unsigned int inLen, void *) -> int {
                     const unsigned char *p = in;
                     const unsigned char *http11_start = nullptr;
-                    while (p < in + inlen) {
+                    while (p < in + inLen) {
                         const unsigned char len = *p++;
                         if (len == 2 && p[0] == 'h' && p[1] == '2') {
                             *out = p;
-                            *outlen = 2;
+                            *outLen = 2;
                             return SSL_TLSEXT_ERR_OK;
                         }
                         if (len == 8 && std::memcmp(p, "http/1.1", 8) == 0) {
@@ -216,7 +223,7 @@ namespace wavex::protos {
                     }
                     if (http11_start) {
                         *out = http11_start;
-                        *outlen = 8;
+                        *outLen = 8;
                         return SSL_TLSEXT_ERR_OK;
                     }
                     return SSL_TLSEXT_ERR_ALERT_FATAL;

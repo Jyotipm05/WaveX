@@ -1,15 +1,60 @@
 cmake_minimum_required(VERSION 4.0)
-project(wavex VERSION 0.4.0 LANGUAGES CXX)
+project(wavex VERSION 0.4.0 LANGUAGES C CXX)
 
 # ===========================================================================
 #  Header Configuration
 # ===========================================================================
-# Configure wavex.hpp.in to replace @PROJECT_VERSION@ with actual version
+# Configure Version.hpp.in and wavex.hpp.in to replace @PROJECT_VERSION@ with actual version
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/wavex/Version.hpp.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/include/wavex/Version.hpp"
+    @ONLY
+)
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/include/wavex/wavex.hpp.in"
     "${CMAKE_CURRENT_BINARY_DIR}/include/wavex/wavex.hpp"
     @ONLY
 )
+
+# ===========================================================================
+#  Platform & Global Macro Configuration
+# ===========================================================================
+add_compile_definitions(
+    ASIO_HAS_CO_AWAIT=1
+    ASIO_STANDALONE=1
+)
+
+if (WIN32)
+    # Dynamically adapt _WIN32_WINNT based on CMAKE_SYSTEM_VERSION if not overridden
+    if (NOT DEFINED WAVEX_WIN32_WINNT)
+        if (CMAKE_SYSTEM_VERSION)
+            string(REGEX MATCH "^([0-9]+)\\.([0-9]+)" _WIN_VER "${CMAKE_SYSTEM_VERSION}")
+            set(_WIN_MAJOR "${CMAKE_MATCH_1}")
+            set(_WIN_MINOR "${CMAKE_MATCH_2}")
+            if (_WIN_MAJOR GREATER_EQUAL 10)
+                set(WAVEX_WIN32_WINNT "0x0A00") # Windows 10 / Windows 11 / Server 2016+
+            elseif (_WIN_MAJOR EQUAL 6 AND _WIN_MINOR EQUAL 3)
+                set(WAVEX_WIN32_WINNT "0x0603") # Windows 8.1 / Server 2012 R2
+            elseif (_WIN_MAJOR EQUAL 6 AND _WIN_MINOR EQUAL 2)
+                set(WAVEX_WIN32_WINNT "0x0602") # Windows 8 / Server 2012
+            elseif (_WIN_MAJOR EQUAL 6 AND _WIN_MINOR EQUAL 1)
+                set(WAVEX_WIN32_WINNT "0x0601") # Windows 7 / Server 2008 R2
+            else ()
+                set(WAVEX_WIN32_WINNT "0x0A00") # Modern default fallback
+            endif ()
+        else ()
+            set(WAVEX_WIN32_WINNT "0x0A00")
+        endif ()
+    endif ()
+
+    message(STATUS "[WaveX] Windows platform detected: setting _WIN32_WINNT=${WAVEX_WIN32_WINNT}")
+    add_compile_definitions(_WIN32_WINNT=${WAVEX_WIN32_WINNT})
+
+    if (MINGW)
+        message(STATUS "[WaveX] MinGW GCC detected: setting ASIO_HAS_PTHREADS=1 globally")
+        add_compile_definitions(ASIO_HAS_PTHREADS=1)
+    endif ()
+endif ()
 
 # ===========================================================================
 #  Compiler & Tooling Setup
@@ -53,6 +98,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(WAVEX_TEST      "Build tests for the wavex library"                           OFF)
 option(WAVEX_TEST_TSAN "Build tests with Thread Sanitizer (TSan) only"              OFF)
 option(WAVEX_TEST_ASAN "Build tests with Address + UB + Leak Sanitizers (ASan+UBSan+LSan)" OFF)
+
+if (MSVC)
+    set(WAVEX_USE_MODULE_DEFAULT ON)
+else ()
+    set(WAVEX_USE_MODULE_DEFAULT OFF)
+endif ()
+option(WAVEX_USE_MODULE "Build and export C++20 modules for WaveX" ${WAVEX_USE_MODULE_DEFAULT})
 
 # TSan and ASan/UBSan are mutually exclusive — the runtimes conflict.
 if (WAVEX_TEST_TSAN AND WAVEX_TEST_ASAN)
@@ -164,6 +216,14 @@ endif ()
 option(WAVEX_ENABLE_TLS "Enable TLS 1.3 support via OpenSSL" ON)
 
 if (WAVEX_ENABLE_TLS)
+    # Hint OpenSSL root when using vcpkg to ensure FindOpenSSL locates headers and import libraries
+    if (DEFINED VCPKG_TARGET_TRIPLET AND NOT DEFINED OPENSSL_ROOT_DIR)
+        if (DEFINED VCPKG_INSTALLED_DIR AND EXISTS "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}")
+            set(OPENSSL_ROOT_DIR "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}")
+        elseif (EXISTS "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}")
+            set(OPENSSL_ROOT_DIR "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}")
+        endif ()
+    endif ()
     find_package(OpenSSL QUIET)
     if (OpenSSL_FOUND)
         message(STATUS "OpenSSL found: ${OPENSSL_VERSION}")
@@ -188,6 +248,11 @@ add_library(wavex
         src/Base/Url.cpp
         src/Engine/Router.cpp
         src/Client/HttpClient.cpp
+        src/Utils/FsUtils.cpp
+        src/Utils/AsyncFs.cpp
+        src/Utils/BinaryFile.cpp
+        src/Utils/TempFile.cpp
+        src/Utils/Multipart.cpp
 )
 
 target_include_directories(wavex PUBLIC
@@ -203,11 +268,16 @@ target_link_libraries(wavex PUBLIC
         re2::re2
 )
 
-target_compile_definitions(wavex PUBLIC ASIO_HAS_CO_AWAIT=1 ASIO_STANDALONE=1)
-
 if (WIN32)
-    target_compile_definitions(wavex PUBLIC _WIN32_WINNT=0x0A00)
+    target_link_libraries(wavex PUBLIC ws2_32 mswsock)
 endif ()
+
+target_compile_definitions(wavex PUBLIC
+    ASIO_HAS_CO_AWAIT=1
+    ASIO_STANDALONE=1
+    $<$<BOOL:${WIN32}>:_WIN32_WINNT=${WAVEX_WIN32_WINNT}>
+    $<$<AND:$<BOOL:${WIN32}>,$<BOOL:${MINGW}>>:ASIO_HAS_PTHREADS=1>
+)
 
 if (WAVEX_HAS_SSL)
     target_link_libraries(wavex PUBLIC OpenSSL::SSL OpenSSL::Crypto)
@@ -237,6 +307,7 @@ target_sources(wavex
         PUBLIC FILE_SET public_headers TYPE HEADERS
         BASE_DIRS include
         FILES
+        include/wavex/Version.hpp
         include/wavex/Base/Logger.hpp
         include/wavex/Base/Chainable.hpp
         include/wavex/Base/FlatMap.hpp
@@ -266,6 +337,8 @@ target_sources(wavex
         include/wavex/CLI/CLI.hpp
         include/wavex/Async/SpawnBlocking.hpp
         include/wavex/Utils/Utils.hpp
+        include/wavex/Utils/FsUtils.hpp
+        include/wavex/Utils/BinaryFile.hpp
         include/wavex/Utils/TempFile.hpp
         include/wavex/Utils/Compression.hpp
         include/wavex/Utils/Multipart.hpp
@@ -273,47 +346,61 @@ target_sources(wavex
 )
 
 # C++ Modules
-target_sources(wavex
-        PUBLIC FILE_SET wavex_modules TYPE CXX_MODULES
-        BASE_DIRS src
-        FILES
-        src/wavex.ixx
-        src/Base/Logger.ixx
-        src/Base/Chainable.ixx
-        src/protos/protos.ixx
-        src/protos/http/http.ixx
-        src/protos/http/Methods.ixx
-        src/protos/http/http1codec.ixx
-        src/protos/http/http2codec.ixx
-        src/protos/http/HttpRequest.ixx
-        src/protos/http/HttpResponse.ixx
-        src/Engine/Router.ixx
-        src/Engine/HttpRouter.ixx
-        src/Server/Server.ixx
-        src/Server/WorkStealingQueue.ixx
-        src/Server/ThreadPool.ixx
-        src/Base/MiddleWare.ixx
-        src/Client/HttpClient.ixx
-        src/CLI/CLI.ixx
-        src/Utils/Utils.ixx
-        src/Utils/TempFile.ixx
-        src/Utils/Compression.ixx
-        src/Utils/Multipart.ixx
-)
+if (WAVEX_USE_MODULE)
+    target_sources(wavex
+            PUBLIC FILE_SET wavex_modules TYPE CXX_MODULES
+            BASE_DIRS src
+            FILES
+            src/wavex.ixx
+            src/Base/Logger.ixx
+            src/Base/Chainable.ixx
+            src/protos/protos.ixx
+            src/protos/http/http.ixx
+            src/protos/http/Methods.ixx
+            src/protos/http/http1codec.ixx
+            src/protos/http/http2codec.ixx
+            src/protos/http/HttpRequest.ixx
+            src/protos/http/HttpResponse.ixx
+            src/Engine/Router.ixx
+            src/Engine/HttpRouter.ixx
+            src/Server/Server.ixx
+            src/Server/WorkStealingQueue.ixx
+            src/Server/ThreadPool.ixx
+            src/Base/MiddleWare.ixx
+            src/Client/HttpClient.ixx
+            src/CLI/CLI.ixx
+            src/Utils/Utils.ixx
+            src/Utils/TempFile.ixx
+            src/Utils/Compression.ixx
+            src/Utils/Multipart.ixx
+    )
+    target_compile_definitions(wavex PUBLIC WAVEX_USE_MODULE=1)
+else ()
+    target_compile_definitions(wavex PUBLIC WAVEX_USE_MODULE=0)
+endif ()
 
 # ===========================================================================
 #  Install Rules
 # ===========================================================================
-install(TARGETS wavex EXPORT WaveXTargets
-        FILE_SET wavex_modules DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/wavex/modules"
-        FILE_SET public_headers DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
-        RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
-        LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
-        ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
-)
+if (WAVEX_USE_MODULE)
+    install(TARGETS wavex EXPORT WaveXTargets
+            FILE_SET wavex_modules DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/wavex/modules"
+            FILE_SET public_headers DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+            RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+            LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+            ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+    )
+else ()
+    install(TARGETS wavex EXPORT WaveXTargets
+            FILE_SET public_headers DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+            RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+            LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+            ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+    )
+endif ()
 
-# Install the configured wavex.hpp from the build directory
-install(FILES "${CMAKE_CURRENT_BINARY_DIR}/include/wavex/wavex.hpp" DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/wavex")
+# Install the configured wavex.hpp and Version.hpp from the build directory
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/include/wavex/wavex.hpp" "${CMAKE_CURRENT_BINARY_DIR}/include/wavex/Version.hpp" DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/wavex")
 
 # If we used the Git fallback, we must ship the Asio headers to downstream consumers
 if (NOT asio_FOUND)
@@ -331,7 +418,12 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/WaveXConfig.cmake" DESTINATION "${CMA
 #  Quality of Life
 # ===========================================================================
 # Auto-copy compile_commands.json to project root for Clangd
-#add_custom_target(clangd_sync ALL COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_BINARY_DIR}/compile_commands.json" "${CMAKE_SOURCE_DIR}/compile_commands.json" COMMENT "Syncing compile_commands.json for Clangd")
+add_custom_target(clangd_sync ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_BINARY_DIR}/compile_commands.json"
+        "${CMAKE_SOURCE_DIR}/compile_commands.json"
+    COMMENT "Syncing compile_commands.json for Clangd"
+)
 
 if (WAVEX_TEST)
     enable_testing()
@@ -408,7 +500,9 @@ if (WAVEX_TEST)
     # -----------------------------------------------------------------------
     # Test registrations
     # -----------------------------------------------------------------------
-    wavex_add_test(wavex_tests                 tests/test1.cpp)
+    if (WAVEX_USE_MODULE)
+        wavex_add_test(wavex_tests                 tests/test1.cpp)
+    endif ()
     wavex_add_test(wavex_mw_tests              tests/test_MW.cpp)
     wavex_add_test(wavex_method_template_tests tests/test_method_template.cpp)
     wavex_add_test(wavex_server_tests          tests/test_server.cpp)

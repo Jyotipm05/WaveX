@@ -19,12 +19,6 @@ module;
 
 export module wavex:protos_http;
 
-export import :protos_http_methods;
-export import :protos_http_codec;
-export import :protos_http_http2codec;
-export import :protos_http_request;
-export import :protos_http_response;
-
 export namespace wavex::protos::http {
     using http::method;
     using http::header;

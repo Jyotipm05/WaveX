@@ -24,6 +24,7 @@
 #include <asio/async_result.hpp>
 #include <asio/use_awaitable.hpp>
 #include <asio/associated_executor.hpp>
+#include <asio/executor_work_guard.hpp>
 #include <asio/post.hpp>
 
 #include <exception>
@@ -35,10 +36,8 @@
 #include <wavex/Server/BlockingPool.hpp>
 
 namespace wavex {
-
     namespace detail {
-
-        template <typename Fn, typename R>
+        template<typename Fn, typename R>
         struct SpawnBlockingState {
             // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
             std::exception_ptr error{nullptr};
@@ -46,37 +45,40 @@ namespace wavex {
             Fn func;
 
             // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
-            explicit SpawnBlockingState(Fn f) : func(std::move(f)) {}
+            explicit SpawnBlockingState(Fn f) : func(std::move(f)) {
+            }
         };
 
-        template <typename Fn>
+        template<typename Fn>
         struct SpawnBlockingVoidState {
             // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
             std::exception_ptr error{nullptr};
             Fn func;
 
             // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
-            explicit SpawnBlockingVoidState(Fn f) : func(std::move(f)) {}
+            explicit SpawnBlockingVoidState(Fn f) : func(std::move(f)) {
+            }
         };
 
-        template <typename Fn, typename R>
+        template<typename Fn, typename R>
         asio::awaitable<R> spawn_blocking_impl(Fn fn, server::BlockingThreadPool &pool) {
-            auto state = std::make_shared<SpawnBlockingState<Fn, R>>(std::move(fn));
+            auto state = std::make_shared<SpawnBlockingState<Fn, R> >(std::move(fn));
 
-            co_await asio::async_initiate<const asio::use_awaitable_t<>&, void(std::exception_ptr)>(
-                [&pool, state](auto handler) {
-                    using HandlerType = std::decay_t<decltype(handler)>;
+            co_await asio::async_initiate<const asio::use_awaitable_t<> &, void(std::exception_ptr)>(
+                [&pool, state]<typename T0>(T0 handler) {
+                    using HandlerType = std::decay_t<T0>;
                     auto executor = asio::get_associated_executor(handler);
+                    auto work = asio::make_work_guard(executor);
                     auto shared_handler = std::make_shared<HandlerType>(std::move(handler));
 
-                    pool.dispatch([state, executor, shared_handler]() mutable {
+                    pool.dispatch([state, executor, shared_handler, work = std::move(work)]() mutable {
                         try {
                             state->result.emplace(state->func());
                         } catch (...) {
                             state->error = std::current_exception();
                         }
 
-                        asio::post(executor, [state, shared_handler]() mutable {
+                        asio::post(executor, [state, shared_handler, work = std::move(work)]() mutable {
                             auto h = std::move(*shared_handler);
                             h(state->error);
                         });
@@ -92,24 +94,25 @@ namespace wavex {
             co_return std::move(*state->result);
         }
 
-        template <typename Fn>
+        template<typename Fn>
         asio::awaitable<void> spawn_blocking_void_impl(Fn fn, server::BlockingThreadPool &pool) {
-            auto state = std::make_shared<SpawnBlockingVoidState<Fn>>(std::move(fn));
+            auto state = std::make_shared<SpawnBlockingVoidState<Fn> >(std::move(fn));
 
-            co_await asio::async_initiate<const asio::use_awaitable_t<>&, void(std::exception_ptr)>(
-                [&pool, state](auto handler) {
-                    using HandlerType = std::decay_t<decltype(handler)>;
+            co_await asio::async_initiate<const asio::use_awaitable_t<> &, void(std::exception_ptr)>(
+                [&pool, state]<typename T0>(T0 handler) {
+                    using HandlerType = std::decay_t<T0>;
                     auto executor = asio::get_associated_executor(handler);
+                    auto work = asio::make_work_guard(executor);
                     auto shared_handler = std::make_shared<HandlerType>(std::move(handler));
 
-                    pool.dispatch([state, executor, shared_handler]() mutable {
+                    pool.dispatch([state, executor, shared_handler, work = std::move(work)]() mutable {
                         try {
                             state->func();
                         } catch (...) {
                             state->error = std::current_exception();
                         }
 
-                        asio::post(executor, [state, shared_handler]() mutable {
+                        asio::post(executor, [state, shared_handler, work = std::move(work)]() mutable {
                             auto h = std::move(*shared_handler);
                             h(state->error);
                         });
@@ -124,7 +127,6 @@ namespace wavex {
 
             co_return;
         }
-
     } // namespace detail
 
     /**
@@ -145,14 +147,13 @@ namespace wavex {
      *     res.send(hash);
      * }
      */
-    template <typename Fn>
+    template<typename Fn>
     auto spawn_blocking(Fn &&fn, server::BlockingThreadPool &pool = server::BlockingThreadPool::instance()) {
-        using R = std::remove_cvref_t<std::invoke_result_t<std::decay_t<Fn>>>;
+        using R = std::remove_cvref_t<std::invoke_result_t<std::decay_t<Fn> > >;
         if constexpr (std::is_void_v<R>) {
             return detail::spawn_blocking_void_impl(std::forward<Fn>(fn), pool);
         } else {
             return detail::spawn_blocking_impl<std::decay_t<Fn>, R>(std::forward<Fn>(fn), pool);
         }
     }
-
 } // namespace wavex

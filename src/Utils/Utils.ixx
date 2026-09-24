@@ -16,18 +16,16 @@ module;
 
 export module wavex:utils;
 
-export import :utils_temp_file;
-export import :utils_compression;
-export import :utils_multipart;
-
 export namespace wavex::utils {
-    using wavex::utils::TempFileGuard;
-    using wavex::utils::CompressionFormat;
-    using wavex::utils::Compressor;
-    using wavex::utils::UploadedFile;
-    using wavex::utils::FormField;
-    using wavex::utils::MultipartLimits;
-    using wavex::utils::MultipartFormData;
+    using utils::FileMode;
+    using utils::BinaryFile;
+    using utils::TempFileGuard;
+    using utils::CompressionFormat;
+    using utils::Compressor;
+    using utils::UploadedFile;
+    using utils::FormField;
+    using utils::MultipartLimits;
+    using utils::MultipartFormData;
 }
 
 export namespace wavex::fs {

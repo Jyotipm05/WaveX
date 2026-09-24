@@ -80,3 +80,10 @@ This rule governs all Asio networking, socket options, coroutine frame lifetimes
 - **Worker Thread Deadlock Immunity**: During programmatic shutdown, the final shutdown step (`finish_shutdown()`) must be posted to `master_io_` rather than calling `pool_.stop_pool()` directly from inside a worker thread, ensuring worker threads never attempt to join themselves.
 - **Response Stamping**: In-flight requests finishing during shutdown must have their responses stamped with `Connection: close`.
 - **Test Signal Isolation**: Automated unit tests using loopback test servers must configure `server.enable_signal_handling(false)` to prevent background signal registration from interfering with the test runner's global signal table.
+
+---
+
+## 7. Windows Sockets & Completion Executor Macro Invariants
+
+- **Winsock Linking**: On Windows platforms, all CMake networking targets must explicitly link `ws2_32` and `mswsock` (`PUBLIC`). GNU `ld` on MinGW does not process `#pragma comment(lib, ...)`, which causes link-time failures (`undefined reference to '__imp_WSAStartup'`, etc.) if omitted.
+- **TS Executor Prohibited**: Never define `ASIO_USE_TS_EXECUTOR_AS_DEFAULT` in any codebase header or build flag. It alters the fundamental type of `asio::any_completion_executor`, conflicting with modern C++20 awaitable signatures and triggering MSVC `C2371` type redefinition errors.

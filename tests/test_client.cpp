@@ -15,8 +15,6 @@
 
 #include <wavex/wavex.hpp>
 
-import wavex;
-
 using HttpRequest = wavex::protos::http::Http1Request;
 using HttpResponse = wavex::protos::http::Http1Response;
 using HttpRouter = wavex::engine::Http1Router;

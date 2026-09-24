@@ -22,19 +22,13 @@
 #include <utility>
 #include <optional>
 #include <chrono>
-#include <cctype>
 #include <type_traits>
 
 #include <asio/awaitable.hpp>
-#include <asio/co_spawn.hpp>
 #include <nlohmann/json.hpp>
 
-#include <filesystem>
-#include <fstream>
-#include <wavex/Base/MimeTypes.hpp>
+
 #include <wavex/Base/Response.hpp>
-#include <wavex/Base/Uri.hpp>
-#include <wavex/Base/Url.hpp>
 #include <wavex/Utils/Multipart.hpp>
 #include <wavex/Utils/Compression.hpp>
 #include <wavex/protos/http/HttpRequest.hpp>
@@ -53,9 +47,9 @@ namespace wavex::client {
      * @brief Target HTTP protocol version for client requests.
      */
     enum class HttpVersion {
-        Auto,     ///< Auto-negotiate via ALPN on TLS (h2/http1.1); default to HTTP/1.1 on plain TCP
-        Http1_1,  ///< Enforce HTTP/1.1 (skip HTTP/2 framing overhead)
-        Http2     ///< Enforce HTTP/2 (ALPN "h2" on TLS; prior-knowledge h2c on plain TCP)
+        Auto, ///< Auto-negotiate via ALPN on TLS (h2/http1.1); default to HTTP/1.1 on plain TCP
+        Http1_1, ///< Enforce HTTP/1.1 (skip HTTP/2 framing overhead)
+        Http2 ///< Enforce HTTP/2 (ALPN "h2" on TLS; prior-knowledge h2c on plain TCP)
     };
 
     /**
@@ -73,7 +67,7 @@ namespace wavex::client {
     };
 
     /// Key-value query parameters alias
-    using QueryParams = std::vector<std::pair<std::string, std::string>>;
+    using QueryParams = std::vector<std::pair<std::string, std::string> >;
 
     /**
      * @class ClientRequest
@@ -84,7 +78,7 @@ namespace wavex::client {
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
         std::string target_{};
         QueryParams queries_{};
-        std::vector<std::pair<std::string, std::string>> headers_{};
+        std::vector<std::pair<std::string, std::string> > headers_{};
         std::string body_{};
         utils::MultipartFormData multipart_builder_{};
         protos::http::method method_{protos::http::method::GET};
@@ -122,9 +116,13 @@ namespace wavex::client {
         }
 
         ~ClientRequest() = default;
+
         ClientRequest(const ClientRequest &) = default;
+
         ClientRequest &operator=(const ClientRequest &) = default;
+
         ClientRequest(ClientRequest &&) noexcept = default;
+
         ClientRequest &operator=(ClientRequest &&) noexcept = default;
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
@@ -157,7 +155,7 @@ namespace wavex::client {
         }
 
         template<typename T>
-        requires (!std::is_convertible_v<T, std::string_view>)
+            requires (!std::is_convertible_v<T, std::string_view>)
         ClientRequest &query(const std::string_view key, const T &value) {
             queries_.emplace_back(std::string(key), std::to_string(value));
             return *this;
@@ -173,129 +171,68 @@ namespace wavex::client {
         [[nodiscard]] const QueryParams &queries() const noexcept { return queries_; }
 
         /// Set a header (overwrites if exists, case-insensitively)
-        ClientRequest &set_header(const std::string_view key, const std::string_view value) {
-            for (auto &[k, v]: headers_) {
-                if (detail_case_equal(k, key)) {
-                    v = std::string(value);
-                    return *this;
-                }
-            }
-            headers_.emplace_back(std::string(key), std::string(value));
-            return *this;
-        }
+        ClientRequest &set_header(std::string_view key, std::string_view value);
 
-        [[nodiscard]] std::optional<std::string_view> header(const std::string_view key) const noexcept {
-            for (const auto &[k, v]: headers_) {
-                if (detail_case_equal(k, key)) return v;
-            }
-            return std::nullopt;
-        }
+        [[nodiscard]] std::optional<std::string_view> header(std::string_view key) const noexcept;
 
         [[nodiscard]] const std::vector<std::pair<std::string, std::string> > &headers() const noexcept {
             return headers_;
         }
 
         /// Set body with optional Content-Type
-        ClientRequest &set_body(const std::string_view body, const std::string_view content_type = "") {
-            body_ = std::string(body);
-            if (!content_type.empty()) {
-                set_header("Content-Type", content_type);
-            }
-            return *this;
-        }
+        ClientRequest &set_body(std::string_view body, std::string_view content_type = "");
 
         /// Set JSON body (sets Content-Type to application/json automatically)
-        ClientRequest &json(const nlohmann::json &j) {
-            body_ = j.dump();
-            set_header("Content-Type", "application/json");
-            return *this;
-        }
+        ClientRequest &json(const nlohmann::json &j);
 
         [[nodiscard]] const std::string &body() const noexcept { return body_; }
 
         /// Attach a pre-composed multipart/form-data payload
-        ClientRequest &multipart(const utils::MultipartFormData &form) {
-            body_ = form.compose();
-            set_header("Content-Type", form.content_type_header());
-            return *this;
-        }
+        ClientRequest &multipart(const utils::MultipartFormData &form);
 
         /// Add a form field to the multipart payload
-        ClientRequest &add_field(const std::string_view name, const std::string_view value) {
-            multipart_builder_.add_field(name, value);
-            return multipart(multipart_builder_);
-        }
+        ClientRequest &add_field(std::string_view name, std::string_view value);
 
         /// Add an in-memory file to the multipart payload
-        ClientRequest &add_file(const std::string_view name,
-                                const std::string_view filename,
-                                const std::string_view data,
-                                const std::string_view content_type = "") {
-            std::string ct(content_type);
-            if (ct.empty()) {
-                ct = std::string(base::mime_type_from_path(filename));
-            }
-            multipart_builder_.add_file(name, filename, data, ct);
-            return multipart(multipart_builder_);
-        }
+        ClientRequest &add_file(std::string_view name,
+                                std::string_view filename,
+                                std::string_view data,
+                                std::string_view content_type = "");
 
         /// Add a file from disk to the multipart payload
-        ClientRequest &add_file_from_path(const std::string_view name,
-                                          const std::filesystem::path &filepath,
-                                          const std::string_view content_type = "") {
-            std::ifstream file(filepath, std::ios::binary);
-            if (file) {
-                std::string content((std::istreambuf_iterator<char>(file)),
-                                    std::istreambuf_iterator<char>());
-                std::string filename = filepath.filename().string();
-                std::string ct(content_type);
-                if (ct.empty()) {
-                    ct = std::string(base::mime_type_from_path(filepath.string()));
-                }
-                multipart_builder_.add_file(name, filename, content, ct);
-                multipart(multipart_builder_);
+        ClientRequest &add_file_from_path(std::string_view name,
+                                          const std::string &filepath,
+                                          std::string_view content_type = "");
+
+        template<typename PathLike>
+            requires (!std::is_convertible_v<PathLike, const std::string &>)
+        ClientRequest &add_file_from_path(std::string_view name,
+                                          const PathLike &filepath,
+                                          std::string_view content_type = "") {
+            if constexpr (requires { filepath.string(); }) {
+                return add_file_from_path(name, filepath.string(), content_type);
+            } else {
+                return add_file_from_path(name, std::string(filepath), content_type);
             }
-            return *this;
         }
 
         /// Set raw binary body from a file on disk
-        ClientRequest &file_body(const std::filesystem::path &filepath,
-                                 const std::string_view content_type = "") {
-            std::ifstream file(filepath, std::ios::binary);
-            if (file) {
-                body_.assign((std::istreambuf_iterator<char>(file)),
-                             std::istreambuf_iterator<char>());
-                std::string ct(content_type);
-                if (ct.empty()) {
-                    ct = std::string(base::mime_type_from_path(filepath.string()));
-                }
-                set_header("Content-Type", ct);
+        ClientRequest &file_body(const std::string &filepath,
+                                 std::string_view content_type = "");
+
+        template<typename PathLike>
+            requires (!std::is_convertible_v<PathLike, const std::string &>)
+        ClientRequest &file_body(const PathLike &filepath,
+                                 std::string_view content_type = "") {
+            if constexpr (requires { filepath.string(); }) {
+                return file_body(filepath.string(), content_type);
+            } else {
+                return file_body(std::string(filepath), content_type);
             }
-            return *this;
         }
 
         /// Compress request body using gzip or deflate
-        ClientRequest &compress(const utils::CompressionFormat format = utils::CompressionFormat::Gzip) {
-            if (auto compressed = utils::Compressor::compress(body_, format); compressed.has_value()) {
-                body_ = std::move(*compressed);
-                set_header("Content-Encoding",
-                           format == utils::CompressionFormat::Gzip ? "gzip" : "deflate");
-            }
-            return *this;
-        }
-
-    private:
-        static bool detail_case_equal(const std::string_view a, const std::string_view b) noexcept {
-            if (a.size() != b.size()) return false;
-            for (size_t i = 0; i < a.size(); ++i) {
-                if (std::tolower(static_cast<unsigned char>(a[i])) !=
-                    std::tolower(static_cast<unsigned char>(b[i]))) {
-                    return false;
-                }
-            }
-            return true;
-        }
-
+        ClientRequest &compress(utils::CompressionFormat format = utils::CompressionFormat::Gzip);
     };
 
     /**
@@ -311,17 +248,22 @@ namespace wavex::client {
         std::string status_text_{};
         std::string body_{};
         std::string raw_buffer_{}; ///< Stores full HTTP/1.1 wire bytes for raw_response()
-        std::vector<std::pair<std::string, std::string>> headers_storage_{};
+        std::vector<std::pair<std::string, std::string> > headers_storage_{};
         unsigned int status_code_{0};
         HttpVersion version_{HttpVersion::Auto};
 
     public:
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         ClientResponse() = default;
+
         ~ClientResponse() = default;
+
         ClientResponse(const ClientResponse &) = default;
+
         ClientResponse &operator=(const ClientResponse &) = default;
+
         ClientResponse(ClientResponse &&) noexcept = default;
+
         ClientResponse &operator=(ClientResponse &&) noexcept = default;
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
@@ -402,43 +344,30 @@ namespace wavex::client {
             return raw_buffer_;
         }
 
-        [[nodiscard]] nlohmann::json json() const {
-            return nlohmann::json::parse(body_);
-        }
+        [[nodiscard]] nlohmann::json json() const;
 
         /**
          * @brief Decompresses response body using Content-Encoding header or fallback format.
          * @param format Default compression algorithm if Content-Encoding is unspecified.
          */
         [[nodiscard]] std::optional<std::string> decompressed_body(
-            const utils::CompressionFormat format = utils::CompressionFormat::Gzip) const {
-            auto decompress_helper = [](const std::string_view d, const utils::CompressionFormat fmt) -> std::optional<std::string> {
-                auto res = utils::Compressor::decompress(d, fmt);
-                if (res) return *res;
-                return std::nullopt;
-            };
-            const auto enc = header("Content-Encoding");
-            if (enc.has_value()) {
-                if (enc->find("gzip") != std::string_view::npos) {
-                    return decompress_helper(body_, utils::CompressionFormat::Gzip);
-                }
-                if (enc->find("deflate") != std::string_view::npos) {
-                    return decompress_helper(body_, utils::CompressionFormat::Deflate);
-                }
-            }
-            return decompress_helper(body_, format);
-        }
+            utils::CompressionFormat format = utils::CompressionFormat::Gzip) const;
 
         /**
          * @brief Saves response body to a file on disk.
          * @param dest_path Target file path.
          * @return True if written successfully, false otherwise.
          */
-        bool save_to_file(const std::filesystem::path &dest_path) const {
-            std::ofstream out(dest_path, std::ios::binary);
-            if (!out) [[unlikely]] return false;
-            out.write(body_.data(), static_cast<std::streamsize>(body_.size()));
-            return out.good();
+        bool save_to_file(const std::string &dest_path) const;
+
+        template<typename PathLike>
+            requires (!std::is_convertible_v<PathLike, const std::string &>)
+        bool save_to_file(const PathLike &dest_path) const {
+            if constexpr (requires { dest_path.string(); }) {
+                return save_to_file(dest_path.string());
+            } else {
+                return save_to_file(std::string(dest_path));
+            }
         }
 
         // Implicit conversions for backward compatibility
@@ -461,8 +390,6 @@ namespace wavex::client {
             res.send(body_);
             return res;
         }
-
-
     };
 
     /**
@@ -486,8 +413,8 @@ namespace wavex::client {
          * @brief Backward-compatible send overload for Http1Request.
          */
         static asio::awaitable<Http1Response> send(Http1Request req, const ClientOptions &options = {}) {
-            ClientRequest creq(req);
-            ClientResponse c_res = co_await send(creq, options);
+            ClientRequest c_req(req);
+            ClientResponse c_res = co_await send(c_req, options);
             co_return static_cast<Http1Response>(c_res);
         }
 
@@ -495,12 +422,12 @@ namespace wavex::client {
          * @brief Send overload for Http2Request.
          */
         static asio::awaitable<Http2Response> send(Http2Request req, const ClientOptions &options = {}) {
-            ClientRequest creq(req);
+            ClientRequest c_req(req);
             ClientOptions opts = options;
             if (opts.version == HttpVersion::Auto) {
                 opts.version = HttpVersion::Http2;
             }
-            ClientResponse c_res = co_await send(creq, opts);
+            ClientResponse c_res = co_await send(c_req, opts);
             co_return static_cast<Http2Response>(c_res);
         }
 
@@ -546,7 +473,7 @@ namespace wavex::client {
 
 
         template<typename ResponseType = ClientResponse, typename JsonBody>
-        requires (std::is_same_v<std::remove_cvref_t<JsonBody>, nlohmann::json>)
+            requires (std::is_same_v<std::remove_cvref_t<JsonBody>, nlohmann::json>)
         static asio::awaitable<ResponseType> post(const std::string_view url, JsonBody &&json_body,
                                                   const ClientOptions &options = {}) {
             ClientRequest req(method::POST, url);
@@ -576,7 +503,7 @@ namespace wavex::client {
 
 
         template<typename ResponseType = ClientResponse, typename JsonBody>
-        requires (std::is_same_v<std::remove_cvref_t<JsonBody>, nlohmann::json>)
+            requires (std::is_same_v<std::remove_cvref_t<JsonBody>, nlohmann::json>)
         static asio::awaitable<ResponseType> put(const std::string_view url, JsonBody &&json_body,
                                                  const ClientOptions &options = {}) {
             ClientRequest req(method::PUT, url);

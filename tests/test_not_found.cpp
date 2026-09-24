@@ -17,6 +17,25 @@ namespace {
     int tests_run = 0;
     int tests_passed = 0;
 
+    inline bool is_test_verbose() {
+        static const bool verbose = [] {
+#if defined(WAVEX_TEST_VERBOSE)
+            return true;
+#else
+            const char *env = std::getenv("WAVEX_TEST_VERBOSE");
+            return env != nullptr && std::string_view(env) != "0";
+#endif
+        }();
+        return verbose;
+    }
+
+#define TEST_LOG(msg) \
+    do { \
+        if (is_test_verbose()) { \
+            std::cout << "  [DEBUG] " << msg << std::endl; \
+        } \
+    } while (false)
+
     void check(const bool condition, const char *name) {
         ++tests_run;
         if (condition) {
@@ -31,7 +50,7 @@ namespace {
 // ─── Test 1: Router Default 404 Handler ───────────────────────────────────────
 
 void test_router_default_not_found() {
-    std::cout << "\n[Test 1] Router default 404 handler returns 'Not Found'\n";
+    std::cout << "\n[Test 1] Router default 404 handler returns 'Not Found'" << std::endl;
 
     auto router = wavex::engine::Http1Router::make_instance();
     router.get("/hello", [](auto &, auto &res) -> asio::awaitable<void> {
@@ -57,7 +76,7 @@ void test_router_default_not_found() {
 // ─── Test 2: Router Custom String & Content-Type ──────────────────────────────
 
 void test_router_custom_string_not_found() {
-    std::cout << "\n[Test 2] Router custom string & Content-Type\n";
+    std::cout << "\n[Test 2] Router custom string & Content-Type" << std::endl;
 
     auto router = wavex::engine::Http1Router::make_instance();
     router.not_found("<h1>Oops! Page Not Found</h1>", "text/html");
@@ -79,9 +98,9 @@ void test_router_custom_string_not_found() {
 // ─── Test 3: Router Custom Page from File ─────────────────────────────────────
 
 void test_router_custom_page_file() {
-    std::cout << "\n[Test 3] Router custom page from file\n";
+    std::cout << "\n[Test 3] Router custom page from file" << std::endl;
 
-    // Create a temporary 404 html file
+    // Create a temporary 404 HTML file
     std::string temp_file = "test_temp_404.html"; {
         std::ofstream out(temp_file);
         out << "<!DOCTYPE html><html><body><h1>404 Custom Error</h1></body></html>";
@@ -120,7 +139,7 @@ void test_router_custom_page_file() {
 // ─── Test 4: Router Dynamic Coroutine Handler ─────────────────────────────────
 
 void test_router_dynamic_coroutine_handler() {
-    std::cout << "\n[Test 4] Router dynamic coroutine handler\n";
+    std::cout << "\n[Test 4] Router dynamic coroutine handler" << std::endl;
 
     auto router = wavex::engine::Http1Router::make_instance();
     router.not_found([](wavex::protos::http::Http1Request &req,
@@ -151,7 +170,7 @@ void test_router_dynamic_coroutine_handler() {
 // ─── Test 5: Server Integration Test - Default 404 Wire Response ──────────────
 
 void test_server_default_404_integration() {
-    std::cout << "\n[Test 5] Server integration: default 404 wire response\n";
+    std::cout << "\n[Test 5] Server integration: default 404 wire response" << std::endl;
 
     auto router = wavex::engine::Http1Router::make_instance();
     router.get("/valid", [](auto &, auto &res) -> asio::awaitable<void> {
@@ -159,88 +178,106 @@ void test_server_default_404_integration() {
         co_return;
     });
 
-    const unsigned short port = 19180;
+    constexpr unsigned short port = 19180;
     wavex::server::Http1Server server(router, "127.0.0.1", port);
     server.enable_signal_handling(false);
 
+    TEST_LOG("[Test 5] Starting server thread...");
     std::thread server_thread([&server] {
         server.run();
     });
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     try {
         asio::io_context client_ioc;
         asio::ip::tcp::socket client_socket(client_ioc);
+        TEST_LOG("[Test 5] Connecting client socket...");
         client_socket.connect(asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), port));
 
         std::string req = "GET /does_not_exist HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+        TEST_LOG("[Test 5] Writing request...");
         asio::write(client_socket, asio::buffer(req));
 
         char buf[2048];
+        TEST_LOG("[Test 5] Reading response...");
         std::size_t n = client_socket.read_some(asio::buffer(buf));
         std::string resp(buf, n);
+        TEST_LOG("[Test 5] Read " << n << " bytes.");
 
         check(resp.find("HTTP/1.1 404 Not Found") != std::string::npos, "Response wire has HTTP/1.1 404 Not Found");
         check(resp.find("Not Found") != std::string::npos, "Response body has 'Not Found'");
 
+        TEST_LOG("[Test 5] Closing client socket...");
         client_socket.close();
-    } catch (const std::exception &e) {
-        std::cerr << "Client error: " << e.what() << "\n";
+    } catch (...) {
         check(false, "Integration test failed with exception");
     }
 
+    TEST_LOG("[Test 5] Calling server.stop()...");
     server.stop();
-    if (server_thread.joinable()) server_thread.join();
+    if (server_thread.joinable()) {
+        server_thread.join();
+        TEST_LOG("[Test 5] Server thread joined.");
+    }
 }
 
 // ─── Test 6: Server Integration Test - Custom Server-Level 404 Override ───────
 
 void test_server_custom_404_integration() {
-    std::cout << "\n[Test 6] Server integration: custom server-level 404 override\n";
+    std::cout << "\n[Test 6] Server integration: custom server-level 404 override" << std::endl;
 
     auto router = wavex::engine::Http1Router::make_instance();
-    const unsigned short port = 19181;
+    constexpr unsigned short port = 19181;
     wavex::server::Http1Server server(router, "127.0.0.1", port);
     server.enable_signal_handling(false);
     server.set_not_found("Custom 404: The requested resource does not exist.", "text/plain");
 
+    TEST_LOG("[Test 6] Starting server thread...");
     std::thread server_thread([&server] {
         server.run();
     });
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     try {
         asio::io_context client_ioc;
         asio::ip::tcp::socket client_socket(client_ioc);
+        TEST_LOG("[Test 6] Connecting client socket...");
         client_socket.connect(asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), port));
 
         std::string req = "GET /anything HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+        TEST_LOG("[Test 6] Writing request...");
         asio::write(client_socket, asio::buffer(req));
 
         char buf[2048];
+        TEST_LOG("[Test 6] Reading response...");
         std::size_t n = client_socket.read_some(asio::buffer(buf));
         std::string resp(buf, n);
+        TEST_LOG("[Test 6] Read " << n << " bytes.");
 
         check(resp.find("HTTP/1.1 404 Not Found") != std::string::npos, "Response status line is 404 Not Found");
         check(resp.find("Custom 404: The requested resource does not exist.") != std::string::npos,
               "Response body contains custom server text");
 
+        TEST_LOG("[Test 6] Closing client socket...");
         client_socket.close();
-    } catch (const std::exception &e) {
-        std::cerr << "Client error: " << e.what() << "\n";
+    } catch (...) {
         check(false, "Custom server 404 test failed with exception");
     }
 
+    TEST_LOG("[Test 6] Calling server.stop()...");
     server.stop();
-    if (server_thread.joinable()) server_thread.join();
+    if (server_thread.joinable()) {
+        server_thread.join();
+        TEST_LOG("[Test 6] Server thread joined.");
+    }
 }
 
 // ─── Test 7: Server Integration Test - Keep-Alive Persistence on 404 ──────────
 
 void test_server_keep_alive_on_404() {
-    std::cout << "\n[Test 7] Server integration: keep-alive persistence across 404\n";
+    std::cout << "\n[Test 7] Server integration: keep-alive persistence across 404" << std::endl;
 
     auto router = wavex::engine::Http1Router::make_instance();
     router.get("/valid", [](auto &, auto &res) -> asio::awaitable<void> {
@@ -248,69 +285,88 @@ void test_server_keep_alive_on_404() {
         co_return;
     });
 
-    const unsigned short port = 19182;
+    constexpr unsigned short port = 19182;
     wavex::server::Http1Server server(router, "127.0.0.1", port);
     server.enable_signal_handling(false);
     server.set_keep_alive_timeout(std::chrono::seconds(5));
 
+    TEST_LOG("[Test 7] Starting server thread...");
     std::thread server_thread([&server] {
         server.run();
     });
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     try {
         asio::io_context client_ioc;
         asio::ip::tcp::socket client_socket(client_ioc);
+        TEST_LOG("[Test 7] Connecting client socket...");
         client_socket.connect(asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), port));
 
         // 1. Request 404 with keep-alive
         std::string req1 = "GET /not_real HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+        TEST_LOG("[Test 7] Writing request 1 (keep-alive)...");
         asio::write(client_socket, asio::buffer(req1));
 
         char buf[2048];
+        TEST_LOG("[Test 7] Reading response 1...");
         std::size_t n1 = client_socket.read_some(asio::buffer(buf));
         std::string resp1(buf, n1);
+        TEST_LOG("[Test 7] Read " << n1 << " bytes.");
 
         check(resp1.find("HTTP/1.1 404 Not Found") != std::string::npos, "Request 1 responded 404");
         check(resp1.find("Connection: keep-alive") != std::string::npos, "Request 1 kept alive after 404");
 
         // 2. Request valid endpoint on same persistent socket
         std::string req2 = "GET /valid HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+        TEST_LOG("[Test 7] Writing request 2 (close)...");
         asio::write(client_socket, asio::buffer(req2));
 
+        TEST_LOG("[Test 7] Reading response 2...");
         std::size_t n2 = client_socket.read_some(asio::buffer(buf));
         std::string resp2(buf, n2);
+        TEST_LOG("[Test 7] Read " << n2 << " bytes.");
 
         check(resp2.find("HTTP/1.1 200 OK") != std::string::npos, "Request 2 on same socket responded 200 OK");
         check(resp2.find("Valid") != std::string::npos, "Request 2 returned expected body");
 
+        TEST_LOG("[Test 7] Closing client socket...");
         client_socket.close();
-    } catch (const std::exception &e) {
-        std::cerr << "Client error: " << e.what() << "\n";
+    } catch (...) {
         check(false, "Keep-alive 404 test failed with exception");
     }
 
+    TEST_LOG("[Test 7] Calling server.stop()...");
     server.stop();
-    if (server_thread.joinable()) server_thread.join();
+    if (server_thread.joinable()) {
+        server_thread.join();
+        TEST_LOG("[Test 7] Server thread joined.");
+    }
 }
 
 int main() {
     std::cout << "========================================\n";
     std::cout << "   WaveX 404 Not Found Handling Tests   \n";
-    std::cout << "========================================\n";
+    std::cout << "========================================\n" << std::endl;
 
+    std::cout << "[Runner] Executing Test 1..." << std::endl;
     test_router_default_not_found();
+    std::cout << "[Runner] Executing Test 2..." << std::endl;
     test_router_custom_string_not_found();
+    std::cout << "[Runner] Executing Test 3..." << std::endl;
     test_router_custom_page_file();
+    std::cout << "[Runner] Executing Test 4..." << std::endl;
     test_router_dynamic_coroutine_handler();
+    std::cout << "[Runner] Executing Test 5..." << std::endl;
     test_server_default_404_integration();
+    std::cout << "[Runner] Executing Test 6..." << std::endl;
     test_server_custom_404_integration();
+    std::cout << "[Runner] Executing Test 7..." << std::endl;
     test_server_keep_alive_on_404();
 
     std::cout << "\n========================================\n";
     std::cout << "Results: " << tests_passed << " / " << tests_run << " passed\n";
-    std::cout << "========================================\n";
+    std::cout << "========================================\n" << std::endl;
 
     return (tests_passed == tests_run) ? 0 : 1;
 }

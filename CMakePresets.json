@@ -63,12 +63,76 @@
         "WAVEX_TEST_ASAN": "ON",
         "WAVEX_USE_LLD": "ON"
       }
+    },
+    {
+      "name": "base-mingw",
+      "hidden": true,
+      "inherits": "base",
+      "vendor": {
+        "jetbrains.com/clion": {
+          "toolchain": "MinGW"
+        }
+      },
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++",
+        "VCPKG_TARGET_TRIPLET": "x64-mingw-dynamic",
+        "WAVEX_USE_MODULE": "OFF"
+      },
+      "environment": {
+        "VCPKG_MAX_CONCURRENCY": "6"
+      }
+    },
+    {
+      "name": "release-mingw",
+      "displayName": "Release (MinGW)",
+      "inherits": "base-mingw",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "WAVEX_TEST": "OFF",
+        "WAVEX_USE_LLD": "OFF"
+      }
+    },
+    {
+      "name": "test-profile-mingw",
+      "displayName": "Dev (MinGW)",
+      "inherits": "base-mingw",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "WAVEX_TEST": "ON",
+        "WAVEX_USE_LLD": "OFF",
+        "CMAKE_C_COMPILER": "D:/mingw64/bin/gcc.exe",
+        "CMAKE_CXX_COMPILER": "D:/mingw64/bin/g++.exe"
+      }
+    },
+    {
+      "name": "rel-profile-mingw",
+      "displayName": "Dev-Rel (MinGW)",
+      "inherits": "base-mingw",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "WAVEX_TEST": "ON",
+        "WAVEX_USE_LLD": "OFF"
+      }
     }
   ],
   "testPresets": [
     {
       "name": "run-tests",
       "configurePreset": "test-profile"
+    },
+    {
+      "name": "run-tests-verbose",
+      "displayName": "Run tests (Verbose Diagnostics)",
+      "configurePreset": "test-profile",
+      "environment": {
+        "WAVEX_TEST_VERBOSE": "1"
+      }
+    },
+    {
+      "name": "run-tests-mingw",
+      "displayName": "Run tests (MinGW)",
+      "configurePreset": "test-profile-mingw"
     },
     {
       "name": "tsan",
@@ -127,7 +191,30 @@
       "displayName": "Fast Release",
       "inherits": ".fast-build",
       "configurePreset": "release"
+    },
+    {
+      "name": "fast-dev-mingw",
+      "displayName": "Fast Dev (MinGW)",
+      "inherits": ".fast-build",
+      "configurePreset": "test-profile-mingw"
+    },
+    {
+      "name": "fast-rel-dev-mingw",
+      "displayName": "Fast Dev(Rel) (MinGW)",
+      "inherits": ".fast-build",
+      "configurePreset": "rel-profile-mingw"
+    },
+    {
+      "name": "max-dev-mingw",
+      "displayName": "Max Dev (MinGW)",
+      "inherits": ".max-build",
+      "configurePreset": "test-profile-mingw"
+    },
+    {
+      "name": "fast-release-mingw",
+      "displayName": "Fast Release (MinGW)",
+      "inherits": ".fast-build",
+      "configurePreset": "release-mingw"
     }
   ]
 }
-

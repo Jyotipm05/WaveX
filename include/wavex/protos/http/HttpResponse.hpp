@@ -20,8 +20,7 @@
 #include <utility>
 #include <expected>
 #include <chrono>
-#include <fstream>
-#include <filesystem>
+#include <wavex/Utils/BinaryFile.hpp>
 #include <system_error>
 #include <functional>
 #include <memory_resource>
@@ -237,6 +236,7 @@ namespace wavex::protos::http {
                         const auto off = static_cast<std::size_t>(sv.data() - buf_base);
                         if (off < buf_len && off + sv.size() <= buf_len)
                             return {my_base + off, sv.size()};
+                        // ReSharper disable once CppDFALocalValueEscapesFunction
                         return sv;
                     };
                     headers_views_.clear();
@@ -586,17 +586,12 @@ namespace wavex::protos::http {
             const CompressionMode compression = CompressionMode::None) {
             (void) compression; // Reserved for future zlib update
 
-            std::filesystem::path path(filepath);
-            std::error_code ec;
-            const uintmax_t file_size = std::filesystem::file_size(path, ec);
-            if (ec) {
-                co_return std::unexpected(std::make_error_code(std::errc::no_such_file_or_directory));
-            }
-
-            std::ifstream file(path, std::ios::binary);
+            utils::BinaryFile file(filepath, utils::FileMode::Read);
             if (!file.is_open()) {
                 co_return std::unexpected(std::make_error_code(std::errc::no_such_file_or_directory));
             }
+
+            const std::size_t file_size = file.file_size();
 
             this->set("Content-Type", custom_mime);
 
@@ -610,9 +605,8 @@ namespace wavex::protos::http {
                 }
 
                 std::vector<char> buf(buffer_size);
-                while (file.read(buf.data(), static_cast<std::streamsize>(buf.size())) || file.gcount() > 0) {
-                    const auto bytes_read = static_cast<std::size_t>(file.gcount());
-                    if (bytes_read == 0) break;
+                while (file.read(buf.data(), buf.size()) > 0) {
+                    const auto bytes_read = file.gCount();
                     if (auto res = co_await async_write_with_timeout(std::string_view(buf.data(), bytes_read), timeout);
                         !res) {
                         co_return res;
@@ -624,9 +618,8 @@ namespace wavex::protos::http {
 
             // Chunked streaming for large files
             std::vector<char> buf(buffer_size);
-            while (file.read(buf.data(), static_cast<std::streamsize>(buf.size())) || file.gcount() > 0) {
-                const auto bytes_read = static_cast<std::size_t>(file.gcount());
-                if (bytes_read == 0) break;
+            while (file.read(buf.data(), buf.size()) > 0) {
+                const auto bytes_read = file.gCount();
                 if (auto res = co_await write_chunk(std::string_view(buf.data(), bytes_read), timeout); !res) {
                     co_return res;
                 }
