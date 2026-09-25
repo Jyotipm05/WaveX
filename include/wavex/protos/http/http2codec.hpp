@@ -964,6 +964,19 @@ namespace wavex::protos::http {
                 hpack::dynamic_table &dt) {
                 bytes_consumed = 0;
                 std::size_t cursor = 0;
+                // CRITICAL INVARIANT: DO NOT REMOVE req.headers.clear() & storage clears!
+                // When resuming from an earlier result::incomplete parse attempt (e.g. streaming
+                // multi-chunk DATA or CONTINUATION frames across async_read_some chunks),
+                // the transport buffer (stream_buf) reallocates. Discarding stale string_views
+                // and previous partial state prevents duplicate headers and fatal 0xC0000005
+                // dangling pointer access during header lookup or processing.
+                req.headers.clear();
+                req.headers_storage.clear();
+                req.target_storage.clear();
+                req.scheme_storage.clear();
+                req.authority_storage.clear();
+                req.body_storage.clear();
+                req.body = {};
 
                 // 1. Consume connection preface if present
                 if (buffer.starts_with(CONNECTION_PREFACE)) {
@@ -1124,6 +1137,16 @@ namespace wavex::protos::http {
                 hpack::dynamic_table &dt) {
                 bytes_consumed = 0;
                 std::size_t cursor = 0;
+                // CRITICAL INVARIANT: DO NOT REMOVE res.headers.clear() & storage clears!
+                // When resuming from an earlier result::incomplete parse attempt (e.g. streaming
+                // multi-chunk DATA or CONTINUATION frames across async_read_some chunks),
+                // the transport buffer (stream_buf) reallocates. Discarding stale string_views
+                // and previous partial state prevents duplicate headers and fatal 0xC0000005
+                // dangling pointer access during header lookup or processing.
+                res.headers.clear();
+                res.headers_storage.clear();
+                res.body_storage.clear();
+                res.body = {};
 
                 hpack::dynamic_table working_dt = dt;
                 hpack::decoder dec(working_dt);

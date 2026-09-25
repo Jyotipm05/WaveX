@@ -70,6 +70,9 @@ namespace wavex::protos::http {
         /// Contiguous linear buffer owning all decoded query key-value characters.
         /// FlatMap `query` holds string_views slicing directly into this buffer.
         std::string query_decoded_buf_{};
+        /// Contiguous linear buffer owning all decoded route parameter characters.
+        /// FlatMap `params` holds string_views slicing directly into this buffer.
+        std::string params_decoded_buf_{};
         std::vector<std::pair<std::string, std::string> > headers_owned_{}; ///< owned headers (client)
         size_t consumed_{0}; ///< byte count consumed by parser
         bool query_param_overflow_{false}; ///< set when >kMaxQueryParams were present
@@ -101,10 +104,12 @@ namespace wavex::protos::http {
               path_target_owned_(other.path_target_owned_),
               body_owned_(other.body_owned_),
               query_decoded_buf_(other.query_decoded_buf_),
+              params_decoded_buf_(other.params_decoded_buf_),
               headers_owned_(other.headers_owned_),
               consumed_(other.consumed_),
               query_param_overflow_(other.query_param_overflow_) {
             rebase_query_views(other.query_decoded_buf_.data(), other.query_decoded_buf_.size());
+            rebase_params_views(other.params_decoded_buf_.data(), other.params_decoded_buf_.size());
         }
 
         HttpRequest &operator=(const HttpRequest &other) {
@@ -117,10 +122,12 @@ namespace wavex::protos::http {
                 path_target_owned_ = other.path_target_owned_;
                 body_owned_ = other.body_owned_;
                 query_decoded_buf_ = other.query_decoded_buf_;
+                params_decoded_buf_ = other.params_decoded_buf_;
                 headers_owned_ = other.headers_owned_;
                 consumed_ = other.consumed_;
                 query_param_overflow_ = other.query_param_overflow_;
                 rebase_query_views(other.query_decoded_buf_.data(), other.query_decoded_buf_.size());
+                rebase_params_views(other.params_decoded_buf_.data(), other.params_decoded_buf_.size());
             }
             return *this;
         }
@@ -134,16 +141,20 @@ namespace wavex::protos::http {
               path_target_owned_(std::move(other.path_target_owned_)),
               body_owned_(std::move(other.body_owned_)),
               query_decoded_buf_(std::move(other.query_decoded_buf_)),
+              params_decoded_buf_(std::move(other.params_decoded_buf_)),
               headers_owned_(std::move(other.headers_owned_)),
               consumed_(other.consumed_),
               query_param_overflow_(other.query_param_overflow_) {
             rebase_query_views(other.query_decoded_buf_.data(), query_decoded_buf_.size());
+            rebase_params_views(other.params_decoded_buf_.data(), params_decoded_buf_.size());
         }
 
         HttpRequest &operator=(HttpRequest &&other) noexcept {
             if (this != &other) {
-                const char *old_base = other.query_decoded_buf_.data();
-                const size_t old_len = other.query_decoded_buf_.size();
+                const char *old_q_base = other.query_decoded_buf_.data();
+                const size_t old_q_len = other.query_decoded_buf_.size();
+                const char *old_p_base = other.params_decoded_buf_.data();
+                const size_t old_p_len = other.params_decoded_buf_.size();
                 Request::operator=(std::move(other));
                 buffer_ = std::move(other.buffer_);
                 parsed_ = std::move(other.parsed_);
@@ -152,10 +163,12 @@ namespace wavex::protos::http {
                 path_target_owned_ = std::move(other.path_target_owned_);
                 body_owned_ = std::move(other.body_owned_);
                 query_decoded_buf_ = std::move(other.query_decoded_buf_);
+                params_decoded_buf_ = std::move(other.params_decoded_buf_);
                 headers_owned_ = std::move(other.headers_owned_);
                 consumed_ = other.consumed_;
                 query_param_overflow_ = other.query_param_overflow_;
-                rebase_query_views(old_base, old_len);
+                rebase_query_views(old_q_base, old_q_len);
+                rebase_params_views(old_p_base, old_p_len);
             }
             return *this;
         }
@@ -234,6 +247,96 @@ namespace wavex::protos::http {
                 return false;
             }
             return true;
+        }
+
+        /**
+         * @brief Populate route parameters with automatic percent-decoding.
+         *
+         * If a parameter value contains '%', it is decoded into `params_decoded_buf_`
+         * and a string_view slicing into that buffer is stored in `params`.
+         * If no '%' is present, zero allocation occurs and a zero-copy string_view
+         * referencing the original route slice is stored.
+         */
+        template<typename ParamContainer>
+        void set_params(const ParamContainer &route_params) {
+            params.clear();
+            params_decoded_buf_.clear();
+
+            bool any_encoded = false;
+            size_t total_est_len = 0;
+            for (const auto &[k, v]: route_params) {
+                if (v.find('%') != std::string_view::npos) {
+                    any_encoded = true;
+                }
+                total_est_len += v.size();
+            }
+
+            if (!any_encoded) {
+                for (const auto &[k, v]: route_params) {
+                    params.insert_or_assign(k, v);
+                }
+                return;
+            }
+
+            params_decoded_buf_.reserve(total_est_len + 16);
+
+            struct ParamSlice {
+                std::string_view key;
+                size_t val_start{0};
+                size_t val_len{0};
+                bool is_decoded{false};
+                std::string_view raw_val{};
+            };
+            std::array<ParamSlice, 32> slices{};
+            size_t count = 0;
+
+            for (const auto &[k, v]: route_params) {
+                if (count >= slices.size()) {
+                    params.insert_or_assign(k, v);
+                    continue;
+                }
+                if (v.find('%') != std::string_view::npos) {
+                    const size_t v_start = params_decoded_buf_.size();
+                    params_decoded_buf_ += wavex::uri::decode(v);
+                    const size_t v_len = params_decoded_buf_.size() - v_start;
+                    slices[count++] = ParamSlice{k, v_start, v_len, true, {}};
+                } else {
+                    slices[count++] = ParamSlice{k, 0, 0, false, v};
+                }
+            }
+
+            for (size_t i = 0; i < count; ++i) {
+                const auto &sl = slices[i];
+                if (sl.is_decoded) {
+                    params.insert_or_assign(
+                        sl.key,
+                        std::string_view(params_decoded_buf_.data() + sl.val_start, sl.val_len));
+                } else {
+                    params.insert_or_assign(sl.key, sl.raw_val);
+                }
+            }
+        }
+
+        /**
+         * @brief Insert or assign a route parameter with automatic percent-decoding.
+         *
+         * If the value contains '%', it is decoded into `params_decoded_buf_`.
+         * Reallocations are detected and existing views in `params` are rebased automatically.
+         */
+        void set_param(const std::string_view key, const std::string_view val) {
+            if (val.find('%') != std::string_view::npos) {
+                const char *old_base = params_decoded_buf_.data();
+                const size_t old_len = params_decoded_buf_.size();
+                std::string decoded = wavex::uri::decode(val);
+                params_decoded_buf_ += decoded;
+                if (params_decoded_buf_.data() != old_base && old_base != nullptr) {
+                    rebase_params_views(old_base, old_len);
+                }
+                const size_t start = params_decoded_buf_.size() - decoded.size();
+                params.insert_or_assign(key, std::string_view(params_decoded_buf_.data() + start, decoded.size()));
+            } else {
+                params.insert_or_assign(key, val);
+            }
         }
 
         // ── Client-side Fluent Setters ──────────────────────────────────────
@@ -519,6 +622,29 @@ namespace wavex::protos::http {
                 updated.insert_or_assign(new_k, new_v);
             }
             query = std::move(updated);
+        }
+
+        void rebase_params_views(const char *src_base, const size_t src_len) {
+            if (src_base == nullptr || src_len == 0 || params_decoded_buf_.empty()) {
+                return;
+            }
+            const char *dst_base = params_decoded_buf_.data();
+            if (src_base == dst_base) {
+                return;
+            }
+            base::FlatMap<std::string_view, std::string_view> updated;
+            for (const auto &[k, v]: params) {
+                std::string_view new_k = k;
+                std::string_view new_v = v;
+                if (k.data() >= src_base && k.data() < src_base + src_len) {
+                    new_k = std::string_view(dst_base + (k.data() - src_base), k.size());
+                }
+                if (v.data() >= src_base && v.data() < src_base + src_len) {
+                    new_v = std::string_view(dst_base + (v.data() - src_base), v.size());
+                }
+                updated.insert_or_assign(new_k, new_v);
+            }
+            params = std::move(updated);
         }
 
         void rebuild_headers_views() {

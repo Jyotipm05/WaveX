@@ -301,6 +301,10 @@ namespace wavex::protos::http {
                                     std::size_t &bytes_consumed) {
             bytes_consumed = 0;
             std::size_t cursor = 0;
+            // CRITICAL INVARIANT: DO NOT REMOVE req.headers.clear()!
+            // Discards stale string_views referencing previous reallocated stream_buf turns
+            // when resuming from an earlier result::incomplete parse attempt.
+            req.headers.clear();
 
             // ── Request line ──────────────────────────────────────────────────────
             std::size_t rl_end = 0;
@@ -342,6 +346,10 @@ namespace wavex::protos::http {
                                      std::size_t &bytes_consumed) {
             bytes_consumed = 0;
             std::size_t cursor = 0;
+            // CRITICAL INVARIANT: DO NOT REMOVE res.headers.clear()!
+            // Discards stale string_views referencing previous reallocated stream_buf turns
+            // when resuming from an earlier result::incomplete parse attempt.
+            res.headers.clear();
 
             // ── Status line ───────────────────────────────────────────────────────
             std::size_t sl_end = 0;
@@ -401,6 +409,14 @@ namespace wavex::protos::http {
         static result parse_headers(const std::string_view buffer,
                                     std::size_t &cursor,
                                     std::vector<header> &headers) {
+            // CRITICAL INVARIANT: DO NOT REMOVE headers.clear()!
+            // When streaming multi-chunk or large payloads (e.g. multipart file uploads),
+            // the transport buffer (stream_buf) reallocates as subsequent chunks arrive via
+            // async_read_some. If an earlier turn returned result::incomplete, `headers`
+            // still contains string_views pointing to the old, reallocated (freed) heap buffer.
+            // Failing to clear here causes duplicate header accumulation and severe 0xC0000005
+            // SegFaults when accessing dangling string_view pointers in detail::is_equal().
+            headers.clear();
             headers.reserve(16);
 
             while (cursor < buffer.size()) {

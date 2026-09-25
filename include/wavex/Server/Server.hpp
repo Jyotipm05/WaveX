@@ -938,10 +938,14 @@ namespace wavex::server {
                         res.stream_id(req.stream_id());
                     }
 
-                    // Copy route params from RouteMatch into the request
+                    // Copy route params from RouteMatch into the request (with automatic percent-decoding)
                     if (match) [[likely]] {
-                        for (const auto &[k, v]: match->params) {
-                            req.params.insert_or_assign(k, v);
+                        if constexpr (requires { req.set_params(match->params); }) {
+                            req.set_params(match->params);
+                        } else {
+                            for (const auto &[k, v]: match->params) {
+                                req.params.insert_or_assign(k, v);
+                            }
                         }
                     }
 
