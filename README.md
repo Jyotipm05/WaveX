@@ -41,7 +41,7 @@ WaveX draws inspiration from **Rust's Actix Web** (hybrid radix-tree routing), *
 - **🛡 Pipeline Short-Circuiting** — Middleware rejection (e.g. `401 Unauthorized`) immediately sends the response while skipping downstream middlewares and route handlers.
 - **⚡ Zero-Fragmentation Memory & Contiguous Containers** — Contiguous `FlatMap<K, V, 16>` stores `req.params`, `req.query`, and `res.headers_` directly inside cache-line-aligned inline arrays with zero heap allocations on the hot request path. Memory management is complemented by a three-tier bump allocator (`RequestArena`) backed by a 4KB inline buffer and thread-local slab pools. Socket acceptance configures `TCP_NODELAY` immediately to prevent delayed-ACK penalties, and connection handling utilizes an offset cursor (`stream_buf_consumed`) to amortize buffer compaction.
 - **🛑 Production Graceful Shutdown & Generic Pub-Sub Event System** — Clean connection draining with deadline timeouts (`server.exit()`, `server.shutdown()`), automatic `SIGINT`/`SIGTERM` interception, OS signal handler restoration (`SIG_DFL`), proactive keep-alive cancellation, automatic `Connection: close` stamping, worker-thread deadlock immunity, complete server restartability (`server.run()` unblocks without `std::exit`), and a zero-overhead generic C++23 pub-sub event bus (`wavex::base::Event`, `EventBus`, `ShutdownEvent`).
-- **🧪 Interactive Postman Dev Servers** — Pre-configured CLI-driven testing servers for HTTP/1.1 ([tests/postman_demo_http1_server.cpp](tests/postman_demo_http1_server.cpp)) and HTTP/2 ([tests/postman_demo_http2_server.cpp](tests/postman_demo_http2_server.cpp)) supporting plain and TLS 1.3 modes via WaveX's built-in CLI parser.
+- **🧪 Interactive Postman Dev Servers** — Pre-configured CLI-driven testing servers for HTTP/1.1 ([tests/postman_demo_http1_server.cpp](tests/postman_demo_http1_server.cpp)), HTTP/2 ([tests/postman_demo_http2_server.cpp](tests/postman_demo_http2_server.cpp)), and HTTP/3 ([tests/postman_demo_http3_server.cpp](tests/postman_demo_http3_server.cpp)) supporting plain and TLS 1.3 modes via WaveX's built-in CLI parser.
 
 ---
 
@@ -1140,28 +1140,30 @@ ctest --preset tsan
 
 ### Manual Testing with Postman & cURL
 
-WaveX includes two pre-configured, CLI-driven interactive dev servers for manual validation via Postman, cURL, or browsers:
+WaveX includes three pre-configured, CLI-driven interactive dev servers for manual validation via Postman, cURL, or browsers:
 
 #### Dev Server Executables
 
-| Executable                   | Protocol Modes                           | Default Ports                        | Source                                                                     |
-|:-----------------------------|:-----------------------------------------|:-------------------------------------|:---------------------------------------------------------------------------|
-| `wavex_postman_http1_server` | Plain HTTP / HTTPS (TLS 1.3)             | `8080` (plain), `8443` (`--tls`)     | [tests/postman_demo_http1_server.cpp](tests/postman_demo_http1_server.cpp) |
-| `wavex_postman_http2_server` | Cleartext h2c / HTTP/2 over TLS 1.3 (h2) | `8082` (cleartext), `8444` (`--tls`) | [tests/postman_demo_http2_server.cpp](tests/postman_demo_http2_server.cpp) |
+| Executable                   | Protocol Modes                           | Default Ports                               | Source                                                                     |
+|:-----------------------------|:-----------------------------------------|:--------------------------------------------|:---------------------------------------------------------------------------|
+| `wavex_postman_http1_server` | Plain HTTP / HTTPS (TLS 1.3)             | `8080` (plain), `8443` (`--tls`)            | [tests/postman_demo_http1_server.cpp](tests/postman_demo_http1_server.cpp) |
+| `wavex_postman_http2_server` | Cleartext h2c / HTTP/2 over TLS 1.3 (h2) | `8082` (cleartext), `8444` (`--tls`)        | [tests/postman_demo_http2_server.cpp](tests/postman_demo_http2_server.cpp) |
+| `wavex_postman_http3_server` | HTTP/3 over TLS 1.3 (h3) / Cleartext Dev | `8445` (TLS default), `8083` (`--no-tls`)   | [tests/postman_demo_http3_server.cpp](tests/postman_demo_http3_server.cpp) |
 
 #### Command-Line Options (Built-in CLI)
 
-Both servers support the following command-line flags:
+The servers support the following command-line flags:
 
-| Flag            | Short | Default                            | Description                                                                     |
-|:----------------|:------|:-----------------------------------|:--------------------------------------------------------------------------------|
-| `--tls`         | `-s`  | disabled                           | Enable TLS 1.3 encryption (ALPN `http/1.1` or `h2`)                             |
-| `--lan`         | `-l`  | disabled                           | Host on local area network (LAN) using current machine IP (e.g., `192.168.x.x`) |
-| `--port <num>`  | `-p`  | 8080/8082 (plain), 8443/8444 (TLS) | Port to listen on                                                               |
-| `--host <ip>`   | `-H`  | `127.0.0.1`                        | Host address to bind                                                            |
-| `--cert <path>` | `-c`  | `ssl/test.crt`                     | Path to TLS certificate file                                                    |
-| `--key <path>`  | `-k`  | `ssl/test.key`                     | Path to TLS private key file                                                    |
-| `--help`        | `-h`  | —                                  | Show CLI help and options                                                       |
+| Flag            | Short | Default                                   | Description                                                                     |
+|:----------------|:------|:------------------------------------------|:--------------------------------------------------------------------------------|
+| `--tls`         | `-s`  | disabled (HTTP/1,2) / active (HTTP/3)     | Enable TLS 1.3 encryption (ALPN `http/1.1`, `h2`, or `h3`)                      |
+| `--no-tls`      |       | disabled                                  | Disable TLS encryption (available on HTTP/3 dev server for local debugging)     |
+| `--lan`         | `-l`  | disabled                                  | Host on local area network (LAN) using current machine IP (e.g., `192.168.x.x`) |
+| `--port <num>`  | `-p`  | 8080/8082/8083 (plain), 8443..8445 (TLS)  | Port to listen on                                                               |
+| `--host <ip>`   | `-H`  | `127.0.0.1`                               | Host address to bind                                                            |
+| `--cert <path>` | `-c`  | `ssl/test.crt`                            | Path to TLS certificate file                                                    |
+| `--key <path>`  | `-k`  | `ssl/test.key`                            | Path to TLS private key file                                                    |
+| `--help`        | `-h`  | —                                         | Show CLI help and options                                                       |
 
 #### Launching the Servers
 
@@ -1177,6 +1179,12 @@ Both servers support the following command-line flags:
 ./build/test-profile/wavex_postman_http2_server.exe --lan               # Cleartext HTTP/2 on LAN using current machine IP
 ./build/test-profile/wavex_postman_http2_server.exe --tls               # HTTP/2 over TLS 1.3 (h2) on https://127.0.0.1:8444
 ./build/test-profile/wavex_postman_http2_server.exe --tls -p 9444       # Custom port with TLS
+
+# 3. HTTP/3 Server (TLS 1.3 Active by Default)
+./build/test-profile/wavex_postman_http3_server.exe                     # HTTP/3 over TLS 1.3 on https://127.0.0.1:8445
+./build/test-profile/wavex_postman_http3_server.exe --lan               # Host on LAN using current machine IP
+./build/test-profile/wavex_postman_http3_server.exe -p 9445             # Custom port with TLS
+./build/test-profile/wavex_postman_http3_server.exe --no-tls            # Cleartext HTTP/3 dev mode on http://127.0.0.1:8083
 ```
 
 #### cURL Verification Commands
@@ -1192,6 +1200,11 @@ curl -k --http2 https://127.0.0.1:8444/api/json
 
 # HTTP/2 Protected Endpoint (Middleware Auth Check)
 curl -k --http2 -H "Authorization: Bearer secret123" https://127.0.0.1:8444/api/protected
+
+# HTTP/3 over TLS 1.3 (RFC 9114)
+curl --http3 -k https://127.0.0.1:8445/api/json
+curl --http3 -k -X POST https://127.0.0.1:8445/api/query -H "Content-Type: application/json" -d '{"domain": "google.com"}'
+curl --http3 -k -H "Authorization: Bearer secret123" https://127.0.0.1:8445/api/protected
 ```
 
 ---

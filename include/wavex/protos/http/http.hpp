@@ -18,6 +18,7 @@
 
 #include <wavex/protos/http/http1codec.hpp>
 #include <wavex/protos/http/http2codec.hpp>
+#include <wavex/protos/http/http3codec.hpp>
 #include <wavex/protos/http/HttpResponse.hpp>
 
 #include "HttpRequest.hpp"
@@ -136,4 +137,11 @@ namespace wavex::protos::http {
     using http2request = Http2Request;
     using Http2Response = HttpResponse<wavex::protos::http::http2codec>;
     using http2response = Http2Response;
+
+    // ─── HTTP/3 Type Aliases ──────────────────────────────────────────────────────
+    using Http3Request = HttpRequest<wavex::protos::http::http3codec>;
+    using http3request = Http3Request;
+    using Http3Response = HttpResponse<wavex::protos::http::http3codec>;
+    using http3response = Http3Response;
 } // namespace wavex::protos::http
+

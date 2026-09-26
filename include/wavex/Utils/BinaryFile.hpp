@@ -18,6 +18,7 @@
 #include <expected>
 #include <utility>
 #include <type_traits>
+#include <wavex/Utils/FsUtils.hpp>
 
 namespace wavex::utils {
     /**
@@ -100,13 +101,8 @@ namespace wavex::utils {
         template<typename PathLike>
             requires (!std::is_convertible_v<PathLike, std::string_view>)
         bool open(const PathLike &path, const FileMode mode = FileMode::Read) noexcept {
-            if constexpr (requires { path.string(); }) {
-                std::string s = path.string();
-                return open(std::string_view(s), mode);
-            } else {
-                std::string s(path);
-                return open(std::string_view(s), mode);
-            }
+            std::string s = fs_utils::to_u8_path_string(path);
+            return open(std::string_view(s), mode);
         }
 
         void close() noexcept;
@@ -127,13 +123,8 @@ namespace wavex::utils {
         template<typename PathLike>
             requires (!std::is_convertible_v<PathLike, std::string_view>)
         static std::expected<std::string, std::error_code> read_all(const PathLike &path) {
-            if constexpr (requires { path.string(); }) {
-                const std::string s = path.string();
-                return read_all(std::string_view(s));
-            } else {
-                const std::string s(path);
-                return read_all(std::string_view(s));
-            }
+            const std::string s = fs_utils::to_u8_path_string(path);
+            return read_all(std::string_view(s));
         }
 
         static bool write_all(std::string_view path, std::string_view content, bool append = false);
@@ -141,13 +132,8 @@ namespace wavex::utils {
         template<typename PathLike>
             requires (!std::is_convertible_v<PathLike, std::string_view>)
         static bool write_all(const PathLike &path, const std::string_view content, const bool append = false) {
-            if constexpr (requires { path.string(); }) {
-                const std::string s = path.string();
-                return write_all(std::string_view(s), content, append);
-            } else {
-                const std::string s(path);
-                return write_all(std::string_view(s), content, append);
-            }
+            const std::string s = fs_utils::to_u8_path_string(path);
+            return write_all(std::string_view(s), content, append);
         }
     };
 } // namespace wavex::utils

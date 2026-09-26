@@ -13,6 +13,7 @@ module;
 #include <wavex/protos/http/Methods.hpp>
 #include <wavex/protos/http/http1codec.hpp>
 #include <wavex/protos/http/http2codec.hpp>
+#include <wavex/protos/http/http3codec.hpp>
 #include <wavex/protos/http/HttpRequest.hpp>
 #include <wavex/protos/http/HttpResponse.hpp>
 #include <wavex/protos/http/http.hpp>
@@ -33,16 +34,22 @@ export namespace wavex::protos::http {
     using http::decoder;
     using http::http1codec;
     using http::http2codec;
+    using http::http3codec;
     using http::HttpRequest;
     using http::Http1Request;
     using http::http1request;
     using http::Http2Request;
     using http::http2request;
+    using http::Http3Request;
+    using http::http3request;
     using http::HttpResponse;
     using http::Http1Response;
     using http::http1response;
     using http::Http2Response;
     using http::http2response;
+    using http::Http3Response;
+    using http::http3response;
+
 
     // Templated codec helpers
     using http::parse_request;

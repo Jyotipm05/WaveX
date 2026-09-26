@@ -319,8 +319,8 @@ void test_http_client_integration() {
 
     asio::co_spawn(client_ioc, [&]() -> asio::awaitable<void> {
         // 1. GET request via HttpClient::get
-        auto get_res = co_await wavex::client::HttpClient::get("http://127.0.0.1:8086/api/client_test");
-        if (get_res.status_code() == 200 && get_res.get_body().find("WaveX") != std::string::npos) {
+        if (const auto get_res = co_await wavex::client::HttpClient::get("http://127.0.0.1:8086/api/client_test");
+            get_res.status_code() == 200 && get_res.get_body().find("WaveX") != std::string::npos) {
             get_success = true;
         }
 

@@ -22,16 +22,13 @@
 #include <type_traits>
 
 #include <asio/awaitable.hpp>
+#include <wavex/Utils/FsUtils.hpp>
 
 namespace wavex::fs {
     namespace detail {
         template<typename T>
         std::string to_string_path(const T &p) {
-            if constexpr (requires { p.string(); }) {
-                return p.string();
-            } else {
-                return std::string(p);
-            }
+            return utils::fs_utils::to_u8_path_string(p);
         }
     } // namespace detail
 

@@ -34,6 +34,7 @@
 #include <wavex/Utils/BinaryFile.hpp>
 #include <wavex/Utils/Multipart.hpp>
 #include <wavex/Utils/Compression.hpp>
+#include <wavex/Utils/FsUtils.hpp>
 
 namespace wavex::protos::http {
     /**
@@ -384,6 +385,22 @@ namespace wavex::protos::http {
             return stream_id(id);
         }
 
+        [[nodiscard]] uint8_t version_major() const noexcept {
+            if constexpr (requires { parsed_.version_major; }) {
+                return static_cast<uint8_t>(parsed_.version_major);
+            } else {
+                return 1;
+            }
+        }
+
+        [[nodiscard]] uint8_t version_minor() const noexcept {
+            if constexpr (requires { parsed_.version_minor; }) {
+                return static_cast<uint8_t>(parsed_.version_minor);
+            } else {
+                return 1;
+            }
+        }
+
         // ── Accessors (CRTP Implementations) ────────────────────────────────
 
         [[nodiscard]] http::method method_type() const { return parsed_.method_type; }
@@ -486,11 +503,7 @@ namespace wavex::protos::http {
         template<typename PathLike>
             requires (!std::is_convertible_v<PathLike, const std::string &>)
         bool save_body_to_file(const PathLike &dest_path) const {
-            if constexpr (requires { dest_path.string(); }) {
-                return save_body_to_file(dest_path.string());
-            } else {
-                return save_body_to_file(std::string(dest_path));
-            }
+            return save_body_to_file(utils::fs_utils::to_u8_path_string(dest_path));
         }
 
         /**

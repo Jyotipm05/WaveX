@@ -28,6 +28,22 @@ export namespace wavex::utils {
     using utils::MultipartFormData;
 }
 
+export namespace wavex::utils::fs_utils {
+    using fs_utils::to_path;
+    using fs_utils::to_u8_string;
+    using fs_utils::file_size;
+    using fs_utils::create_directories;
+    using fs_utils::exists;
+    using fs_utils::remove;
+    using fs_utils::rename;
+    using fs_utils::copy_file;
+    using fs_utils::temp_directory_path;
+    using fs_utils::current_path;
+    using fs_utils::parent_path;
+    using fs_utils::filename;
+    using fs_utils::has_parent_path;
+}
+
 export namespace wavex::fs {
     using fs::read_file;
     using fs::read_bytes;

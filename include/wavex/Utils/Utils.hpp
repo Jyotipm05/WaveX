@@ -16,3 +16,4 @@
 #include <wavex/Utils/Compression.hpp>
 #include <wavex/Utils/Multipart.hpp>
 #include <wavex/Utils/AsyncFs.hpp>
+#include <wavex/Utils/FsUtils.hpp>

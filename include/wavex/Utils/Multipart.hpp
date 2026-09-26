@@ -23,6 +23,7 @@
 
 #include <wavex/Utils/TempFile.hpp>
 #include <wavex/Utils/Compression.hpp>
+#include <wavex/Utils/FsUtils.hpp>
 
 #ifndef ASIO_HAS_CO_AWAIT
 #define ASIO_HAS_CO_AWAIT 1
@@ -86,11 +87,7 @@ namespace wavex::utils {
         template<typename PathLike>
             requires (!std::is_convertible_v<PathLike, const std::string &>)
         [[nodiscard]] bool save_to(const PathLike &destination, bool overwrite = true) const {
-            if constexpr (requires { destination.string(); }) {
-                return save_to(destination.string(), overwrite);
-            } else {
-                return save_to(std::string(destination), overwrite);
-            }
+            return save_to(fs_utils::to_u8_path_string(destination), overwrite);
         }
 
         /**
@@ -106,11 +103,7 @@ namespace wavex::utils {
             requires (!std::is_convertible_v<PathLike, std::string>)
         [[nodiscard]] asio::awaitable<bool> save_to_async(
             const PathLike &destination, bool overwrite = true) const {
-            if constexpr (requires { destination.string(); }) {
-                return save_to_async(destination.string(), overwrite);
-            } else {
-                return save_to_async(std::string(destination), overwrite);
-            }
+            return save_to_async(fs_utils::to_u8_path_string(destination), overwrite);
         }
 
         /**
@@ -293,11 +286,7 @@ namespace wavex::utils {
             std::string_view custom_filename = "",
             std::string_view custom_mime = "",
             bool compress = false) {
-            if constexpr (requires { filepath.string(); }) {
-                return add_file_from_path(field_name, filepath.string(), custom_filename, custom_mime, compress);
-            } else {
-                return add_file_from_path(field_name, std::string(filepath), custom_filename, custom_mime, compress);
-            }
+            return add_file_from_path(field_name, fs_utils::to_u8_path_string(filepath), custom_filename, custom_mime, compress);
         }
 
         /**

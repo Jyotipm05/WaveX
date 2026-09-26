@@ -31,6 +31,7 @@
 #include <wavex/Base/Response.hpp>
 #include <wavex/Utils/Multipart.hpp>
 #include <wavex/Utils/Compression.hpp>
+#include <wavex/Utils/FsUtils.hpp>
 #include <wavex/protos/http/HttpRequest.hpp>
 #include <wavex/protos/http/HttpResponse.hpp>
 #include <wavex/protos/http/http.hpp>
@@ -209,11 +210,7 @@ namespace wavex::client {
         ClientRequest &add_file_from_path(std::string_view name,
                                           const PathLike &filepath,
                                           std::string_view content_type = "") {
-            if constexpr (requires { filepath.string(); }) {
-                return add_file_from_path(name, filepath.string(), content_type);
-            } else {
-                return add_file_from_path(name, std::string(filepath), content_type);
-            }
+            return add_file_from_path(name, utils::fs_utils::to_u8_path_string(filepath), content_type);
         }
 
         /// Set raw binary body from a file on disk
@@ -224,11 +221,7 @@ namespace wavex::client {
             requires (!std::is_convertible_v<PathLike, const std::string &>)
         ClientRequest &file_body(const PathLike &filepath,
                                  std::string_view content_type = "") {
-            if constexpr (requires { filepath.string(); }) {
-                return file_body(filepath.string(), content_type);
-            } else {
-                return file_body(std::string(filepath), content_type);
-            }
+            return file_body(utils::fs_utils::to_u8_path_string(filepath), content_type);
         }
 
         /// Compress request body using gzip or deflate
@@ -363,11 +356,7 @@ namespace wavex::client {
         template<typename PathLike>
             requires (!std::is_convertible_v<PathLike, const std::string &>)
         bool save_to_file(const PathLike &dest_path) const {
-            if constexpr (requires { dest_path.string(); }) {
-                return save_to_file(dest_path.string());
-            } else {
-                return save_to_file(std::string(dest_path));
-            }
+            return save_to_file(utils::fs_utils::to_u8_path_string(dest_path));
         }
 
         // Implicit conversions for backward compatibility

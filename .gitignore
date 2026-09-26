@@ -17,6 +17,7 @@ build/
 
 ssl/test.crt
 ssl/test.key
+instruction.md
 
 # CLion
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can

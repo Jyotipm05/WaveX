@@ -1,0 +1,414 @@
+/**
+ * @file postman_demo_http3_server.cpp
+ * @brief Interactive WaveX HTTP/3 Server (RFC 9114 / RFC 9204 / RFC 9000) for Postman & Manual Testing.
+ *
+ * Configured via built-in WaveX CLI argument parser (wavex::cli::CliParser).
+ * TLS 1.3 encryption is active by default in accordance with HTTP/3 & QUIC specifications.
+ *
+ * Usage examples:
+ *   ./wavex_postman_http3_server                      # HTTP/3 over TLS 1.3 on https://127.0.0.1:8445
+ *   ./wavex_postman_http3_server --lan                # HTTP/3 over TLS 1.3 on LAN (0.0.0.0:8445)
+ *   ./wavex_postman_http3_server -p 9083              # Custom port with TLS active
+ *   ./wavex_postman_http3_server --no-tls             # Cleartext HTTP/3 on http://127.0.0.1:8083 (Dev/Debug)
+ *   ./wavex_postman_http3_server -c ssl/test.crt -k ssl/test.key
+ *   ./wavex_postman_http3_server --help               # Show CLI usage and option details
+ *
+ * cURL testing:
+ *   curl --http3 -k https://127.0.0.1:8445/api/json
+ *   curl --http3 -k -X POST https://127.0.0.1:8445/api/query -H "Content-Type: application/json" -d '{"domain": "google.com"}'
+ *   curl --http3 -k https://127.0.0.1:8445/api/protected -H "Authorization: Bearer secret123"
+ */
+
+#ifndef ASIO_HAS_CO_AWAIT
+#define ASIO_HAS_CO_AWAIT 1
+#endif
+
+#include <iostream>
+#include <string>
+#include <vector>
+#include <algorithm>
+#include <nlohmann/json.hpp>
+#include <wavex/wavex.hpp>
+#include <wavex/protos/http/http3codec.hpp>
+#include <asio/ip/tcp.hpp>
+#include <asio/ip/host_name.hpp>
+
+using namespace wavex;
+using HttpRequest = protos::http::Http3Request;
+using HttpResponse = protos::http::Http3Response;
+using HttpRouter = engine::Http3Router;
+
+// Helper to detect LAN IP address of current machine
+inline std::string get_lan_ip() {
+    // 1. Try querying outbound interface via UDP routing table lookup (no actual packet sent)
+    try {
+        asio::io_context ctx;
+        asio::ip::udp::socket sock(ctx);
+        sock.connect(asio::ip::udp::endpoint(asio::ip::make_address("8.8.8.8"), 53));
+        const auto addr = sock.local_endpoint().address();
+        if (addr.is_v4() && !addr.is_loopback()) {
+            return addr.to_string();
+        }
+    } catch (...) {
+    }
+
+    // 2. Fallback: resolve local hostname to discover network interface IPv4 addresses
+    try {
+        asio::io_context ctx;
+        asio::ip::tcp::resolver resolver(ctx);
+        asio::error_code ec;
+        const auto host = asio::ip::host_name(ec);
+        if (!ec && !host.empty()) {
+            const auto results = resolver.resolve(host, "", ec);
+            if (!ec) {
+                for (const auto &entry : results) {
+                    const auto addr = entry.endpoint().address();
+                    if (addr.is_v4() && !addr.is_loopback()) {
+                        return addr.to_string();
+                    }
+                }
+            }
+        }
+    } catch (...) {
+    }
+
+    return "";
+}
+
+// Global Logger Middleware for HTTP/3
+asio::awaitable<void> http3_logger_middleware(const HttpRequest &req, const HttpResponse &res, base::Next next) {
+    std::cout << "[HTTP3-LOG] Incoming request (stream " << req.stream_id() << "): " << req.path() << "\n";
+    co_await next();
+    std::cout << "[HTTP3-LOG] Response status: " << res.status_code() << " (stream " << res.stream_id()
+            << ") for " << req.path() << "\n";
+}
+
+// Auth Middleware (Postman header required: Authorization: Bearer secret123)
+asio::awaitable<void> http3_auth_middleware(const HttpRequest &req, HttpResponse &res, base::Next next) {
+    const auto auth_header = req.header("Authorization");
+    if (!auth_header || *auth_header != "Bearer secret123") {
+        std::cout << "[HTTP3-AUTH] Unauthorized attempt on " << req.path() << "\n";
+        res.status(401).json({
+            {"error", "Unauthorized"},
+            {"protocol", "HTTP/3"},
+            {"stream_id", req.stream_id()},
+            {"message", "Missing or invalid 'Authorization: Bearer secret123' header"}
+        });
+        co_return; // Immediate response sent, short-circuits remaining pipeline!
+    }
+
+    std::cout << "[HTTP3-AUTH] Access granted for " << req.path() << "\n";
+    co_await next();
+}
+
+int main(int argc, char *argv[]) {
+    cli::CliParser parser("wavex_postman_http3_server",
+                          "WaveX HTTP/3 Interactive Dev & Postman Testing Server (RFC 9114 / RFC 9204 / RFC 9000)");
+
+    parser.add_flag("tls", 's', "Enable TLS 1.3 encryption (active by default for HTTP/3)")
+          .add_flag("no-tls", "Disable TLS (run HTTP/3 over cleartext for local debugging)")
+          .add_flag("lan", 'l', "Host server on local area network (LAN) using current machine IP")
+          .add_option("port", 'p', "Port number to listen on (default: 8445 with TLS, 8083 with --no-tls)")
+          .add_option("host", 'H', "Host IP address to bind to", "127.0.0.1")
+          .add_option("cert", 'c', "Path to TLS certificate file", "ssl/test.crt")
+          .add_option("key", 'k', "Path to TLS private key file", "ssl/test.key");
+
+    const auto parse_res = parser.parse(argc, argv);
+    if (!parse_res.ok()) {
+        if (parse_res.help_requested) {
+            parser.print_help();
+            return 0;
+        }
+        std::cerr << "Error: " << parse_res.error_message << "\n\n";
+        parser.print_help();
+        return 1;
+    }
+
+    // TLS is active by default for HTTP/3
+    const bool is_no_tls = parser.get_bool("no-tls");
+    const bool is_tls = !is_no_tls;
+    const bool is_lan = parser.get_bool("lan");
+    std::string host = parser.get_string("host");
+    if (is_lan && !parser.has("host")) {
+        const std::string detected_ip = get_lan_ip();
+        if (!detected_ip.empty()) {
+            host = detected_ip;
+        } else {
+            std::cerr << "[Warning] Could not automatically detect LAN IP. Falling back to 127.0.0.1.\n";
+            host = "127.0.0.1";
+        }
+    }
+    const std::string cert_file = parser.get_string("cert");
+    const std::string key_file = parser.get_string("key");
+
+    // Dynamic default port based on TLS mode (8445 for TLS default, 8083 for cleartext)
+    const int default_port = is_tls ? 8445 : 8083;
+    const int port = parser.has("port") ? parser.get_int("port", default_port) : default_port;
+
+    const std::string scheme = is_tls ? "https" : "http";
+    const std::string base_url = scheme + "://" + host + ":" + std::to_string(port);
+
+    std::cout << "=========================================================================\n";
+    std::cout << "           WaveX Interactive Dev v" << wx_version
+              << " / Postman Server (HTTP/3)             \n";
+    std::cout << "=========================================================================\n";
+    std::cout << " Protocol : HTTP/3 (RFC 9114 / QPACK RFC 9204 / QUIC RFC 9000) "
+              << (is_tls ? "[h3: TLS 1.3 Active by Default]" : "[Cleartext Dev Mode]") << "\n";
+    std::cout << " Bound To : " << host << ":" << port << (is_lan ? " [LAN Active - Current Machine IP]" : " [Loopback]") << "\n";
+    std::cout << " URL      : " << base_url << "\n";
+    if (is_lan) {
+        std::cout << " Note     : Hosted on LAN IP. Open " << base_url << " from any device on your network.\n";
+    }
+    if (is_tls) {
+        std::cout << " Cert File: " << cert_file << "\n";
+        std::cout << " Key File : " << key_file << "\n";
+    }
+    std::cout << "=========================================================================\n";
+    std::cout << " Quick Test Endpoints Reference for Postman / cURL:\n";
+    std::cout << "  1. GET        " << base_url << "/\n";
+    std::cout << "  2. GET        " << base_url << "/api/json\n";
+    std::cout << "  3. POST       " << base_url << "/api/echo   (Body: JSON payload)\n";
+    std::cout << "  4. POST/QUERY " << base_url << "/api/query  (Body: {\"domain\": \"google.com\"})\n";
+    std::cout << "  5. GET        " << base_url << "/api/protected  (Header: Authorization: Bearer secret123)\n";
+    std::cout << "  6. GET        " << base_url << "/users/42\n";
+    std::cout << "  7. GET        " << base_url << "/files/documents/2026/report.pdf  (Wildcard match)\n";
+    const auto port_str = std::to_string(port);
+    const std::string alt_svc_value = "h3=\":" + port_str + "\"; ma=2592000,h3-29=\":" + port_str + "\"; ma=2592000";
+
+    std::cout << "=========================================================================\n";
+    std::cout << " HTTP/3 (QUIC / UDP) vs HTTP/1.1 (TCP) Testing Guide:\n";
+    std::cout << "  1. Chrome Browser (DevTools Protocol Inspection):\n";
+    std::cout << "     * Standard Request:\n";
+    std::cout << "       First navigation to " << base_url << "/api/json uses TCP (shows 'http/1.1').\n";
+    std::cout << "       The server sends 'Alt-Svc: " << alt_svc_value << "'. Chrome records this\n";
+    std::cout << "       and probes UDP QUIC in the background with seamless fallback to TCP.\n";
+    std::cout << "     * Force Native QUIC HTTP/3 (starts immediately with h3 on first request):\n";
+    std::cout << "       Note: QUIC in Chrome strictly enforces TLS certificates. For local self-signed certs,\n";
+    std::cout << "       Chrome requires the certificate SPKI fingerprint:\n";
+    std::cout << "       chrome.exe --enable-quic --origin-to-force-quic-on=" << host << ":" << port
+              << " --ignore-certificate-errors-spki-list=6wKWB7o640nE/nBIU/Hih7T1ZHQOWVb1hoPEcfmXM7U= "
+              << base_url << "/api/json\n";
+    std::cout << "     * Reset: If Chrome previously cached a failed QUIC session, clear it at:\n";
+    std::cout << "       chrome://net-internals/#quic (click 'Clear QUIC sessions' or restart Chrome).\n\n";
+    std::cout << "  2. cURL Direct HTTP/3 Examples (uses UDP QUIC directly):\n";
+    if (is_tls) {
+        std::cout << "     curl -k --http3 " << base_url << "/api/json\n";
+        std::cout << "     curl -k --http3 -X POST " << base_url << "/api/query -H \"Content-Type: application/json\" -d '{\"domain\": \"google.com\"}'\n";
+        std::cout << "     curl -k --http3 " << base_url << "/api/protected -H \"Authorization: Bearer secret123\"\n";
+    } else {
+        std::cout << "     curl --http3-only " << base_url << "/api/json\n";
+        std::cout << "     curl --http3-only -X POST " << base_url << "/api/query -H \"Content-Type: application/json\" -d '{\"domain\": \"google.com\"}'\n";
+    }
+    std::cout << "=========================================================================\n\n";
+
+    auto &router = HttpRouter::instance();
+
+    // 1. Root route - Plain text
+    router.get("/", [is_tls](HttpRequest &, HttpResponse &res) -> asio::awaitable<void> {
+        res.status(200).send("Welcome to WaveX HTTP/3 " + std::string(is_tls ? "(TLS 1.3 h3) " : "(Cleartext) ") + "Server!");
+        co_return;
+    });
+
+    // 2. JSON endpoint
+    router.get("/api/json", [is_tls](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
+        res.status(200).json({
+            {"status", "success"},
+            {"framework", "WaveX"},
+            {"version", wx_version},
+            {"protocol", "HTTP/3"},
+            {"tls_enabled", is_tls},
+            {"stream_id", req.stream_id()},
+            {
+                "features", {
+                    "RFC 9114 HTTP/3 Framing (DATA, HEADERS, SETTINGS, GOAWAY)",
+                    "RFC 9204 QPACK Header Compression with Static and Dynamic Tables",
+                    "RFC 9000 QUIC Transport Protocol & Connection IDs",
+                    "RFC 9001 TLS 1.3 Handshake & Packet Protection",
+                    "Zero-Head-Of-Line Blocking Stream Multiplexing",
+                    "Zero-alloc coroutines",
+                    "Built-in CLI parser"
+                }
+            }
+        });
+        co_return;
+    });
+
+    // 3. POST Echo endpoint (processes JSON body)
+    router.post("/api/echo", [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
+        const std::string raw(req.body());
+        nlohmann::json parsed_body;
+
+        if (raw.empty()) {
+            parsed_body = nullptr;
+        } else {
+            auto j = nlohmann::json::parse(raw, nullptr, false);
+            if (!j.is_discarded()) {
+                parsed_body = std::move(j);
+            } else {
+                parsed_body = raw;
+            }
+        }
+
+        res.status(200).json({
+            {"message", "HTTP/3 Echo received"},
+            {"protocol", "HTTP/3"},
+            {"stream_id", req.stream_id()},
+            {"path", std::string(req.path())},
+            {"received_body", parsed_body}
+        });
+        co_return;
+    });
+
+    // 4. JSON Query endpoint - Domain to IP DNS Resolver (Supports both POST and QUERY methods)
+    auto dns_query_handler = [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
+        const std::string raw(req.body());
+        std::string domain;
+
+        if (!raw.empty()) {
+            auto j = nlohmann::json::parse(raw, nullptr, false);
+            if (!j.is_discarded()) {
+                if (j.is_object()) {
+                    if (j.contains("domain") && j["domain"].is_string()) {
+                        domain = j["domain"].get<std::string>();
+                    } else if (j.contains("host") && j["host"].is_string()) {
+                        domain = j["host"].get<std::string>();
+                    }
+                } else if (j.is_string()) {
+                    domain = j.get<std::string>();
+                }
+            } else {
+                domain = raw;
+            }
+        }
+
+        // Clean & normalize domain string
+        while (!domain.empty() && (domain.front() == ' ' || domain.front() == '\t' || domain.front() == '"')) domain.erase(0, 1);
+        while (!domain.empty() && (domain.back() == ' ' || domain.back() == '\t' || domain.back() == '\r' || domain.back() == '\n' || domain.back() == '"')) domain.pop_back();
+
+        if (domain.starts_with("https://")) {
+            domain = domain.substr(8);
+        } else if (domain.starts_with("http://")) {
+            domain = domain.substr(7);
+        }
+
+        auto slash_pos = domain.find('/');
+        if (slash_pos != std::string::npos) {
+            domain = domain.substr(0, slash_pos);
+        }
+        auto colon_pos = domain.find(':');
+        if (colon_pos != std::string::npos) {
+            domain = domain.substr(0, colon_pos);
+        }
+
+        if (domain.empty()) {
+            res.status(400).json({
+                {"status", "error"},
+                {"protocol", "HTTP/3"},
+                {"stream_id", req.stream_id()},
+                {"message", "Missing or invalid domain in JSON body. Example: {\"domain\": \"google.com\"}"}
+            });
+            co_return;
+        }
+
+        auto executor = co_await asio::this_coro::executor;
+        asio::ip::tcp::resolver resolver(executor);
+
+        auto [ec, results] = co_await resolver.async_resolve(domain, "", asio::as_tuple(asio::use_awaitable));
+        if (ec) {
+            res.status(404).json({
+                {"status", "error"},
+                {"protocol", "HTTP/3"},
+                {"stream_id", req.stream_id()},
+                {"domain", domain},
+                {"message", "Failed to resolve domain: " + ec.message()}
+            });
+            co_return;
+        }
+
+        std::string primary_ip;
+        std::vector<std::string> all_ips;
+        for (const auto &entry : results) {
+            std::string ip = entry.endpoint().address().to_string();
+            if (primary_ip.empty()) {
+                primary_ip = ip;
+            }
+            if (std::find(all_ips.begin(), all_ips.end(), ip) == all_ips.end()) {
+                all_ips.push_back(ip);
+            }
+        }
+
+        res.status(200).json({
+            {"status", "success"},
+            {"protocol", "HTTP/3"},
+            {"stream_id", req.stream_id()},
+            {"domain", domain},
+            {"ip", primary_ip},
+            {"ips", all_ips}
+        });
+        co_return;
+    };
+
+    router.post("/api/query", dns_query_handler);
+    router.query("/api/query", dns_query_handler);
+    router.post("/api/dns", dns_query_handler);
+    router.query("/api/dns", dns_query_handler);
+
+    // 5. Protected route with Auth Middleware
+    router.get("/api/protected", {http3_auth_middleware},
+               [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
+                   res.status(200).json({
+                       {"status", "granted"},
+                       {"protocol", "HTTP/3"},
+                       {"stream_id", req.stream_id()},
+                       {"secret_data", "Super secret HTTP/3 information accessible only with valid auth header!"}
+                   });
+                   co_return;
+               });
+
+    // 6. Dynamic path parameter
+    router.get("/users/:id", [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
+        res.status(200).json({
+            {"endpoint", "user_details"},
+            {"protocol", "HTTP/3"},
+            {"stream_id", req.stream_id()},
+            {"path", std::string(req.path())}
+        });
+        co_return;
+    });
+
+    // 7. Wildcard endpoint (*filepath matches any nested subpaths under /files/)
+    router.get("/files/*filepath", [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
+        res.status(200).json({
+            {"endpoint", "wildcard_file_handler"},
+            {"protocol", "HTTP/3"},
+            {"stream_id", req.stream_id()},
+            {"matched_path", std::string(req.path())},
+            {"description", "Wildcard route *filepath caught nested subpath under /files/"}
+        });
+        co_return;
+    });
+
+    try {
+        server::Http3Server server(router, host, static_cast<unsigned short>(port));
+        if (is_tls) {
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+            server.enable_tls(cert_file, key_file);
+            std::cout << "Server successfully listening on " << base_url << " (HTTP/3 TLS 1.3 Active)\n";
+#else
+            std::cerr << "Fatal Error: WaveX was built without SSL support (WAVEX_HAS_SSL=0)!\n";
+            return 1;
+#endif
+        } else {
+            server.allow_insecure();
+            std::cout << "Server successfully listening on " << base_url << " (HTTP/3 Cleartext Active)\n";
+        }
+
+        std::cout << "Press Ctrl+C to stop.\n\n";
+        server.run();
+    } catch (const std::exception &e) {
+        std::cerr << "[HTTP/3 Server Error] " << e.what() << "\n";
+        return 1;
+    }
+
+    return 0;
+}

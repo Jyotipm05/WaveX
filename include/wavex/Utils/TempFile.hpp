@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <utility>
 #include <type_traits>
+#include <wavex/Utils/FsUtils.hpp>
 
 namespace wavex::utils {
     /**
@@ -74,11 +75,7 @@ namespace wavex::utils {
         template<typename PathLike>
             requires (!std::is_convertible_v<PathLike, const std::string &>)
         bool move_to(const PathLike &destination, bool overwrite = true) {
-            if constexpr (requires { destination.string(); }) {
-                return move_to(destination.string(), overwrite);
-            } else {
-                return move_to(std::string(destination), overwrite);
-            }
+            return move_to(fs_utils::to_u8_path_string(destination), overwrite);
         }
 
         /// Disarms the guard so the temporary file is NOT deleted on destruction
@@ -98,11 +95,7 @@ namespace wavex::utils {
         template<typename DirPath>
             requires (!std::is_convertible_v<DirPath, const std::string &>)
         static TempFileGuard create(const DirPath &dir, const std::string &prefix = "wx_upload_") {
-            if constexpr (requires { dir.string(); }) {
-                return create(dir.string(), prefix);
-            } else {
-                return create(std::string(dir), prefix);
-            }
+            return create(fs_utils::to_u8_path_string(dir), prefix);
         }
 
         /**
@@ -115,11 +108,7 @@ namespace wavex::utils {
         template<typename DirPath>
             requires (!std::is_convertible_v<DirPath, const std::string &>)
         static TempFileGuard create_with_prefix(const std::string &prefix, const DirPath &dir) {
-            if constexpr (requires { dir.string(); }) {
-                return create_with_prefix(prefix, dir.string());
-            } else {
-                return create_with_prefix(prefix, std::string(dir));
-            }
+            return create_with_prefix(prefix, fs_utils::to_u8_path_string(dir));
         }
 
     private:

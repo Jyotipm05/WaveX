@@ -93,6 +93,20 @@ namespace wavex::protos::http {
             return stream_id(id);
         }
 
+        [[nodiscard]] uint8_t version_major() const noexcept {
+            return version_major_;
+        }
+
+        [[nodiscard]] uint8_t version_minor() const noexcept {
+            return version_minor_;
+        }
+
+        HttpResponse &set_version(const uint8_t major, const uint8_t minor) noexcept {
+            version_major_ = major;
+            version_minor_ = minor;
+            return *this;
+        }
+
         using write_sink_fn = std::function<asio::awaitable<std::expected<void, std::error_code> >(
             std::string_view, std::chrono::milliseconds)>;
 
@@ -128,6 +142,8 @@ namespace wavex::protos::http {
               parsed_(other.parsed_),
               headers_views_(other.headers_views_),
               header_store_(other.header_store_),
+              version_major_(other.version_major_),
+              version_minor_(other.version_minor_),
               is_headers_sent_(other.is_headers_sent_) {
             const auto buf_base = other.buffer_owner_.data();
             const auto buf_len = other.buffer_owner_.size();
@@ -217,6 +233,8 @@ namespace wavex::protos::http {
                 parsed_ = other.parsed_;
                 headers_views_ = other.headers_views_;
                 header_store_ = other.header_store_;
+                version_major_ = other.version_major_;
+                version_minor_ = other.version_minor_;
                 is_headers_sent_ = other.is_headers_sent_;
                 body_ = other.body_;
                 status_code_ = other.status_code_;
@@ -264,6 +282,8 @@ namespace wavex::protos::http {
               parsed_(std::move(other.parsed_)),
               headers_views_(std::move(other.headers_views_)),
               header_store_(std::move(other.header_store_)),
+              version_major_(other.version_major_),
+              version_minor_(other.version_minor_),
               is_headers_sent_(other.is_headers_sent_) {
             if (!header_store_.empty()) {
                 headers_.clear();
@@ -288,6 +308,8 @@ namespace wavex::protos::http {
                 parsed_ = std::move(other.parsed_);
                 headers_views_ = std::move(other.headers_views_);
                 header_store_ = std::move(other.header_store_);
+                version_major_ = other.version_major_;
+                version_minor_ = other.version_minor_;
                 is_headers_sent_ = other.is_headers_sent_;
                 if (!header_store_.empty()) {
                     headers_.clear();
@@ -437,6 +459,10 @@ namespace wavex::protos::http {
             response_type res;
             if constexpr (requires { res.stream_id = stream_id_; }) {
                 res.stream_id = stream_id_;
+            }
+            if constexpr (requires { res.version_major = version_major_; }) {
+                res.version_major = version_major_;
+                res.version_minor = version_minor_;
             }
             res.status_code = status_code_;
             res.status_text = (status_text_.empty() || (status_text_ == "OK" && status_code_ != 200))
@@ -675,6 +701,10 @@ namespace wavex::protos::http {
             if constexpr (requires { res.stream_id = stream_id_; }) {
                 res.stream_id = stream_id_;
             }
+            if constexpr (requires { res.version_major = version_major_; }) {
+                res.version_major = version_major_;
+                res.version_minor = version_minor_;
+            }
             res.status_code = status_code_;
             res.status_text = (status_text_.empty() || (status_text_ == "OK" && status_code_ != 200))
                                   ? Codec::status_text_for(status_code_)
@@ -709,6 +739,8 @@ namespace wavex::protos::http {
         /// std::vector backed storage with safe post-insertion view synchronization.
         /// string_views in headers_views_ and base headers_ FlatMap point into these owned strings.
         std::vector<std::pair<std::string, std::string> > header_store_;
+        uint8_t version_major_{1};
+        uint8_t version_minor_{1};
         bool is_headers_sent_{false};
     };
 

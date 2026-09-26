@@ -54,6 +54,9 @@ namespace wavex::protos {
         /// True if the protocol requires a connection-level opening exchange.
         static constexpr bool has_connection_preface = false;
 
+        /// True if this protocol uses QUIC/UDP transport alongside TCP (e.g. HTTP/3).
+        static constexpr bool has_quic_transport = false;
+
         /**
          * @brief Called once per connection after transport handshake, before the request loop.
          * @param stream     The connected stream (tcp::socket, ssl::stream, etc.).
@@ -99,6 +102,7 @@ namespace wavex::protos {
         };
 
         static constexpr bool has_connection_preface = false;
+        static constexpr bool has_quic_transport = false;
 
         template<typename Stream>
         static asio::awaitable<bool> on_connection_start(Stream &, std::string &) {
@@ -155,6 +159,7 @@ namespace wavex::protos {
         using connection_context = http::http2::connection_context;
 
         static constexpr bool has_connection_preface = true;
+        static constexpr bool has_quic_transport = false;
 
         /**
          * @brief RFC 7540 §3.5: validate client preface (24-byte PRI), reply with
@@ -232,4 +237,84 @@ namespace wavex::protos {
         }
 #endif
     };
+
 } // namespace wavex::protos
+
+// ─── HTTP/3 Specialization ───────────────────────────────────────────────────
+#include <wavex/protos/http/http3codec.hpp>
+
+namespace wavex::protos {
+    template<>
+    struct protocol_traits<http::http3codec> {
+        using connection_context = http::http3::connection_context;
+
+        // RFC 9114: HTTP/3 does not define a connection preface on request streams.
+        static constexpr bool has_connection_preface = false;
+
+        // HTTP/3 requires a QUIC/UDP listener alongside the TCP/TLS listener.
+        static constexpr bool has_quic_transport = true;
+
+        template<typename Stream>
+        static asio::awaitable<bool> on_connection_start(Stream &, std::string &) {
+            co_return true;
+        }
+
+        template<typename Request>
+        static bool keep_alive(const Request &req, unsigned, unsigned) {
+            if constexpr (requires { req.version_major(); }) {
+                if (req.version_major() == 3) {
+                    return false; // In HTTP/3, each QUIC stream carries exactly one request/response
+                }
+            }
+            if constexpr (requires { req.should_keep_alive(); }) {
+                return req.should_keep_alive();
+            }
+            return true;
+        }
+
+        template<typename Request, typename Response>
+        static void prepare_response(const Request &req, Response &res, bool keep_alive, unsigned timeout_sec, unsigned max_req) {
+            if constexpr (requires { req.version_major(); }) {
+                if (req.version_major() == 1) {
+                    res.set_keep_alive(keep_alive, timeout_sec, max_req);
+                    // Alt-Svc injection is handled by Server::handle_connection using the
+                    // actual runtime port_ — never hardcoded here.
+                    return;
+                }
+            }
+            // RFC 9114 forbids Connection and Keep-Alive headers in native HTTP/3
+        }
+
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+        static void configure_alpn(SSL_CTX *ctx) {
+            SSL_CTX_set_alpn_select_cb(
+                ctx,
+                [](SSL *, const unsigned char **out, unsigned char *outLen,
+                   const unsigned char *in, unsigned int inLen, void *) -> int {
+                    const unsigned char *p = in;
+                    const unsigned char *http11_start = nullptr;
+                    while (p < in + inLen) {
+                        const unsigned char len = *p++;
+                        if (len == 2 && p[0] == 'h' && p[1] == '3') {
+                            *out = p;
+                            *outLen = 2;
+                            return SSL_TLSEXT_ERR_OK;
+                        }
+                        if (len == 8 && std::memcmp(p, "http/1.1", 8) == 0) {
+                            http11_start = p;
+                        }
+                        p += len;
+                    }
+                    if (http11_start) {
+                        *out = http11_start;
+                        *outLen = 8;
+                        return SSL_TLSEXT_ERR_OK;
+                    }
+                    return SSL_TLSEXT_ERR_OK;
+                },
+                nullptr);
+        }
+#endif
+    };
+} // namespace wavex::protos  // HTTP/3 specialization
+

@@ -63,6 +63,7 @@
 #include <wavex/Server/TlsConfig.hpp>
 #include <wavex/Base/Memory.hpp>
 #include <wavex/Base/Logger.hpp>
+#include <wavex/Network/QUIC.hpp>
 
 namespace wavex::server {
     /**
@@ -183,6 +184,9 @@ namespace wavex::server {
         using RequestType = RouterType::RequestType;
         using ResponseType = RouterType::ResponseType;
         using NotFoundHandler = std::function<asio::awaitable<void>(RequestType &, ResponseType &)>;
+        static constexpr bool has_quic_transport = requires {
+            { traits::has_quic_transport } -> std::convertible_to<bool>;
+        } && traits::has_quic_transport;
 
     private:
         // ─── 2. Member Variables (Arranged for minimum padding) ──────────────
@@ -199,6 +203,7 @@ namespace wavex::server {
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
         std::unique_ptr<asio::ssl::context> ssl_ctx_;
 #endif
+        std::unique_ptr<network::quic::QuicServer> quic_server_;
         std::chrono::milliseconds shutdown_timeout_{10000};
         std::chrono::seconds keep_alive_timeout_{5};
         std::size_t max_request_size_{100 * 1024 * 1024}; ///< Default 100MB limit
@@ -214,6 +219,7 @@ namespace wavex::server {
         bool enable_signals_{true};
         bool exit_on_signal_{true};
         bool tls_enabled_{false};
+        bool allow_insecure_http3_{false};
 
     public:
         // ─── 3. Constructors & Destructor ────────────────────────────────────
@@ -280,6 +286,14 @@ namespace wavex::server {
          */
         [[nodiscard]] bool is_tls_enabled() const { return tls_enabled_; }
 
+        /**
+         * @brief Allows HTTP/3 to run without TLS 1.3 encryption (dev/testing mode only).
+         * @param allow True to allow cleartext HTTP/3, false to require TLS 1.3 (default: false).
+         */
+        void allow_insecure(bool allow = true) noexcept {
+            allow_insecure_http3_ = allow;
+        }
+
         /// Start master acceptor loop and run event loop
         void run() {
             ServerState expected = ServerState::Stopped;
@@ -302,10 +316,10 @@ namespace wavex::server {
             if (!acceptor_.is_open()) {
                 asio::error_code ec;
                 auto ep = asio::ip::tcp::endpoint(asio::ip::make_address(address_), port_);
-                acceptor_.open(ep.protocol(), ec);
-                acceptor_.set_option(asio::ip::tcp::acceptor::reuse_address(true), ec);
-                acceptor_.bind(ep, ec);
-                acceptor_.listen(asio::socket_base::max_listen_connections, ec);
+                std::ignore = acceptor_.open(ep.protocol(), ec);
+                std::ignore = acceptor_.set_option(asio::ip::tcp::acceptor::reuse_address(true), ec);
+                std::ignore = acceptor_.bind(ep, ec);
+                std::ignore = acceptor_.listen(asio::socket_base::max_listen_connections, ec);
             }
 
             // Pre-compile all middleware chains for zero-allocation resolve() hot path
@@ -323,6 +337,24 @@ namespace wavex::server {
                         exit(shutdown_timeout_);
                     }
                 });
+            }
+
+            // Conditionally start the QUIC/UDP listener for HTTP/3 on the same port
+            if constexpr (has_quic_transport) {
+                if (!tls_enabled_ && !allow_insecure_http3_) {
+                    throw std::runtime_error(
+                        "HTTP/3 requires TLS 1.3. Call server.enable_tls(cert, key) before server.run().");
+                }
+                quic_server_ = std::make_unique<network::quic::QuicServer>(
+                    master_io_, address_, port_);
+                quic_server_->set_stream_handler(
+                    [this](std::shared_ptr<network::quic::QuicStream> stream)
+                        -> asio::awaitable<void> {
+                        spawn_connection(std::move(stream));
+                        co_return;
+                    });
+                quic_server_->start();
+                wavex::log::info("[WaveX] QUIC/UDP listener active on {}:{}", address_, port_);
             }
 
             asio::co_spawn(master_io_, accept_loop(), asio::detached);
@@ -388,14 +420,18 @@ namespace wavex::server {
             }
             state_.store(ServerState::Stopped, std::memory_order_release);
             asio::error_code ec;
-            acceptor_.close(ec);
+            std::ignore = acceptor_.close(ec);
+            if (quic_server_) {
+                quic_server_->stop();
+                quic_server_.reset();
+            }
             conn_tracker_.force_close_all();
             if (shutdown_timer_) {
                 shutdown_timer_->cancel(ec);
             }
             pool_.stop_pool();
             if (signals_) {
-                signals_->cancel(ec);
+                std::ignore = signals_->cancel(ec);
                 signals_.reset();
             }
             std::signal(SIGINT, SIG_DFL);
@@ -444,7 +480,7 @@ namespace wavex::server {
         }
 
         /// Access the underlying thread pool
-        ThreadPool &pool() { return pool_; }
+        [[nodiscard]] ThreadPool &pool() noexcept { return pool_; }
 
         /// Configure connection idle timeout
         void set_keep_alive_timeout(std::chrono::seconds timeout) noexcept {
@@ -556,10 +592,13 @@ namespace wavex::server {
             set_not_found("Not Found", "text/plain");
         }
 
+        /// Get reference to the server's master io_context
+        [[nodiscard]] asio::io_context &io_context() noexcept { return master_io_; }
+
     private:
         void start_graceful_shutdown(std::chrono::milliseconds timeout) {
             asio::error_code ec;
-            acceptor_.close(ec);
+            std::ignore = acceptor_.close(ec);
 
             // Cancel all idle sockets waiting for keep-alive requests immediately
             conn_tracker_.cancel_all_idle();
@@ -588,8 +627,12 @@ namespace wavex::server {
             if (shutdown_timer_) {
                 shutdown_timer_->cancel(ec);
             }
+            if (quic_server_) {
+                quic_server_->stop();
+                quic_server_.reset();
+            }
             if (signals_) {
-                signals_->cancel(ec);
+                std::ignore = signals_->cancel(ec);
                 signals_.reset();
             }
             std::signal(SIGINT, SIG_DFL);
@@ -668,7 +711,7 @@ namespace wavex::server {
                 try {
                     asio::ip::tcp::socket socket = co_await acceptor_.async_accept();
                     asio::error_code nd_ec;
-                    socket.set_option(asio::ip::tcp::no_delay(true), nd_ec);
+                    std::ignore = socket.set_option(asio::ip::tcp::no_delay(true), nd_ec);
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
                     if (tls_enabled_ && ssl_ctx_) {
                         auto stream = std::make_shared<asio::ssl::stream<asio::ip::tcp::socket> >(
@@ -708,34 +751,40 @@ namespace wavex::server {
          */
         template<typename Stream>
         static asio::awaitable<void> drain_and_abort(Stream &s) {
-            auto &sock = get_stream_socket(s);
-            asio::error_code ec;
-            std::ignore = sock.shutdown(asio::ip::tcp::socket::shutdown_send, ec);
-            if (ec || !sock.is_open()) co_return;
+            // QUIC streams handle their own graceful teardown — drain is TCP-only
+            if constexpr (requires {
+                { get_stream_socket(s).available(std::declval<asio::error_code&>()) } -> std::integral;
+            }) {
+                auto &sock = get_stream_socket(s);
+                asio::error_code ec;
+                std::ignore = sock.shutdown(asio::ip::tcp::socket::shutdown_send, ec);
+                if (ec || !sock.is_open()) co_return;
 
-            constexpr auto kDrainLimit = std::chrono::milliseconds(200);
-            constexpr std::size_t kMaxDrainBytes = 64 * 1024; // 64 KB cap
-            const auto deadline = std::chrono::steady_clock::now() + kDrainLimit;
+                constexpr auto kDrainLimit = std::chrono::milliseconds(200);
+                constexpr std::size_t kMaxDrainBytes = 64 * 1024; // 64 KB cap
+                const auto deadline = std::chrono::steady_clock::now() + kDrainLimit;
 
-            char discard_buf[4096];
-            std::size_t total_drained = 0;
+                char discard_buf[4096];
+                std::size_t total_drained = 0;
 
-            while (sock.is_open()) {
-                if (std::chrono::steady_clock::now() >= deadline) break;
+                while (sock.is_open()) {
+                    if (std::chrono::steady_clock::now() >= deadline) break;
 
-                std::size_t avail = sock.available(ec);
-                if (ec || avail == 0) break;
+                    std::size_t avail = sock.available(ec);
+                    if (ec || avail == 0) break;
 
-                std::size_t to_read = std::min({avail, sizeof(discard_buf), kMaxDrainBytes - total_drained});
-                std::size_t n = sock.read_some(asio::buffer(discard_buf, to_read), ec);
-                if (ec || n == 0) break;
+                    std::size_t to_read = std::min({avail, sizeof(discard_buf), kMaxDrainBytes - total_drained});
+                    std::size_t n = sock.read_some(asio::buffer(discard_buf, to_read), ec);
+                    if (ec || n == 0) break;
 
-                total_drained += n;
-                if (total_drained >= kMaxDrainBytes) break;
+                    total_drained += n;
+                    if (total_drained >= kMaxDrainBytes) break;
+                }
             }
             co_return;
         }
 
+    public:
         /**
          * @brief Unified connection handler — written once for every protocol and transport.
          */
@@ -794,10 +843,14 @@ namespace wavex::server {
                 void close() noexcept {
                     if (closed) return;
                     closed = true;
-                    auto &sock = get_stream_socket(s);
-                    asio::error_code ec;
-                    std::ignore = sock.shutdown(asio::ip::tcp::socket::shutdown_send, ec);
-                    std::ignore = sock.close(ec);
+                    if constexpr (requires { s.lowest_layer().remote_endpoint(); }) {
+                        auto &sock = get_stream_socket(s);
+                        asio::error_code ec;
+                        std::ignore = sock.shutdown(asio::ip::tcp::socket::shutdown_send, ec);
+                        std::ignore = sock.close(ec);
+                    } else {
+                        s.close();
+                    }
                 }
             } transport_guard{stream};
 
@@ -931,11 +984,18 @@ namespace wavex::server {
                         continue;
                     }
 
+                    if constexpr (requires { stream.stream_id(); }) {
+                        req.stream_id(static_cast<uint32_t>(stream.stream_id()));
+                    }
+
                     auto match = router_.resolve(req.method_type(), req.path());
 
                     ResponseType res;
                     if constexpr (requires { res.stream_id(req.stream_id()); }) {
                         res.stream_id(req.stream_id());
+                    }
+                    if constexpr (requires { res.set_version(req.version_major(), req.version_minor()); }) {
+                        res.set_version(req.version_major(), req.version_minor());
                     }
 
                     // Copy route params from RouteMatch into the request (with automatic percent-decoding)
@@ -1029,6 +1089,16 @@ namespace wavex::server {
                     traits::prepare_response(req, res, effective_keep,
                                              static_cast<unsigned>(keep_alive_timeout_.count()), remaining);
 
+                    // Dynamic Alt-Svc injection for HTTP/3 servers on HTTP/1.x fallback connections
+                    if constexpr (has_quic_transport) {
+                        if constexpr (requires { req.version_major(); }) {
+                            if (req.version_major() == 1 && !res.header("Alt-Svc")) {
+                                const auto port_str = std::to_string(port_);
+                                res.set("Alt-Svc", "h3=\":" + port_str + "\"; ma=2592000,h3-29=\":" + port_str + "\"; ma=2592000");
+                            }
+                        }
+                    }
+
                     // Server writes serialized response if headers were not already flushed by streaming
                     if (!res.is_headers_sent()) [[likely]] {
                         std::string wire_resp = res.serialize();
@@ -1066,12 +1136,26 @@ namespace wavex::server {
             } else
 #endif
             {
-                co_await drain_and_abort(stream);
+                if constexpr (requires { stream.lowest_layer().remote_endpoint(); }) {
+                    co_await drain_and_abort(stream);
+                }
             }
             transport_guard.close();
             co_return;
         }
 
+        /**
+         * @brief Spawns connection processing coroutine on the server's thread pool.
+         */
+        template<typename Stream>
+        void spawn_connection(std::shared_ptr<Stream> stream_ptr) {
+            if (pool_.worker_count() == 0) {
+                pool_.start_pool();
+            }
+            pool_.spawn_coroutine(handle_connection(std::move(stream_ptr)));
+        }
+
+    private:
         /// Generic middleware chain runner helper for arbitrary CRTP Request/Response types
         template<typename ReqT, typename ResT, typename MwVec, typename H>
         static asio::awaitable<void> run_chain(ReqT &req, ResT &res, const MwVec &mws, const H &handler) {
@@ -1096,6 +1180,9 @@ namespace wavex::server {
     using http1server = Http1Server;
     using Http2Server = Server<wavex::protos::http::http2codec, wavex::engine::Http2Router>;
     using http2server = Http2Server;
+    using Http3Server = Server<wavex::protos::http::http3codec, wavex::engine::Http3Router>;
+    using http3server = Http3Server;
     using HttpServer = Http1Server;
     using httpserver = HttpServer;
 } // namespace wavex::server
+
