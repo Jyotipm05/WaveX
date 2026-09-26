@@ -55,6 +55,9 @@
 #include <openssl/evp.h>
 #include <openssl/kdf.h>
 #include <openssl/rand.h>
+#include <openssl/core_dispatch.h>
+#else
+#error "WaveX QUIC transport requires OpenSSL (WAVEX_HAS_SSL=1). Please build with SSL support enabled."
 #endif
 
 namespace wavex::network::quic {
@@ -303,6 +306,7 @@ namespace wavex::network::quic {
         uint64_t length{0};
         uint64_t packet_number{0};
         uint32_t version{QUIC_VERSION_1};
+        uint32_t pn_offset{0};
         ConnectionId dcid{};
         ConnectionId scid{};
         PacketType type{PacketType::OneRTT};
@@ -326,6 +330,10 @@ namespace wavex::network::quic {
             ProtectionKeys &client_keys,
             ProtectionKeys &server_keys) noexcept;
 
+        static bool expand_quic_keys(
+            const uint8_t *secret, std::size_t secret_len,
+            ProtectionKeys &keys) noexcept;
+
         static bool protect_packet(
             const ProtectionKeys &keys,
             PacketHeader &hdr,
@@ -336,11 +344,13 @@ namespace wavex::network::quic {
             const ProtectionKeys &keys,
             PacketHeader &hdr,
             std::string_view packet_bytes,
-            std::string &plaintext_out) noexcept;
+            std::string &plaintext_out,
+            uint64_t largest_pn = 0,
+            std::size_t expected_dcid_len = 8) noexcept;
     };
 
     void pack_packet_header(const PacketHeader &hdr, std::string &out);
-    bool unpack_packet_header(std::string_view raw, PacketHeader &hdr, std::size_t &hdr_len) noexcept;
+    bool unpack_packet_header(std::string_view raw, PacketHeader &hdr, std::size_t &hdr_len, std::size_t expected_dcid_len = 8) noexcept;
 
     // ─── 6. QuicStream (Meets WaveX AsyncStream Concept) ───────────────────────
 
@@ -411,23 +421,32 @@ namespace wavex::network::quic {
         // Async read initiation
         template<typename MutableBufferSequence, typename Token>
         auto async_read_some(const MutableBufferSequence &buffers, Token &&token) {
+            auto weak_self = weak_from_this();
             return asio::async_initiate<Token, void(std::error_code, std::size_t)>(
-                [this, buffers](auto handler) {
+                [weak_self, buffers](auto handler) {
                     using HandlerType = std::decay_t<decltype(handler)>;
                     auto shared_h = std::make_shared<HandlerType>(std::move(handler));
-                    auto executor = asio::get_associated_executor(*shared_h, get_executor());
+                    auto self = weak_self.lock();
+                    if (!self) {
+                        auto executor = asio::get_associated_executor(*shared_h);
+                        asio::post(executor, [shared_h] {
+                            (*shared_h)(asio::error::operation_aborted, 0);
+                        });
+                        return;
+                    }
+                    auto executor = asio::get_associated_executor(*shared_h, self->get_executor());
 
-                    std::lock_guard lock(mtx_);
-                    if (!is_open_ && in_buffer_.empty()) {
+                    std::lock_guard lock(self->mtx_);
+                    if (!self->is_open_ && self->in_buffer_.empty()) {
                         asio::post(executor, [shared_h] {
                             (*shared_h)(asio::error::eof, 0);
                         });
                         return;
                     }
 
-                    if (!in_buffer_.empty()) {
+                    if (!self->in_buffer_.empty()) {
                         std::size_t dest_len = asio::buffer_size(buffers);
-                        std::size_t to_copy = std::min(dest_len, in_buffer_.size());
+                        std::size_t to_copy = std::min(dest_len, self->in_buffer_.size());
                         std::size_t copied = 0;
                         for (auto b = asio::buffer_sequence_begin(buffers);
                              b != asio::buffer_sequence_end(buffers) && copied < to_copy; ++b) {
@@ -435,8 +454,8 @@ namespace wavex::network::quic {
                             std::size_t chunk = std::min(mb.size(), to_copy - copied);
                             auto *dest = static_cast<uint8_t*>(mb.data());
                             for (std::size_t i = 0; i < chunk; ++i) {
-                                dest[i] = in_buffer_.front();
-                                in_buffer_.pop_front();
+                                dest[i] = self->in_buffer_.front();
+                                self->in_buffer_.pop_front();
                             }
                             copied += chunk;
                         }
@@ -446,7 +465,7 @@ namespace wavex::network::quic {
                         return;
                     }
 
-                    if (fin_received_) {
+                    if (self->fin_received_) {
                         asio::post(executor, [shared_h] {
                             (*shared_h)(asio::error::eof, 0);
                         });
@@ -455,9 +474,9 @@ namespace wavex::network::quic {
 
                     // Register pending read
                     auto first_buf = *asio::buffer_sequence_begin(buffers);
-                    pending_buf_ = first_buf.data();
-                    pending_buf_size_ = first_buf.size();
-                    pending_read_ = [shared_h, executor](std::error_code ec, std::size_t bytes) {
+                    self->pending_buf_ = first_buf.data();
+                    self->pending_buf_size_ = first_buf.size();
+                    self->pending_read_ = [shared_h, executor](std::error_code ec, std::size_t bytes) {
                         asio::post(executor, [shared_h, ec, bytes] {
                             (*shared_h)(ec, bytes);
                         });
@@ -470,11 +489,20 @@ namespace wavex::network::quic {
         // Async write initiation
         template<typename ConstBufferSequence, typename Token>
         auto async_write_some(const ConstBufferSequence &buffers, Token &&token) {
+            auto weak_self = weak_from_this();
             return asio::async_initiate<Token, void(std::error_code, std::size_t)>(
-                [this, buffers](auto handler) {
+                [weak_self, buffers](auto handler) {
                     using HandlerType = std::decay_t<decltype(handler)>;
                     auto shared_h = std::make_shared<HandlerType>(std::move(handler));
-                    auto executor = asio::get_associated_executor(*shared_h, get_executor());
+                    auto self = weak_self.lock();
+                    if (!self) {
+                        auto executor = asio::get_associated_executor(*shared_h);
+                        asio::post(executor, [shared_h] {
+                            (*shared_h)(asio::error::operation_aborted, 0);
+                        });
+                        return;
+                    }
+                    auto executor = asio::get_associated_executor(*shared_h, self->get_executor());
 
                     const std::size_t len = asio::buffer_size(buffers);
                     std::string payload;
@@ -485,7 +513,7 @@ namespace wavex::network::quic {
                         payload.append(static_cast<const char*>(cb.data()), cb.size());
                     }
 
-                    std::error_code ec = write_outbound(payload, false);
+                    std::error_code ec = self->write_outbound(payload, false);
                     asio::post(executor, [shared_h, ec, len] {
                         (*shared_h)(ec, ec ? 0 : len);
                     });
@@ -519,8 +547,32 @@ namespace wavex::network::quic {
         using StreamCreatedCallback = std::function<void(std::shared_ptr<QuicStream>)>;
         using OutboundCallback = std::function<void()>;
 
+        struct TlsCtx {
+            // ─── 2. Member Variables ────
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+            SSL *ssl{nullptr};
+            SSL_CTX *ctx{nullptr};
+            std::deque<std::string> recv_crypto_queue{};
+            std::deque<std::string> send_crypto_queue{};
+            uint32_t current_write_level{0};
+            uint32_t current_read_level{0};
+            bool initialized{false};
+#else
+            bool initialized{false};
+#endif
+
+            // ─── 3. Constructors & Destructor ────
+            TlsCtx() = default;
+            ~TlsCtx();
+            TlsCtx(const TlsCtx &) = delete;
+            TlsCtx &operator=(const TlsCtx &) = delete;
+            TlsCtx(TlsCtx &&) noexcept = default;
+            TlsCtx &operator=(TlsCtx &&) noexcept = default;
+        };
+
     private:
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        std::unique_ptr<TlsCtx> tls_{};
         mutable std::mutex mtx_{};
         asio::ip::udp::endpoint peer_endpoint_{};
         std::unordered_map<uint64_t, std::shared_ptr<QuicStream>> streams_{};
@@ -530,22 +582,40 @@ namespace wavex::network::quic {
         StreamCreatedCallback on_stream_created_{};
         OutboundCallback on_outbound_{};
         asio::any_io_executor executor_{};
+        std::string tls_cert_file_{};
+        std::string tls_key_file_{};
         ProtectionKeys initial_keys_peer_{};
         ProtectionKeys initial_keys_local_{};
+        ProtectionKeys handshake_keys_peer_{};
+        ProtectionKeys handshake_keys_local_{};
+        ProtectionKeys one_rtt_keys_peer_{};
+        ProtectionKeys one_rtt_keys_local_{};
         ProtectionKeys one_rtt_keys_{};
         uint64_t max_data_{1024 * 1024}; // 1 MB
         uint64_t max_stream_data_{256 * 1024}; // 256 KB
         uint64_t data_sent_{0};
         uint64_t data_received_{0};
         uint64_t next_bidi_stream_id_{0};
+        uint64_t next_uni_stream_id_{0};
         uint64_t next_packet_number_{0};
         uint64_t largest_received_pn_{0};
+        uint64_t largest_received_initial_pn_{0};
+        uint64_t largest_received_handshake_pn_{0};
+        uint64_t crypto_send_offset_initial_{0};
+        uint64_t crypto_send_offset_handshake_{0};
+        uint64_t crypto_send_offset_app_{0};
         uint32_t version_{QUIC_VERSION_1};
+        uint32_t current_write_level_{0};
+        uint32_t current_read_level_{0};
         ConnectionId local_cid_{};
         ConnectionId peer_cid_{};
+        ConnectionId original_dcid_{};
         ConnectionState state_{ConnectionState::Initial};
         bool is_server_{true};
         bool handshake_done_{false};
+        bool has_received_initial_{false};
+        bool has_received_handshake_{false};
+        bool settings_received_{false};
 
     public:
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
@@ -556,7 +626,7 @@ namespace wavex::network::quic {
             bool is_server = true,
             asio::any_io_executor executor = {},
             ConnectionId initial_dcid = {}) noexcept;
-        ~QuicConnection() = default;
+        ~QuicConnection();
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
         [[nodiscard]] asio::any_io_executor get_executor() const noexcept { return executor_; }
@@ -577,6 +647,14 @@ namespace wavex::network::quic {
             on_outbound_ = std::move(cb);
         }
 
+        void set_tls_credentials(std::string cert_file, std::string key_file) {
+            std::lock_guard lock(mtx_);
+            tls_cert_file_ = std::move(cert_file);
+            tls_key_file_ = std::move(key_file);
+        }
+
+        bool init_tls_handshake_engine();
+
         // Inbound packet handling
         void handle_datagram(std::string_view datagram);
 
@@ -596,9 +674,19 @@ namespace wavex::network::quic {
 
         void close(TransportError err = TransportError::NoError, std::string_view reason = "");
 
+        // Internal TLS engine plumbing
+        void queue_crypto_frame(std::string_view data);
+        int on_tls_crypto_recv(const unsigned char **buf, size_t *bytes_read);
+        int on_tls_crypto_release(size_t bytes_read);
+        int on_tls_secret(uint32_t prot_level, int direction, const unsigned char *secret, size_t secret_len);
+        int on_tls_transport_params(const unsigned char *params, size_t params_len);
+
     private:
+        void send_ack(uint64_t pn, PacketType type);
         void process_frames(const std::vector<Frame> &frames, uint64_t pn);
         void send_initial_handshake_response();
+        void run_tls_engine();
+        [[nodiscard]] std::string build_quic_transport_params() const;
     };
 
     // ─── 8. QuicServer and QuicClient ──────────────────────────────────────────
@@ -621,6 +709,8 @@ namespace wavex::network::quic {
         mutable std::mutex mtx_{};
         std::array<uint8_t, 65536> recv_buf_{};
         StreamHandler stream_handler_{};
+        std::string tls_cert_file_{};
+        std::string tls_key_file_{};
         bool running_{false};
 
     public:
@@ -633,6 +723,12 @@ namespace wavex::network::quic {
         void set_stream_handler(StreamHandler handler) {
             std::lock_guard lock(mtx_);
             stream_handler_ = std::move(handler);
+        }
+
+        void set_tls_credentials(std::string cert_file, std::string key_file) {
+            std::lock_guard lock(mtx_);
+            tls_cert_file_ = std::move(cert_file);
+            tls_key_file_ = std::move(key_file);
         }
 
         void start();

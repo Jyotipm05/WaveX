@@ -283,11 +283,126 @@ void test_quic_server_client_loopback() {
     std::cout << "  [PASS] QuicServer and QuicClient UDP integration passed.\n";
 }
 
+void test_stream_id_allocation() {
+    std::cout << "[Test QUIC] RFC 9000 §2.1 Stream ID allocation...\n";
+    auto ep = asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 9997);
+
+    // Server connection (is_server = true)
+    auto server_conn = std::make_shared<QuicConnection>(ConnectionId::random(8), ConnectionId::random(8), ep, true);
+    auto s_bidi1 = server_conn->create_stream(true);
+    auto s_bidi2 = server_conn->create_stream(true);
+    auto s_bidi3 = server_conn->create_stream(true);
+    auto s_bidi4 = server_conn->create_stream(true);
+    auto s_uni1 = server_conn->create_stream(false);
+    auto s_uni2 = server_conn->create_stream(false);
+    auto s_uni3 = server_conn->create_stream(false);
+    auto s_uni4 = server_conn->create_stream(false);
+
+    assert(s_bidi1->stream_id() == 1);
+    assert(s_bidi2->stream_id() == 5);
+    assert(s_bidi3->stream_id() == 9);
+    assert(s_bidi4->stream_id() == 13);
+
+    assert(s_uni1->stream_id() == 3);
+    assert(s_uni2->stream_id() == 7);
+    assert(s_uni3->stream_id() == 11);
+    assert(s_uni4->stream_id() == 15);
+
+    // Client connection (is_server = false)
+    auto client_conn = std::make_shared<QuicConnection>(ConnectionId::random(8), ConnectionId::random(8), ep, false);
+    auto c_bidi1 = client_conn->create_stream(true);
+    auto c_bidi2 = client_conn->create_stream(true);
+    auto c_bidi3 = client_conn->create_stream(true);
+    auto c_bidi4 = client_conn->create_stream(true);
+    auto c_uni1 = client_conn->create_stream(false);
+    auto c_uni2 = client_conn->create_stream(false);
+    auto c_uni3 = client_conn->create_stream(false);
+    auto c_uni4 = client_conn->create_stream(false);
+
+    assert(c_bidi1->stream_id() == 0);
+    assert(c_bidi2->stream_id() == 4);
+    assert(c_bidi3->stream_id() == 8);
+    assert(c_bidi4->stream_id() == 12);
+
+    assert(c_uni1->stream_id() == 2);
+    assert(c_uni2->stream_id() == 6);
+    assert(c_uni3->stream_id() == 10);
+    assert(c_uni4->stream_id() == 14);
+
+    std::cout << "  [PASS] RFC 9000 §2.1 Stream ID allocation passed.\n";
+}
+
+void test_rfc9001_appendix_a() {
+    std::cout << "[Test QUIC] RFC 9001 Appendix A known-answer vector...\n";
+
+    // RFC 9001 §A.1: Keys derived from DCID = 0x8394c8f03e515708
+    const std::vector<uint8_t> dcid_bytes = {0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08};
+    ConnectionId dcid(dcid_bytes.data(), dcid_bytes.size());
+
+    ProtectionKeys client_keys, server_keys;
+    bool ok = CryptoSuite::derive_initial_secrets(dcid, client_keys, server_keys);
+    assert(ok);
+
+    // Expected client initial secret: c00cf151ca5be075ed0ebfb5c80323c42d6b7db6788128913a9ec5438652e139
+    const uint8_t exp_client_secret[32] = {
+        0xc0, 0x0c, 0xf1, 0x51, 0xca, 0x5b, 0xe0, 0x75, 0xed, 0x0e, 0xbf, 0xb5, 0xc8, 0x03, 0x23, 0xc4,
+        0x2d, 0x6b, 0x7d, 0xb6, 0x78, 0x81, 0x28, 0x91, 0x3a, 0x9e, 0xc5, 0x43, 0x86, 0x52, 0xe1, 0x39
+    };
+    assert(std::memcmp(client_keys.secret.data(), exp_client_secret, 32) == 0);
+
+    // Expected client key: 1f369613dd76d5467730efcbe3b1a22d
+    const uint8_t exp_client_key[16] = {
+        0x1f, 0x36, 0x96, 0x13, 0xdd, 0x76, 0xd5, 0x46, 0x77, 0x30, 0xef, 0xcb, 0xe3, 0xb1, 0xa2, 0x2d
+    };
+    assert(std::memcmp(client_keys.key.data(), exp_client_key, 16) == 0);
+
+    // Expected client iv: fa044b2f42a3eed77ab411b497bbcdc6
+    const uint8_t exp_client_iv[12] = {
+        0xfa, 0x04, 0x4b, 0x2f, 0x42, 0xa3, 0xee, 0xd7, 0x7a, 0xb4, 0x11, 0xb4
+    };
+    assert(std::memcmp(client_keys.iv.data(), exp_client_iv, 12) == 0);
+
+    // Expected client hp: 9f50449e04a0e810283a1e9933adedd2
+    const uint8_t exp_client_hp[16] = {
+        0x9f, 0x50, 0x44, 0x9e, 0x04, 0xa0, 0xe8, 0x10, 0x28, 0x3a, 0x1e, 0x99, 0x33, 0xad, 0xed, 0xd2
+    };
+    assert(std::memcmp(client_keys.hp.data(), exp_client_hp, 16) == 0);
+
+    // Expected server initial secret: 3c199828fd139ef106fe4b31775bc2f061423138d2377ced95f4005cdd7944f0
+    const uint8_t exp_server_secret[32] = {
+        0x3c, 0x19, 0x98, 0x28, 0xfd, 0x13, 0x9e, 0xf1, 0x06, 0xfe, 0x4b, 0x31, 0x77, 0x5b, 0xc2, 0xf0,
+        0x61, 0x42, 0x31, 0x38, 0xd2, 0x37, 0x7c, 0xed, 0x95, 0xf4, 0x00, 0x5c, 0xdd, 0x79, 0x44, 0xf0
+    };
+    assert(std::memcmp(server_keys.secret.data(), exp_server_secret, 32) == 0);
+
+    // Expected server key: cf3a5331653c364c88f0f379b6067e37
+    const uint8_t exp_server_key[16] = {
+        0xcf, 0x3a, 0x53, 0x31, 0x65, 0x3c, 0x36, 0x4c, 0x88, 0xf0, 0xf3, 0x79, 0xb6, 0x06, 0x7e, 0x37
+    };
+    assert(std::memcmp(server_keys.key.data(), exp_server_key, 16) == 0);
+
+    // Expected server iv: 0ac1493ca1905853b0bba03e36f37cbc
+    const uint8_t exp_server_iv[12] = {
+        0x0a, 0xc1, 0x49, 0x3c, 0xa1, 0x90, 0x58, 0x53, 0xb0, 0xbb, 0xa0, 0x3e
+    };
+    assert(std::memcmp(server_keys.iv.data(), exp_server_iv, 12) == 0);
+
+    // Expected server hp: c206b8d9b1f0d8120b08d10224869281
+    const uint8_t exp_server_hp[16] = {
+        0xc2, 0x06, 0xb8, 0xd9, 0xb1, 0xf0, 0xd8, 0x12, 0x0b, 0x08, 0xd1, 0x02, 0x24, 0x86, 0x92, 0x81
+    };
+    assert(std::memcmp(server_keys.hp.data(), exp_server_hp, 16) == 0);
+
+    std::cout << "  [PASS] RFC 9001 Appendix A known-answer vector passed.\n";
+}
+
 int main() {
     std::cout << "=== Running WaveX QUIC Transport Tests ===\n";
     try {
         test_varint();
         test_connection_id();
+        test_stream_id_allocation();
+        test_rfc9001_appendix_a();
         test_frames();
         test_packet_protection();
         test_quic_stream_async();

@@ -305,6 +305,58 @@ void test_http3_over_quic_stream() {
     std::cout << "  [PASS] HTTP/3 over QuicStream exchange passed.\n";
 }
 
+void test_http3_rfc9114_stream_rules() {
+    std::cout << "[Test HTTP/3] RFC 9114 Request Stream Rules...\n";
+
+    // 1. DATA before HEADERS -> must return error
+    std::string bad_data_first = h3::encoder::encode_data_frame("Illegal early body");
+    h3::request req1;
+    std::size_t consumed1 = 0;
+    qpk::dynamic_table dt1;
+    auto r1 = http3codec::parse_request(bad_data_first, req1, consumed1, dt1);
+    assert(r1 == http3codec::result::error);
+
+    // 2. SETTINGS frame on Request Stream -> must return error
+    std::string bad_settings = h3::encoder::serialize_settings({{settings_parameter::MAX_FIELD_SECTION_SIZE, 65536}});
+    h3::request req2;
+    std::size_t consumed2 = 0;
+    qpk::dynamic_table dt2;
+    auto r2 = http3codec::parse_request(bad_settings, req2, consumed2, dt2);
+    assert(r2 == http3codec::result::error);
+
+    // 3. Unknown frames are ignored/skipped per RFC 9114 §7.2.8
+    h3::request valid_req;
+    valid_req.method_type = method::GET;
+    valid_req.target = "/api/test";
+    valid_req.scheme = "https";
+    valid_req.authority = "wavex.internal";
+    valid_req.body = "body-payload";
+    std::string headers_frame = h3::encoder::encode_frame(
+        frame_type::HEADERS,
+        qpk::encoder::encode_request_headers(valid_req.method_type, valid_req.target, valid_req.scheme, valid_req.authority, valid_req.headers));
+
+    // Inject unknown frame type 0x3f (decimal 63)
+    std::string unknown_frame;
+    quic::VarInt::encode(0x3f, unknown_frame);
+    quic::VarInt::encode(4, unknown_frame);
+    unknown_frame.append("WAVX");
+
+    std::string data_frame = h3::encoder::encode_data_frame(valid_req.body);
+
+    std::string wire_with_unknown = headers_frame + unknown_frame + data_frame;
+    h3::request parsed_req;
+    std::size_t consumed3 = 0;
+    qpk::dynamic_table dt3;
+    auto r3 = http3codec::parse_request(wire_with_unknown, parsed_req, consumed3, dt3);
+    assert(r3 == http3codec::result::success);
+    assert(parsed_req.method_type == method::GET);
+    assert(parsed_req.target == "/api/test");
+    assert(parsed_req.body == "body-payload");
+    assert(consumed3 == wire_with_unknown.size());
+
+    std::cout << "  [PASS] RFC 9114 Request Stream Rules passed.\n";
+}
+
 int main() {
     std::cout << "=== Running WaveX HTTP/3 Codec Tests ===\n";
     try {
@@ -314,6 +366,7 @@ int main() {
         test_http3_framing();
         test_http3codec_full_message_roundtrip();
         test_http3_over_quic_stream();
+        test_http3_rfc9114_stream_rules();
         std::cout << "=== All HTTP/3 Tests PASSED ===\n";
         return 0;
     } catch (const std::exception &ex) {

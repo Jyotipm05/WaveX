@@ -417,8 +417,18 @@ namespace wavex::protos::http {
                 bool decode_header_block(
                     const std::string_view block,
                     std::vector<std::pair<std::string, std::string>> &out_headers) const {
-                    if (block.size() < 2) return false;
-                    std::size_t cursor = 2; // Skip QPACK prefix (Required Insert Count & Base)
+                    if (block.empty()) return false;
+                    std::size_t cursor = 0;
+
+                    // RFC 9204 §4.5.1: Encoded Field Section Prefix
+                    // 1. Required Insert Count (8-bit prefix integer)
+                    uint64_t req_insert_count = 0;
+                    if (!http2::hpack::decode_integer(block, cursor, 8, req_insert_count)) return false;
+
+                    // 2. Sign bit + Delta Base (7-bit prefix integer)
+                    if (cursor >= block.size()) return false;
+                    uint64_t delta_base = 0;
+                    if (!http2::hpack::decode_integer(block, cursor, 7, delta_base)) return false;
 
                     while (cursor < block.size()) {
                         const auto b = static_cast<uint8_t>(block[cursor]);
@@ -715,32 +725,6 @@ namespace wavex::protos::http {
                 bytes_consumed = 0;
                 if (buffer.empty()) return result::incomplete;
 
-                // Detect ASCII HTTP/1.x methods from Postman / standard TLS clients
-                if (buffer.size() >= 3 && buffer[0] >= 'A' && buffer[0] <= 'Z' && buffer[1] >= 'A' && buffer[1] <= 'Z') {
-                    http1codec::request h1_req;
-                    std::size_t h1_consumed = 0;
-                    const auto r = http1codec::parser::parse_request(buffer, h1_req, h1_consumed);
-                    if (r == http1codec::parser::result::incomplete) return result::incomplete;
-                    if (r == http1codec::parser::result::success) {
-                        req.version_major = h1_req.version_major;
-                        req.version_minor = h1_req.version_minor;
-                        req.method_type = h1_req.method_type;
-                        req.target_storage = std::string(h1_req.target);
-                        req.target = req.target_storage;
-                        req.body_storage = std::string(h1_req.body);
-                        req.body = req.body_storage;
-                        req.headers.clear();
-                        req.headers_storage.clear();
-                        req.headers_storage.reserve(h1_req.headers.size());
-                        for (const auto &h : h1_req.headers) {
-                            req.headers_storage.emplace_back(std::string(h.name), std::string(h.value));
-                        }
-                        req.rebase(req);
-                        bytes_consumed = h1_consumed;
-                        return result::success;
-                    }
-                }
-
                 std::size_t cursor = 0;
 
                 req.headers.clear();
@@ -776,8 +760,16 @@ namespace wavex::protos::http {
                         }
                         headers_received = true;
                     } else if (hdr.type == static_cast<uint64_t>(frame_type::DATA)) {
+                        if (!headers_received) {
+                            // RFC 9114 §4.1: DATA frame before HEADERS is a stream error
+                            return result::error;
+                        }
                         body_accumulator.append(payload);
+                    } else if (hdr.type == static_cast<uint64_t>(frame_type::SETTINGS)) {
+                        // RFC 9114 §7.2.4: SETTINGS frame MUST NOT be sent on any stream other than control stream
+                        return result::error;
                     }
+                    // RFC 9114 §7.2.8: Unknown frames are ignored
 
                     cursor += frame_bytes;
                 }
@@ -811,8 +803,8 @@ namespace wavex::protos::http {
                 const std::string_view buffer,
                 request &req,
                 std::size_t &bytes_consumed) {
-                static qpack::dynamic_table s_shared_dt;
-                return parse_request(buffer, req, bytes_consumed, s_shared_dt);
+                qpack::dynamic_table local_dt;
+                return parse_request(buffer, req, bytes_consumed, local_dt);
             }
 
             [[nodiscard]] static result parse_request(
@@ -861,8 +853,14 @@ namespace wavex::protos::http {
                         }
                         headers_received = true;
                     } else if (hdr.type == static_cast<uint64_t>(frame_type::DATA)) {
+                        if (!headers_received) {
+                            return result::error;
+                        }
                         body_accumulator.append(payload);
+                    } else if (hdr.type == static_cast<uint64_t>(frame_type::SETTINGS)) {
+                        return result::error;
                     }
+                    // RFC 9114 §7.2.8: Unknown frames are ignored
 
                     cursor += frame_bytes;
                 }
@@ -891,8 +889,8 @@ namespace wavex::protos::http {
                 const std::string_view buffer,
                 response &res,
                 std::size_t &bytes_consumed) {
-                static qpack::dynamic_table s_shared_dt;
-                return parse_response(buffer, res, bytes_consumed, s_shared_dt);
+                qpack::dynamic_table local_dt;
+                return parse_response(buffer, res, bytes_consumed, local_dt);
             }
 
             [[nodiscard]] static result parse_response(
@@ -935,33 +933,6 @@ namespace wavex::protos::http {
             }
 
             static std::string serialize_response(const response &res) {
-                if (res.version_major == 1) {
-                    std::string out = "HTTP/1.1 " + std::to_string(res.status_code) + " " + std::string(res.status_text) + "\r\n";
-                    bool has_content_type = false;
-                    bool has_content_length = false;
-                    bool has_connection = false;
-
-                    for (const auto &[name, value] : res.headers) {
-                        if (detail::is_equal(name, "content-type")) has_content_type = true;
-                        if (detail::is_equal(name, "content-length")) has_content_length = true;
-                        if (detail::is_equal(name, "connection")) has_connection = true;
-                        out += name;
-                        out += ": ";
-                        out += value;
-                        out += "\r\n";
-                    }
-
-                    if (!has_content_length) {
-                        out += "Content-Length: " + std::to_string(res.body.size()) + "\r\n";
-                    }
-                    if (!has_connection) {
-                        out += "Connection: keep-alive\r\n";
-                    }
-                    out += "\r\n";
-                    out.append(res.body);
-                    return out;
-                }
-
                 std::string header_block = qpack::encoder::encode_response_headers(
                     res.status_code,
                     res.headers
