@@ -116,6 +116,8 @@ export namespace wavex::server {
     using server::http2server;
     using server::Http3Server;
     using server::http3server;
+    using server::ComposedHttpServer;
+    using server::composed_http_server;
     using server::HttpServer;
     using server::httpserver;
 }

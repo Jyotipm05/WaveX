@@ -54,6 +54,9 @@ namespace wavex::protos {
         /// True if the protocol requires a connection-level opening exchange.
         static constexpr bool has_connection_preface = false;
 
+        /// True if this protocol uses TCP transport.
+        static constexpr bool has_tcp_transport = true;
+
         /// True if this protocol uses QUIC/UDP transport alongside TCP (e.g. HTTP/3).
         static constexpr bool has_quic_transport = false;
 
@@ -102,6 +105,7 @@ namespace wavex::protos {
         };
 
         static constexpr bool has_connection_preface = false;
+        static constexpr bool has_tcp_transport = true;
         static constexpr bool has_quic_transport = false;
 
         template<typename Stream>
@@ -159,6 +163,7 @@ namespace wavex::protos {
         using connection_context = http::http2::connection_context;
 
         static constexpr bool has_connection_preface = true;
+        static constexpr bool has_tcp_transport = true;
         static constexpr bool has_quic_transport = false;
 
         /**
@@ -250,6 +255,9 @@ namespace wavex::protos {
 
         // RFC 9114: HTTP/3 does not define a connection preface on request streams.
         static constexpr bool has_connection_preface = false;
+
+        // RFC 9114: HTTP/3 is defined exclusively over QUIC (UDP) and has no TCP framing.
+        static constexpr bool has_tcp_transport = false;
 
         // HTTP/3 requires a QUIC/UDP listener alongside the TCP/TLS listener.
         static constexpr bool has_quic_transport = true;

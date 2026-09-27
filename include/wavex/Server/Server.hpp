@@ -59,6 +59,7 @@
 
 #include <wavex/Base/Event.hpp>
 #include <wavex/Engine/HttpRouter.hpp>
+#include <wavex/protos/http/http.hpp>
 #include <wavex/Server/ThreadPool.hpp>
 #include <wavex/Server/TlsConfig.hpp>
 #include <wavex/Base/Memory.hpp>
@@ -187,6 +188,9 @@ namespace wavex::server {
         static constexpr bool has_quic_transport = requires {
             { traits::has_quic_transport } -> std::convertible_to<bool>;
         } && traits::has_quic_transport;
+        static constexpr bool has_tcp_transport = requires {
+            { traits::has_tcp_transport } -> std::convertible_to<bool>;
+        } ? traits::has_tcp_transport : true;
 
     private:
         // ─── 2. Member Variables (Arranged for minimum padding) ──────────────
@@ -204,6 +208,7 @@ namespace wavex::server {
         std::unique_ptr<asio::ssl::context> ssl_ctx_;
 #endif
         std::unique_ptr<network::quic::QuicServer> quic_server_;
+        engine::Http3Router *h3_router_{nullptr};
         std::chrono::milliseconds shutdown_timeout_{10000};
         std::chrono::seconds keep_alive_timeout_{5};
         std::size_t max_request_size_{100 * 1024 * 1024}; ///< Default 100MB limit
@@ -220,6 +225,7 @@ namespace wavex::server {
         bool exit_on_signal_{true};
         bool tls_enabled_{false};
         bool allow_insecure_quic_{false};
+        bool http3_enabled_{false};
 
     public:
         // ─── 3. Constructors & Destructor ────────────────────────────────────
@@ -233,9 +239,13 @@ namespace wavex::server {
             : router_(router),
               address_(std::move(address)),
               master_io_(),
-              acceptor_(master_io_, asio::ip::tcp::endpoint(asio::ip::make_address(address_), port)),
+              acceptor_(master_io_),
               pool_(),
               port_(port) {
+            if constexpr (std::is_same_v<Codec, protos::http::http3codec>) {
+                h3_router_ = reinterpret_cast<engine::Http3Router *>(&router_);
+                http3_enabled_ = true;
+            }
         }
 
         ~Server() {
@@ -287,6 +297,34 @@ namespace wavex::server {
         [[nodiscard]] bool is_tls_enabled() const { return tls_enabled_; }
 
         /**
+         * @brief Checks if the TCP acceptor is currently bound and listening.
+         * @return True if the TCP acceptor is open, false otherwise.
+         */
+        [[nodiscard]] bool is_acceptor_open() const noexcept { return acceptor_.is_open(); }
+
+        /**
+         * @brief Checks if HTTP/3 (QUIC) transport is enabled on this server instance.
+         * @return True if QUIC/HTTP-3 listener is active or scheduled to run, false otherwise.
+         */
+        [[nodiscard]] bool is_http3_enabled() const noexcept { return has_quic_transport || http3_enabled_; }
+
+        /**
+         * @brief Orthogonally enables HTTP/3 (QUIC) transport on this server instance using the given router.
+         * @param h3_router Reference to an Http3Router handling HTTP/3 stream requests.
+         */
+        void enable_http3(engine::Http3Router &h3_router) noexcept {
+            h3_router_ = &h3_router;
+            http3_enabled_ = true;
+        }
+
+        /**
+         * @brief Synonym for enable_http3(). Attaches an HTTP/3 router and activates QUIC listener.
+         */
+        void attach_http3(engine::Http3Router &h3_router) noexcept {
+            enable_http3(h3_router);
+        }
+
+        /**
          * @brief Allows QUIC transport to run without TLS 1.3 encryption (dev/testing mode only).
          * @param allow True to allow cleartext QUIC, false to require TLS 1.3 (default: false).
          */
@@ -313,17 +351,22 @@ namespace wavex::server {
                 pool_.start_pool();
             }
 
-            if (!acceptor_.is_open()) {
-                asio::error_code ec;
-                auto ep = asio::ip::tcp::endpoint(asio::ip::make_address(address_), port_);
-                std::ignore = acceptor_.open(ep.protocol(), ec);
-                std::ignore = acceptor_.set_option(asio::ip::tcp::acceptor::reuse_address(true), ec);
-                std::ignore = acceptor_.bind(ep, ec);
-                std::ignore = acceptor_.listen(asio::socket_base::max_listen_connections, ec);
+            if constexpr (has_tcp_transport) {
+                if (!acceptor_.is_open()) {
+                    asio::error_code ec;
+                    auto ep = asio::ip::tcp::endpoint(asio::ip::make_address(address_), port_);
+                    std::ignore = acceptor_.open(ep.protocol(), ec);
+                    std::ignore = acceptor_.set_option(asio::ip::tcp::acceptor::reuse_address(true), ec);
+                    std::ignore = acceptor_.bind(ep, ec);
+                    std::ignore = acceptor_.listen(asio::socket_base::max_listen_connections, ec);
+                }
             }
 
             // Pre-compile all middleware chains for zero-allocation resolve() hot path
             router_.freeze();
+            if (h3_router_) {
+                h3_router_->freeze();
+            }
 
             if (enable_signals_) {
                 signals_.emplace(master_io_, SIGINT, SIGTERM);
@@ -340,7 +383,7 @@ namespace wavex::server {
             }
 
             // Conditionally start the QUIC/UDP listener on the same port
-            if constexpr (has_quic_transport) {
+            if (has_quic_transport || http3_enabled_) {
                 if (!tls_enabled_ && !allow_insecure_quic_) {
                     throw std::runtime_error(
                         "QUIC transport requires TLS 1.3. Call server.enable_tls(cert, key) before server.run().");
@@ -374,14 +417,16 @@ namespace wavex::server {
                 quic_server_->set_stream_handler(
                     [this](std::shared_ptr<network::quic::QuicStream> stream)
                         -> asio::awaitable<void> {
-                        spawn_connection(std::move(stream));
+                        spawn_http3_stream(std::move(stream));
                         co_return;
                     });
                 quic_server_->start();
                 wavex::log::info("[WaveX] QUIC/UDP listener active on {}:{}", address_, port_);
             }
 
-            asio::co_spawn(master_io_, accept_loop(), asio::detached);
+            if constexpr (has_tcp_transport) {
+                asio::co_spawn(master_io_, accept_loop(), asio::detached);
+            }
             master_io_.run();
 
             state_.store(ServerState::Stopped, std::memory_order_release);
@@ -810,10 +855,31 @@ namespace wavex::server {
 
     public:
         /**
-         * @brief Unified connection handler — written once for every protocol and transport.
+         * @brief Unified connection handler — delegates to handle_connection_impl for this server's primary codec.
          */
         template<typename Stream>
         asio::awaitable<void> handle_connection(std::shared_ptr<Stream> stream_ptr) {
+            co_await handle_connection_impl<Codec, RouterType>(std::move(stream_ptr), router_);
+            co_return;
+        }
+
+        /**
+         * @brief HTTP/3 connection handler — processes incoming QUIC streams using http3codec and the attached Http3Router.
+         */
+        asio::awaitable<void> handle_http3_connection(std::shared_ptr<network::quic::QuicStream> stream_ptr) {
+            if (h3_router_) {
+                co_await handle_connection_impl<protos::http::http3codec, engine::Http3Router>(std::move(stream_ptr), *h3_router_);
+            }
+            co_return;
+        }
+
+    private:
+        template<typename CustomCodec, typename CustomRouter, typename Stream>
+        asio::awaitable<void> handle_connection_impl(std::shared_ptr<Stream> stream_ptr, CustomRouter &router) {
+            using CustTraits = protos::protocol_traits<CustomCodec>;
+            using CustReq = typename CustomRouter::RequestType;
+            using CustRes = typename CustomRouter::ResponseType;
+
             auto &stream = *stream_ptr;
             auto weak_stream = std::weak_ptr<Stream>(stream_ptr);
 
@@ -881,7 +947,7 @@ namespace wavex::server {
             std::string stream_buf;
             stream_buf.reserve(8192);
             std::size_t stream_buf_consumed = 0;
-            typename traits::connection_context conn_ctx{};
+            typename CustTraits::connection_context conn_ctx{};
             auto executor = co_await asio::this_coro::executor;
 
             try {
@@ -900,8 +966,8 @@ namespace wavex::server {
 #endif
 
                 // Protocol opening exchange (e.g. HTTP/2 PRI preface and SETTINGS handshake)
-                if constexpr (traits::has_connection_preface) {
-                    if (!co_await traits::on_connection_start(stream, stream_buf)) co_return;
+                if constexpr (CustTraits::has_connection_preface) {
+                    if (!co_await CustTraits::on_connection_start(stream, stream_buf)) co_return;
                 }
 
                 unsigned request_count = 0;
@@ -913,10 +979,10 @@ namespace wavex::server {
 
                     std::string_view unconsumed(stream_buf.data() + stream_buf_consumed,
                                                 stream_buf.size() - stream_buf_consumed);
-                    RequestType req;
+                    CustReq req;
                     auto p_res = req.parse_stream(unconsumed, conn_ctx);
 
-                    while (p_res == Codec::result::incomplete && state_.load(std::memory_order_acquire) !=
+                    while (p_res == CustomCodec::result::incomplete && state_.load(std::memory_order_acquire) !=
                            ServerState::Stopped) {
                         if (state_.load(std::memory_order_acquire) == ServerState::ShuttingDown && stream_buf.empty()) [
                             [unlikely]] {
@@ -959,7 +1025,7 @@ namespace wavex::server {
                         stream_buf.append(buffer, bytes_read);
 
                         if (max_request_size_ > 0 && stream_buf.size() > max_request_size_) [[unlikely]] {
-                            ResponseType err_res;
+                            CustRes err_res;
                             err_res.status(413).send("Payload Too Large");
                             std::string err_wire = err_res.serialize();
                             co_await asio::async_write(stream, asio::buffer(err_wire),
@@ -973,8 +1039,8 @@ namespace wavex::server {
                         p_res = req.parse_stream(unconsumed, conn_ctx);
                     }
 
-                    if (p_res != Codec::result::success) [[unlikely]] {
-                        ResponseType err_res;
+                    if (p_res != CustomCodec::result::success) [[unlikely]] {
+                        CustRes err_res;
                         err_res.status(400).send("Bad Request");
                         std::string err_wire = err_res.serialize();
                         co_await asio::async_write(stream, asio::buffer(err_wire),
@@ -984,14 +1050,14 @@ namespace wavex::server {
                     }
 
                     ++request_count;
-                    const bool keep = traits::keep_alive(req, request_count, max_keep_alive_requests_);
+                    const bool keep = CustTraits::keep_alive(req, request_count, max_keep_alive_requests_);
                     const unsigned remaining =
                             request_count < max_keep_alive_requests_ ? max_keep_alive_requests_ - request_count : 0;
 
                     // Hard cap: reject requests that overflow query param or header limits
                     if (req.has_query_param_overflow()) [[unlikely]] {
-                        ResponseType err_res;
-                        traits::prepare_response(req, err_res, false, 0, 0);
+                        CustRes err_res;
+                        CustTraits::prepare_response(req, err_res, false, 0, 0);
                         err_res.status(431).send("Request Header Fields Too Large");
                         std::string err_wire = err_res.serialize();
                         co_await asio::async_write(stream, asio::buffer(err_wire),
@@ -1012,9 +1078,9 @@ namespace wavex::server {
                         req.stream_id(static_cast<uint32_t>(stream.stream_id()));
                     }
 
-                    auto match = router_.resolve(req.method_type(), req.path());
+                    auto match = router.resolve(req.method_type(), req.path());
 
-                    ResponseType res;
+                    CustRes res;
                     if constexpr (requires { res.stream_id(req.stream_id()); }) {
                         res.stream_id(req.stream_id());
                     }
@@ -1074,10 +1140,14 @@ namespace wavex::server {
 
                     try {
                         if (!match) [[unlikely]] {
-                            if (server_not_found_handler_) {
-                                co_await (*server_not_found_handler_)(req, res);
+                            if constexpr (std::is_same_v<CustReq, RequestType> && std::is_same_v<CustRes, ResponseType>) {
+                                if (server_not_found_handler_) {
+                                    co_await (*server_not_found_handler_)(req, res);
+                                } else {
+                                    co_await router.not_found_handler()(req, res);
+                                }
                             } else {
-                                co_await router_.not_found_handler()(req, res);
+                                co_await router.not_found_handler()(req, res);
                             }
                         } else if (match->middlewares.empty()) [[likely]] {
                             co_await match->handler(req, res);
@@ -1110,13 +1180,13 @@ namespace wavex::server {
                     const bool is_shutting_down = state_.load(std::memory_order_acquire) == ServerState::ShuttingDown;
                     const bool effective_keep = keep && !is_shutting_down;
 
-                    traits::prepare_response(req, res, effective_keep,
-                                             static_cast<unsigned>(keep_alive_timeout_.count()), remaining);
+                    CustTraits::prepare_response(req, res, effective_keep,
+                                                 static_cast<unsigned>(keep_alive_timeout_.count()), remaining);
 
-                    // Dynamic Alt-Svc injection for HTTP/3 servers on HTTP/1.x fallback connections
-                    if constexpr (has_quic_transport) {
+                    // Dynamic Alt-Svc injection for HTTP/3 servers on HTTP/1.x and HTTP/2 fallback connections
+                    if (has_quic_transport || http3_enabled_) {
                         if constexpr (requires { req.version_major(); }) {
-                            if (req.version_major() == 1 && !res.header("Alt-Svc")) {
+                            if ((req.version_major() == 1 || req.version_major() == 2) && !res.header("Alt-Svc")) {
                                 const auto port_str = std::to_string(port_);
                                 res.set("Alt-Svc", "h3=\":" + port_str + "\"; ma=2592000,h3-29=\":" + port_str + "\"; ma=2592000");
                             }
@@ -1168,6 +1238,7 @@ namespace wavex::server {
             co_return;
         }
 
+    public:
         /**
          * @brief Spawns connection processing coroutine on the server's thread pool.
          */
@@ -1177,6 +1248,20 @@ namespace wavex::server {
                 pool_.start_pool();
             }
             pool_.spawn_coroutine(handle_connection(std::move(stream_ptr)));
+        }
+
+        /**
+         * @brief Spawns HTTP/3 QUIC stream processing coroutine on the server's thread pool.
+         */
+        void spawn_http3_stream(std::shared_ptr<network::quic::QuicStream> stream_ptr) {
+            if (pool_.worker_count() == 0) {
+                pool_.start_pool();
+            }
+            if constexpr (std::is_same_v<Codec, protos::http::http3codec>) {
+                pool_.spawn_coroutine(handle_connection(std::move(stream_ptr)));
+            } else {
+                pool_.spawn_coroutine(handle_http3_connection(std::move(stream_ptr)));
+            }
         }
 
     private:
@@ -1208,5 +1293,228 @@ namespace wavex::server {
     using http3server = Http3Server;
     using HttpServer = Http1Server;
     using httpserver = HttpServer;
+
+    /**
+     * @class ComposedHttpServer
+     * @brief High-level composed server running HTTP/1.1 & HTTP/2 over TCP/TLS and HTTP/3 over QUIC/UDP concurrently on the same port.
+     */
+    class ComposedHttpServer {
+    public:
+        // ─── 1. Nested Types & Definitions ───────────────────────────────────
+        using Http2Router = engine::Http2Router;
+        using Http3Router = engine::Http3Router;
+
+    private:
+        // ─── 2. Member Variables (Arranged for minimum padding) ──────────────
+        Http2Router owned_h2_router_{};
+        Http3Router owned_h3_router_{};
+        Http2Router *h2_router_{nullptr};
+        Http3Router *h3_router_{nullptr};
+        Http2Server server_;
+
+    public:
+        // ─── 3. Constructors & Destructor ────────────────────────────────────
+        ComposedHttpServer(std::string address, const unsigned short port)
+            : owned_h2_router_(),
+              owned_h3_router_(),
+              h2_router_(&owned_h2_router_),
+              h3_router_(&owned_h3_router_),
+              server_(*h2_router_, std::move(address), port) {
+            server_.enable_http3(*h3_router_);
+        }
+
+        ComposedHttpServer(Http2Router &h2_router, Http3Router &h3_router,
+                           std::string address, const unsigned short port)
+            : owned_h2_router_(),
+              owned_h3_router_(),
+              h2_router_(&h2_router),
+              h3_router_(&h3_router),
+              server_(*h2_router_, std::move(address), port) {
+            server_.enable_http3(*h3_router_);
+        }
+
+        ~ComposedHttpServer() = default;
+
+        ComposedHttpServer(const ComposedHttpServer &) = delete;
+        ComposedHttpServer &operator=(const ComposedHttpServer &) = delete;
+        ComposedHttpServer(ComposedHttpServer &&) = delete;
+        ComposedHttpServer &operator=(ComposedHttpServer &&) = delete;
+
+        // ─── 4. Member Functions ─────────────────────────────────────────────
+        [[nodiscard]] Http2Router &h2_router() noexcept { return *h2_router_; }
+        [[nodiscard]] const Http2Router &h2_router() const noexcept { return *h2_router_; }
+        [[nodiscard]] Http3Router &h3_router() noexcept { return *h3_router_; }
+        [[nodiscard]] const Http3Router &h3_router() const noexcept { return *h3_router_; }
+        [[nodiscard]] Http2Server &tcp_server() noexcept { return server_; }
+        [[nodiscard]] const Http2Server &tcp_server() const noexcept { return server_; }
+
+        void enable_tls(std::string cert_file = "ssl/test.crt", std::string key_file = "ssl/test.key") {
+            server_.enable_tls(std::move(cert_file), std::move(key_file));
+        }
+
+        void enable_tls(TlsConfig config) {
+            server_.enable_tls(std::move(config));
+        }
+
+        [[nodiscard]] bool is_tls_enabled() const noexcept { return server_.is_tls_enabled(); }
+        [[nodiscard]] bool is_acceptor_open() const noexcept { return server_.is_acceptor_open(); }
+        [[nodiscard]] bool is_http3_enabled() const noexcept { return server_.is_http3_enabled(); }
+
+        void allow_insecure(bool allow = true) noexcept {
+            server_.allow_insecure(allow);
+        }
+
+        void run() {
+            server_.run();
+        }
+
+        void stop() {
+            server_.stop();
+        }
+
+        void exit(std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+            server_.exit(timeout);
+        }
+
+        void shutdown(std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+            server_.shutdown(timeout);
+        }
+
+        [[nodiscard]] asio::io_context &io_context() noexcept { return server_.io_context(); }
+
+        template<typename Handler>
+        ComposedHttpServer &get(const std::string_view pattern, Handler &&h) {
+            auto h_copy = h;
+            h2_router_->get(pattern, [h_copy](Http2Router::RequestType &req, Http2Router::ResponseType &res) -> asio::awaitable<void> {
+                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h_copy), Http2Router::RequestType &, Http2Router::ResponseType &>) {
+                    co_await h_copy(req, res);
+                } else {
+                    h_copy(req, res);
+                    co_return;
+                }
+            });
+            h3_router_->get(pattern, [h = std::forward<Handler>(h)](Http3Router::RequestType &req, Http3Router::ResponseType &res) -> asio::awaitable<void> {
+                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h), Http3Router::RequestType &, Http3Router::ResponseType &>) {
+                    co_await h(req, res);
+                } else {
+                    h(req, res);
+                    co_return;
+                }
+            });
+            return *this;
+        }
+
+        template<typename Handler>
+        ComposedHttpServer &post(const std::string_view pattern, Handler &&h) {
+            auto h_copy = h;
+            h2_router_->post(pattern, [h_copy](Http2Router::RequestType &req, Http2Router::ResponseType &res) -> asio::awaitable<void> {
+                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h_copy), Http2Router::RequestType &, Http2Router::ResponseType &>) {
+                    co_await h_copy(req, res);
+                } else {
+                    h_copy(req, res);
+                    co_return;
+                }
+            });
+            h3_router_->post(pattern, [h = std::forward<Handler>(h)](Http3Router::RequestType &req, Http3Router::ResponseType &res) -> asio::awaitable<void> {
+                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h), Http3Router::RequestType &, Http3Router::ResponseType &>) {
+                    co_await h(req, res);
+                } else {
+                    h(req, res);
+                    co_return;
+                }
+            });
+            return *this;
+        }
+
+        template<typename Handler>
+        ComposedHttpServer &put(const std::string_view pattern, Handler &&h) {
+            auto h_copy = h;
+            h2_router_->put(pattern, [h_copy](Http2Router::RequestType &req, Http2Router::ResponseType &res) -> asio::awaitable<void> {
+                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h_copy), Http2Router::RequestType &, Http2Router::ResponseType &>) {
+                    co_await h_copy(req, res);
+                } else {
+                    h_copy(req, res);
+                    co_return;
+                }
+            });
+            h3_router_->put(pattern, [h = std::forward<Handler>(h)](Http3Router::RequestType &req, Http3Router::ResponseType &res) -> asio::awaitable<void> {
+                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h), Http3Router::RequestType &, Http3Router::ResponseType &>) {
+                    co_await h(req, res);
+                } else {
+                    h(req, res);
+                    co_return;
+                }
+            });
+            return *this;
+        }
+
+        template<typename Handler>
+        ComposedHttpServer &del(const std::string_view pattern, Handler &&h) {
+            auto h_copy = h;
+            h2_router_->del(pattern, [h_copy](Http2Router::RequestType &req, Http2Router::ResponseType &res) -> asio::awaitable<void> {
+                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h_copy), Http2Router::RequestType &, Http2Router::ResponseType &>) {
+                    co_await h_copy(req, res);
+                } else {
+                    h_copy(req, res);
+                    co_return;
+                }
+            });
+            h3_router_->del(pattern, [h = std::forward<Handler>(h)](Http3Router::RequestType &req, Http3Router::ResponseType &res) -> asio::awaitable<void> {
+                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h), Http3Router::RequestType &, Http3Router::ResponseType &>) {
+                    co_await h(req, res);
+                } else {
+                    h(req, res);
+                    co_return;
+                }
+            });
+            return *this;
+        }
+
+        template<typename Handler>
+        ComposedHttpServer &patch(const std::string_view pattern, Handler &&h) {
+            auto h_copy = h;
+            h2_router_->patch(pattern, [h_copy](Http2Router::RequestType &req, Http2Router::ResponseType &res) -> asio::awaitable<void> {
+                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h_copy), Http2Router::RequestType &, Http2Router::ResponseType &>) {
+                    co_await h_copy(req, res);
+                } else {
+                    h_copy(req, res);
+                    co_return;
+                }
+            });
+            h3_router_->patch(pattern, [h = std::forward<Handler>(h)](Http3Router::RequestType &req, Http3Router::ResponseType &res) -> asio::awaitable<void> {
+                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h), Http3Router::RequestType &, Http3Router::ResponseType &>) {
+                    co_await h(req, res);
+                } else {
+                    h(req, res);
+                    co_return;
+                }
+            });
+            return *this;
+        }
+
+        template<typename Handler>
+        ComposedHttpServer &query(const std::string_view pattern, Handler &&h) {
+            auto h_copy = h;
+            h2_router_->query(pattern, [h_copy](Http2Router::RequestType &req, Http2Router::ResponseType &res) -> asio::awaitable<void> {
+                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h_copy), Http2Router::RequestType &, Http2Router::ResponseType &>) {
+                    co_await h_copy(req, res);
+                } else {
+                    h_copy(req, res);
+                    co_return;
+                }
+            });
+            h3_router_->query(pattern, [h = std::forward<Handler>(h)](Http3Router::RequestType &req, Http3Router::ResponseType &res) -> asio::awaitable<void> {
+                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h), Http3Router::RequestType &, Http3Router::ResponseType &>) {
+                    co_await h(req, res);
+                } else {
+                    h(req, res);
+                    co_return;
+                }
+            });
+            return *this;
+        }
+    };
+
+    using composed_http_server = ComposedHttpServer;
 } // namespace wavex::server
 

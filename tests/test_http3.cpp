@@ -13,11 +13,15 @@
 #include <cassert>
 #include <string>
 #include <vector>
+#include <thread>
+#include <chrono>
 
 #include <wavex/protos/http/http3codec.hpp>
 #include <wavex/protos/http/http.hpp>
+#include <wavex/Server/Server.hpp>
 #include <wavex/Network/QUIC.hpp>
 #include <asio/io_context.hpp>
+#include <asio/ip/tcp.hpp>
 
 namespace h3   = wavex::protos::http::http3;
 namespace qpk  = wavex::protos::http::http3::qpack;
@@ -483,6 +487,77 @@ void test_http3_rfc9114_stream_rules() {
     std::cout << "  [PASS] RFC 9114 Request Stream Rules passed.\n";
 }
 
+void test_http3_server_acceptor_guard() {
+    std::cout << "[Test HTTP/3] Server TCP Acceptor Guard & Composition...\n";
+
+    // 1. Static compile-time trait assertions
+    static_assert(!wavex::protos::protocol_traits<wavex::protos::http::http3codec>::has_tcp_transport,
+                  "HTTP/3 must have has_tcp_transport = false");
+    static_assert(wavex::protos::protocol_traits<wavex::protos::http::http1codec>::has_tcp_transport,
+                  "HTTP/1.1 must have has_tcp_transport = true");
+    static_assert(wavex::protos::protocol_traits<wavex::protos::http::http2codec>::has_tcp_transport,
+                  "HTTP/2 must have has_tcp_transport = true");
+
+    // 2. Standalone Http3Server: acceptor must never open, port refuses TCP connections
+    wavex::engine::Http3Router h3_router;
+    wavex::server::Http3Server h3_server(h3_router, "127.0.0.1", 19983);
+    assert(!h3_server.is_acceptor_open());
+    assert(h3_server.is_http3_enabled());
+
+    h3_server.allow_insecure();
+    std::thread h3_thread([&h3_server]() {
+        h3_server.run();
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    assert(!h3_server.is_acceptor_open());
+
+    // Attempting a plain-TCP connection to the HTTP/3 port MUST be cleanly rejected
+    // by the OS kernel (Connection Refused / TCP RST), NEVER accepted and mis-parsed
+    {
+        asio::io_context client_io;
+        asio::ip::tcp::socket tcp_sock(client_io);
+        asio::error_code ec;
+        tcp_sock.connect(asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), 19983), ec);
+        assert(ec); // TCP connection must fail/be refused!
+    }
+
+    h3_server.stop();
+    if (h3_thread.joinable()) {
+        h3_thread.join();
+    }
+
+    // 3. ComposedHttpServer: opens TCP acceptor for HTTP/2 + HTTP/1.1 and QUIC for HTTP/3
+    wavex::server::ComposedHttpServer comp_server("127.0.0.1", 19984);
+    assert(!comp_server.is_acceptor_open()); // Unopened before run()
+    assert(comp_server.is_http3_enabled());
+
+    comp_server.allow_insecure();
+    std::thread comp_thread([&comp_server]() {
+        comp_server.run();
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    assert(comp_server.is_acceptor_open());
+
+    // Composed server must successfully accept plain TCP connections
+    {
+        asio::io_context client_io2;
+        asio::ip::tcp::socket tcp_sock2(client_io2);
+        asio::error_code ec2;
+        tcp_sock2.connect(asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), 19984), ec2);
+        assert(!ec2); // Composed server accepts TCP cleanly!
+        tcp_sock2.close(ec2);
+    }
+
+    comp_server.stop();
+    if (comp_thread.joinable()) {
+        comp_thread.join();
+    }
+
+    std::cout << "  [PASS] Server TCP Acceptor Guard & Composition tests passed.\n";
+}
+
 int main() {
     std::cout << "=== Running WaveX HTTP/3 Codec Tests ===\n";
     try {
@@ -495,6 +570,7 @@ int main() {
         test_http3codec_full_message_roundtrip();
         test_http3_over_quic_stream();
         test_http3_rfc9114_stream_rules();
+        test_http3_server_acceptor_guard();
         std::cout << "=== All HTTP/3 Tests PASSED ===\n";
         return 0;
     } catch (const std::exception &ex) {

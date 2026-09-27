@@ -76,29 +76,33 @@ inline std::string get_lan_ip() {
     return "";
 }
 
-// Global Logger Middleware for HTTP/3
-asio::awaitable<void> http3_logger_middleware(const HttpRequest &req, const HttpResponse &res, base::Next next) {
-    std::cout << "[HTTP3-LOG] Incoming request (stream " << req.stream_id() << "): " << req.path() << "\n";
+// Global Logger Middleware for HTTP/2 and HTTP/3
+template<typename Req, typename Res>
+asio::awaitable<void> logger_middleware(const Req &req, const Res &res, base::Next next) {
+    std::cout << "[" << (req.version_major() == 3 ? "HTTP3" : "HTTP2")
+              << "-LOG] Incoming request (stream " << req.stream_id() << "): " << req.path() << "\n";
     co_await next();
-    std::cout << "[HTTP3-LOG] Response status: " << res.status_code() << " (stream " << res.stream_id()
-            << ") for " << req.path() << "\n";
+    std::cout << "[" << (req.version_major() == 3 ? "HTTP3" : "HTTP2")
+              << "-LOG] Response status: " << res.status_code() << " (stream " << res.stream_id()
+              << ") for " << req.path() << "\n";
 }
 
 // Auth Middleware (Postman header required: Authorization: Bearer secret123)
-asio::awaitable<void> http3_auth_middleware(const HttpRequest &req, HttpResponse &res, base::Next next) {
+template<typename Req, typename Res>
+asio::awaitable<void> auth_middleware(const Req &req, Res &res, base::Next next) {
     const auto auth_header = req.header("Authorization");
     if (!auth_header || *auth_header != "Bearer secret123") {
-        std::cout << "[HTTP3-AUTH] Unauthorized attempt on " << req.path() << "\n";
+        std::cout << "[AUTH] Unauthorized attempt on " << req.path() << "\n";
         res.status(401).json({
             {"error", "Unauthorized"},
-            {"protocol", "HTTP/3"},
+            {"protocol", req.version_major() == 3 ? "HTTP/3" : "HTTP/2"},
             {"stream_id", req.stream_id()},
             {"message", "Missing or invalid 'Authorization: Bearer secret123' header"}
         });
         co_return; // Immediate response sent, short-circuits remaining pipeline!
     }
 
-    std::cout << "[HTTP3-AUTH] Access granted for " << req.path() << "\n";
+    std::cout << "[AUTH] Access granted for " << req.path() << "\n";
     co_await next();
 }
 
@@ -203,208 +207,216 @@ int main(int argc, char *argv[]) {
     }
     std::cout << "=========================================================================\n\n";
 
-    HttpRouter router;
+    engine::Http2Router h2_router;
+    engine::Http3Router h3_router;
 
-    // Attach global logger middleware to all routes
-    router.use(http3_logger_middleware);
+    auto configure_routes = [&](auto &r, const std::string &proto) {
+        using Req = typename std::decay_t<decltype(r)>::RequestType;
+        using Res = typename std::decay_t<decltype(r)>::ResponseType;
 
-    // 1. Root Welcome endpoint
-    router.get("/", [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
-        res.status(200).send("Welcome to WaveX HTTP/3 (RFC 9114 / RFC 9204 / RFC 9000) Dev Server!");
-        co_return;
-    });
+        // Attach global logger middleware
+        r.use(logger_middleware<Req, Res>);
 
-    // 2. Structured JSON Status endpoint
-    router.get("/api/json", [is_tls, is_lan, port](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
-        res.status(200).json({
-            {"server", "WaveX HTTP/3 Server"},
-            {"version", wx_version},
-            {"protocol", "HTTP/3 (RFC 9114)"},
-            {"transport", "QUIC UDP (RFC 9000)"},
-            {"header_compression", "QPACK (RFC 9204)"},
-            {"stream_id", req.stream_id()},
-            {"status", "online"},
-            {"config", {
-                {"tls_encrypted", is_tls},
-                {"lan_mode", is_lan},
-                {"port", port}
-            }},
-            {"supported_features", {
-                "0-RTT connection resumption",
-                "multiplexed streams without head-of-line blocking",
-                "QPACK dynamic & static table header compression",
-                "expressive coroutine request handlers",
-                "non-blocking connection pooling"
-            }}
+        // 1. Root Welcome endpoint
+        r.get("/", [proto](const Req &, Res &res) -> asio::awaitable<void> {
+            res.status(200).send("Welcome to WaveX Composed " + proto + " (RFC 9114 / RFC 9204 / RFC 9000) Dev Server!");
+            co_return;
         });
-        co_return;
-    });
 
-    // 3. POST Echo endpoint (processes JSON body)
-    router.post("/api/echo", [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
-        const std::string raw(req.body());
-        nlohmann::json parsed_body;
-
-        if (raw.empty()) {
-            parsed_body = nullptr;
-        } else {
-            auto j = nlohmann::json::parse(raw, nullptr, false);
-            if (!j.is_discarded()) {
-                parsed_body = std::move(j);
-            } else {
-                parsed_body = raw;
-            }
-        }
-
-        res.status(200).json({
-            {"message", "Echo received"},
-            {"protocol", "HTTP/3"},
-            {"stream_id", req.stream_id()},
-            {"path", std::string(req.path())},
-            {"received_body", parsed_body}
-        });
-        co_return;
-    });
-
-    // 4. JSON Query endpoint - Domain to IP DNS Resolver (Supports both POST and QUERY methods)
-    auto dns_query_handler = [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
-        const std::string raw(req.body());
-        std::string domain;
-
-        if (!raw.empty()) {
-            auto j = nlohmann::json::parse(raw, nullptr, false);
-            if (!j.is_discarded()) {
-                if (j.is_object()) {
-                    if (j.contains("domain") && j["domain"].is_string()) {
-                        domain = j["domain"].get<std::string>();
-                    } else if (j.contains("host") && j["host"].is_string()) {
-                        domain = j["host"].get<std::string>();
-                    }
-                } else if (j.is_string()) {
-                    domain = j.get<std::string>();
-                }
-            } else {
-                domain = raw;
-            }
-        }
-
-        // Clean & normalize domain string
-        while (!domain.empty() && (domain.front() == ' ' || domain.front() == '\t' || domain.front() == '"')) domain.erase(0, 1);
-        while (!domain.empty() && (domain.back() == ' ' || domain.back() == '\t' || domain.back() == '"' || domain.back() == '}')) domain.pop_back();
-
-        if (domain.empty()) {
-            res.status(400).json({
-                {"status", "error"},
-                {"protocol", "HTTP/3"},
+        // 2. Structured JSON Status endpoint
+        r.get("/api/json", [is_tls, is_lan, port, proto](const Req &req, Res &res) -> asio::awaitable<void> {
+            res.status(200).json({
+                {"server", "WaveX Composed Server"},
+                {"version", wx_version},
+                {"negotiated_protocol", proto},
                 {"stream_id", req.stream_id()},
-                {"error", "Bad Request"},
-                {"message", "Missing 'domain' in query payload. Example body: {\"domain\": \"google.com\"}"}
+                {"status", "online"},
+                {"alt_svc_advertised", true},
+                {"config", {
+                    {"tls_encrypted", is_tls},
+                    {"lan_mode", is_lan},
+                    {"port", port}
+                }},
+                {"supported_features", {
+                    "HTTP/1.1 and HTTP/2 over TCP/TLS with automatic Alt-Svc advertisement",
+                    "HTTP/3 over QUIC UDP with 0-RTT and multiplexed independent streams",
+                    "QPACK dynamic & static table header compression",
+                    "unified coroutine request routing across transports"
+                }}
             });
             co_return;
-        }
+        });
 
-        // Asynchronously resolve domain via Asio DNS Resolver
-        auto executor = co_await asio::this_coro::executor;
-        asio::ip::tcp::resolver resolver(executor);
-        asio::error_code ec;
+        // 3. POST Echo endpoint (processes JSON body)
+        r.post("/api/echo", [proto](const Req &req, Res &res) -> asio::awaitable<void> {
+            const std::string raw(req.body());
+            nlohmann::json parsed_body;
 
-        const auto results = co_await resolver.async_resolve(
-            domain, "80", asio::redirect_error(asio::use_awaitable, ec));
+            if (raw.empty()) {
+                parsed_body = nullptr;
+            } else {
+                auto j = nlohmann::json::parse(raw, nullptr, false);
+                if (!j.is_discarded()) {
+                    parsed_body = std::move(j);
+                } else {
+                    parsed_body = raw;
+                }
+            }
 
-        if (ec) {
-            res.status(502).json({
-                {"status", "error"},
-                {"protocol", "HTTP/3"},
+            res.status(200).json({
+                {"message", "Echo received"},
+                {"protocol", proto},
+                {"stream_id", req.stream_id()},
+                {"path", std::string(req.path())},
+                {"received_body", parsed_body}
+            });
+            co_return;
+        });
+
+        // 4. JSON Query endpoint - Domain to IP DNS Resolver (Supports both POST and QUERY methods)
+        auto dns_query_handler = [proto](const Req &req, Res &res) -> asio::awaitable<void> {
+            const std::string raw(req.body());
+            std::string domain;
+
+            if (!raw.empty()) {
+                auto j = nlohmann::json::parse(raw, nullptr, false);
+                if (!j.is_discarded()) {
+                    if (j.is_object()) {
+                        if (j.contains("domain") && j["domain"].is_string()) {
+                            domain = j["domain"].get<std::string>();
+                        } else if (j.contains("host") && j["host"].is_string()) {
+                            domain = j["host"].get<std::string>();
+                        }
+                    } else if (j.is_string()) {
+                        domain = j.get<std::string>();
+                    }
+                } else {
+                    domain = raw;
+                }
+            }
+
+            // Clean & normalize domain string
+            while (!domain.empty() && (domain.front() == ' ' || domain.front() == '\t' || domain.front() == '"')) domain.erase(0, 1);
+            while (!domain.empty() && (domain.back() == ' ' || domain.back() == '\t' || domain.back() == '"' || domain.back() == '}')) domain.pop_back();
+
+            if (domain.empty()) {
+                res.status(400).json({
+                    {"status", "error"},
+                    {"protocol", proto},
+                    {"stream_id", req.stream_id()},
+                    {"error", "Bad Request"},
+                    {"message", "Missing 'domain' in query payload. Example body: {\"domain\": \"google.com\"}"}
+                });
+                co_return;
+            }
+
+            // Asynchronously resolve domain via Asio DNS Resolver
+            auto executor = co_await asio::this_coro::executor;
+            asio::ip::tcp::resolver resolver(executor);
+            asio::error_code ec;
+
+            const auto results = co_await resolver.async_resolve(
+                domain, "80", asio::redirect_error(asio::use_awaitable, ec));
+
+            if (ec) {
+                res.status(502).json({
+                    {"status", "error"},
+                    {"protocol", proto},
+                    {"stream_id", req.stream_id()},
+                    {"domain", domain},
+                    {"error", "DNS Resolution Failed"},
+                    {"details", ec.message()}
+                });
+                co_return;
+            }
+
+            std::string primary_ip;
+            std::vector<std::string> all_ips;
+            for (const auto &entry : results) {
+                std::string ip = entry.endpoint().address().to_string();
+                if (primary_ip.empty()) {
+                    primary_ip = ip;
+                }
+                if (std::find(all_ips.begin(), all_ips.end(), ip) == all_ips.end()) {
+                    all_ips.push_back(ip);
+                }
+            }
+
+            res.status(200).json({
+                {"status", "success"},
+                {"protocol", proto},
                 {"stream_id", req.stream_id()},
                 {"domain", domain},
-                {"error", "DNS Resolution Failed"},
-                {"details", ec.message()}
+                {"ip", primary_ip},
+                {"ips", all_ips}
             });
             co_return;
-        }
+        };
 
-        std::string primary_ip;
-        std::vector<std::string> all_ips;
-        for (const auto &entry : results) {
-            std::string ip = entry.endpoint().address().to_string();
-            if (primary_ip.empty()) {
-                primary_ip = ip;
-            }
-            if (std::find(all_ips.begin(), all_ips.end(), ip) == all_ips.end()) {
-                all_ips.push_back(ip);
-            }
-        }
+        r.post("/api/query", dns_query_handler);
+        r.query("/api/query", dns_query_handler);
+        r.post("/api/dns", dns_query_handler);
+        r.query("/api/dns", dns_query_handler);
 
-        res.status(200).json({
-            {"status", "success"},
-            {"protocol", "HTTP/3"},
-            {"stream_id", req.stream_id()},
-            {"domain", domain},
-            {"ip", primary_ip},
-            {"ips", all_ips}
+        // 5. Protected route with Auth Middleware
+        r.get("/api/protected", {auth_middleware<Req, Res>},
+              [proto](const Req &req, Res &res) -> asio::awaitable<void> {
+                  res.status(200).json({
+                      {"status", "granted"},
+                      {"protocol", proto},
+                      {"stream_id", req.stream_id()},
+                      {"secret_data", "Super secret information accessible only with valid auth header!"}
+                  });
+                  co_return;
+              });
+
+        // 6. Dynamic path parameter
+        r.get("/users/:id", [proto](const Req &req, Res &res) -> asio::awaitable<void> {
+            res.status(200).json({
+                {"endpoint", "user_details"},
+                {"protocol", proto},
+                {"stream_id", req.stream_id()},
+                {"path", std::string(req.path())}
+            });
+            co_return;
         });
-        co_return;
+
+        // 7. Wildcard endpoint (*filepath matches any nested subpaths under /files/)
+        r.get("/files/*filepath", [proto](const Req &req, Res &res) -> asio::awaitable<void> {
+            res.status(200).json({
+                {"endpoint", "wildcard_file_handler"},
+                {"protocol", proto},
+                {"stream_id", req.stream_id()},
+                {"matched_path", std::string(req.path())},
+                {"description", "Wildcard route *filepath caught nested subpath under /files/"}
+            });
+            co_return;
+        });
     };
 
-    router.post("/api/query", dns_query_handler);
-    router.query("/api/query", dns_query_handler);
-    router.post("/api/dns", dns_query_handler);
-    router.query("/api/dns", dns_query_handler);
-
-    // 5. Protected route with Auth Middleware
-    router.get("/api/protected", {http3_auth_middleware},
-               [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
-                   res.status(200).json({
-                       {"status", "granted"},
-                       {"protocol", "HTTP/3"},
-                       {"stream_id", req.stream_id()},
-                       {"secret_data", "Super secret HTTP/3 information accessible only with valid auth header!"}
-                   });
-                   co_return;
-               });
-
-    // 6. Dynamic path parameter
-    router.get("/users/:id", [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
-        res.status(200).json({
-            {"endpoint", "user_details"},
-            {"protocol", "HTTP/3"},
-            {"stream_id", req.stream_id()},
-            {"path", std::string(req.path())}
-        });
-        co_return;
-    });
-
-    // 7. Wildcard endpoint (*filepath matches any nested subpaths under /files/)
-    router.get("/files/*filepath", [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
-        res.status(200).json({
-            {"endpoint", "wildcard_file_handler"},
-            {"protocol", "HTTP/3"},
-            {"stream_id", req.stream_id()},
-            {"matched_path", std::string(req.path())},
-            {"description", "Wildcard route *filepath caught nested subpath under /files/"}
-        });
-        co_return;
-    });
+    configure_routes(h2_router, "HTTP/2");
+    configure_routes(h3_router, "HTTP/3");
 
     try {
-        server::Http3Server server(router, host, static_cast<unsigned short>(port));
+        server::ComposedHttpServer server(h2_router, h3_router, host, static_cast<unsigned short>(port));
         if (is_tls) {
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
             server.enable_tls(cert_file, key_file);
-            std::cout << "Server successfully listening on " << base_url << " (HTTP/3 TLS 1.3 Active)\n";
+            std::cout << "Server successfully listening on " << base_url
+                      << " (Composed HTTP/2 [TCP] + HTTP/3 [QUIC/UDP] TLS 1.3 Active)\n";
 #else
             std::cerr << "Fatal Error: WaveX was built without SSL support (WAVEX_HAS_SSL=0)!\n";
             return 1;
 #endif
         } else {
             server.allow_insecure();
-            std::cout << "Server successfully listening on " << base_url << " (HTTP/3 Cleartext Active)\n";
+            std::cout << "Server successfully listening on " << base_url << " (Cleartext Active)\n";
         }
 
         std::cout << "Press Ctrl+C to stop.\n\n";
         server.run();
     } catch (const std::exception &e) {
-        std::cerr << "[HTTP/3 Server Error] " << e.what() << "\n";
+        std::cerr << "[Composed Server Error] " << e.what() << "\n";
         return 1;
     }
 
