@@ -79,23 +79,17 @@ export namespace wavex::protos::http {
     using http::http1request;
     using http::Http2Request;
     using http::http2request;
-    using http::Http3Request;
-    using http::http3request;
     using http::HttpResponse;
     using http::Http1Response;
     using http::http1response;
     using http::Http2Response;
     using http::http2response;
-    using http::Http3Response;
-    using http::http3response;
 }
 
 export namespace wavex::engine {
     using engine::Router;
     using engine::HttpRouter;
     using engine::http_router;
-    using engine::Http3Router;
-    using engine::http3router;
 }
 
 export namespace wavex::server {
@@ -114,14 +108,11 @@ export namespace wavex::server {
     using server::http1server;
     using server::Http2Server;
     using server::http2server;
-    using server::Http3Server;
-    using server::http3server;
     using server::HttpServer;
     using server::httpserver;
 }
 
 export namespace wavex::network::quic {
-    using quic::QuicVersion;
     using quic::PacketType;
     using quic::TransportError;
     using quic::FrameType;
@@ -131,6 +122,20 @@ export namespace wavex::network::quic {
     using quic::QuicConnection;
     using quic::QuicServer;
     using quic::QuicClient;
+    using quic::quic_protocol;
+    using quic::basic_quic_socket;
+    using quic::basic_quic_acceptor;
+    using quic::protocol;
+    using quic::socket;
+    using quic::acceptor;
+    using quic::endpoint;
+    using quic::resolver;
+    using quic::v4;
+    using quic::v6;
+}
+
+export namespace wavex::quic {
+    using namespace wavex::network::quic;
 }
 
 

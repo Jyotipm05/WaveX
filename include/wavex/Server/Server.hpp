@@ -219,7 +219,7 @@ namespace wavex::server {
         bool enable_signals_{true};
         bool exit_on_signal_{true};
         bool tls_enabled_{false};
-        bool allow_insecure_http3_{false};
+        bool allow_insecure_quic_{false};
 
     public:
         // ─── 3. Constructors & Destructor ────────────────────────────────────
@@ -287,11 +287,11 @@ namespace wavex::server {
         [[nodiscard]] bool is_tls_enabled() const { return tls_enabled_; }
 
         /**
-         * @brief Allows HTTP/3 to run without TLS 1.3 encryption (dev/testing mode only).
-         * @param allow True to allow cleartext HTTP/3, false to require TLS 1.3 (default: false).
+         * @brief Allows QUIC transport to run without TLS 1.3 encryption (dev/testing mode only).
+         * @param allow True to allow cleartext QUIC, false to require TLS 1.3 (default: false).
          */
         void allow_insecure(bool allow = true) noexcept {
-            allow_insecure_http3_ = allow;
+            allow_insecure_quic_ = allow;
         }
 
         /// Start master acceptor loop and run event loop
@@ -339,11 +339,11 @@ namespace wavex::server {
                 });
             }
 
-            // Conditionally start the QUIC/UDP listener for HTTP/3 on the same port
+            // Conditionally start the QUIC/UDP listener on the same port
             if constexpr (has_quic_transport) {
-                if (!tls_enabled_ && !allow_insecure_http3_) {
+                if (!tls_enabled_ && !allow_insecure_quic_) {
                     throw std::runtime_error(
-                        "HTTP/3 requires TLS 1.3. Call server.enable_tls(cert, key) before server.run().");
+                        "QUIC transport requires TLS 1.3. Call server.enable_tls(cert, key) before server.run().");
                 }
                 quic_server_ = std::make_unique<network::quic::QuicServer>(
                     master_io_, address_, port_);
@@ -1204,8 +1204,6 @@ namespace wavex::server {
     using http1server = Http1Server;
     using Http2Server = Server<wavex::protos::http::http2codec, wavex::engine::Http2Router>;
     using http2server = Http2Server;
-    using Http3Server = Server<wavex::protos::http::http3codec, wavex::engine::Http3Router>;
-    using http3server = Http3Server;
     using HttpServer = Http1Server;
     using httpserver = HttpServer;
 } // namespace wavex::server

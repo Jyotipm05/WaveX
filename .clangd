@@ -33,10 +33,13 @@ CompileFlags:
     - /nologo
     - /FS
 
-  # Suppress compiler driver warnings across toolchains:
+  # Suppress compiler driver warnings across toolchains & enforce C++ standard macros:
   Add:
     - -Wno-unknown-argument
     - -Wno-unknown-warning-option
+    - /Zc:__cplusplus
+    - -DASIO_HAS_STD_STRING_VIEW=1
+    - -DASIO_HAS_STRING_VIEW=1
 
 Diagnostics:
   Suppress:
