@@ -1204,6 +1204,8 @@ namespace wavex::server {
     using http1server = Http1Server;
     using Http2Server = Server<wavex::protos::http::http2codec, wavex::engine::Http2Router>;
     using http2server = Http2Server;
+    using Http3Server = Server<wavex::protos::http::http3codec, wavex::engine::Http3Router>;
+    using http3server = Http3Server;
     using HttpServer = Http1Server;
     using httpserver = HttpServer;
 } // namespace wavex::server

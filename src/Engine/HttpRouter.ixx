@@ -30,4 +30,6 @@ export namespace wavex::engine {
     using engine::http1router;
     using engine::Http2Router;
     using engine::http2router;
+    using engine::Http3Router;
+    using engine::http3router;
 }

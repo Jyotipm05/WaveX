@@ -327,6 +327,7 @@ target_sources(wavex
         include/wavex/protos/http/http.hpp
         include/wavex/protos/http/http1codec.hpp
         include/wavex/protos/http/http2codec.hpp
+        include/wavex/protos/http/http3codec.hpp
         include/wavex/protos/http/HttpRequest.hpp
         include/wavex/protos/http/HttpResponse.hpp
         include/wavex/Network/QUIC.hpp
@@ -361,6 +362,7 @@ if (WAVEX_USE_MODULE)
             src/protos/http/Methods.ixx
             src/protos/http/http1codec.ixx
             src/protos/http/http2codec.ixx
+            src/protos/http/http3codec.ixx
             src/protos/http/HttpRequest.ixx
             src/protos/http/HttpResponse.ixx
             src/Engine/Router.ixx
@@ -527,6 +529,7 @@ if (WAVEX_TEST)
     wavex_add_test(wavex_flat_map_tests        tests/test_flat_map.cpp)
     wavex_add_test(wavex_request_arena_tests   tests/test_request_arena.cpp)
     wavex_add_test(wavex_quic_tests            tests/test_quic.cpp)
+    wavex_add_test(wavex_http3_tests           tests/test_http3.cpp)
 
     # Unified CLI-driven Postman Dev Servers (HTTP/1.1 and HTTP/2)
     add_executable(wavex_postman_http1_server tests/postman_demo_http1_server.cpp)
@@ -536,4 +539,12 @@ if (WAVEX_TEST)
     add_executable(wavex_postman_http2_server tests/postman_demo_http2_server.cpp)
     target_link_libraries(wavex_postman_http2_server PRIVATE wavex)
     target_compile_definitions(wavex_postman_http2_server PRIVATE PROJECT_DIR="${CMAKE_SOURCE_DIR}")
+
+    add_executable(wavex_postman_quic_server tests/postman_demo_quic_server.cpp)
+    target_link_libraries(wavex_postman_quic_server PRIVATE wavex)
+    target_compile_definitions(wavex_postman_quic_server PRIVATE PROJECT_DIR="${CMAKE_SOURCE_DIR}")
+
+    add_executable(wavex_postman_http3_server tests/postman_demo_http3_server.cpp)
+    target_link_libraries(wavex_postman_http3_server PRIVATE wavex)
+    target_compile_definitions(wavex_postman_http3_server PRIVATE PROJECT_DIR="${CMAKE_SOURCE_DIR}")
 endif ()

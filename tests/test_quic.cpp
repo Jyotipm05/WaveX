@@ -963,6 +963,153 @@ void test_rfc9002_loss_and_recovery() {
     std::cout << "  [PASS] RFC 9002 Loss detection and ACK range processing passed." << std::endl;
 }
 
+void test_congestion_controller() {
+    std::cout << "[Test QUIC] RFC 9002 Congestion Control & RTT estimator..." << std::endl;
+
+    CongestionController cc;
+    assert(cc.bytes_in_flight() == 0);
+    assert(cc.congestion_window() == CongestionController::kInitialWindow);
+    assert(cc.can_send());
+    assert(!cc.in_recovery());
+
+    // 1. Packet sending tracks bytes in flight
+    cc.on_packet_sent(1200);
+    assert(cc.bytes_in_flight() == 1200);
+    assert(cc.can_send());
+
+    // Fill up the initial window (14720 bytes)
+    for (int i = 0; i < 11; ++i) {
+        cc.on_packet_sent(1200);
+    }
+    assert(cc.bytes_in_flight() == 14400);
+    assert(cc.can_send());
+
+    cc.on_packet_sent(1000);
+    assert(cc.bytes_in_flight() == 15400);
+    assert(!cc.can_send()); // 15400 >= 14720 -> cannot send!
+
+    // 2. Slow Start expansion upon ACK
+    cc.on_packet_acked(1200);
+    assert(cc.bytes_in_flight() == 14200);
+    // cwnd grows by 1200 in Slow Start: 14720 + 1200 = 15920
+    assert(cc.congestion_window() == 15920);
+    assert(cc.can_send()); // 14200 < 15920 -> can send again!
+
+    // 3. Congestion Event / Loss
+    const auto now = std::chrono::steady_clock::now();
+    cc.on_congestion_event(now - std::chrono::milliseconds(50), now);
+    assert(cc.in_recovery());
+    // ssthresh = max(15920 / 2, 2400) = 7960
+    assert(cc.ssthresh() == 7960);
+    assert(cc.congestion_window() == 7960);
+
+    // 4. Exit Recovery and enter Congestion Avoidance
+    cc.exit_recovery();
+    assert(!cc.in_recovery());
+
+    // In Congestion Avoidance (cwnd >= ssthresh):
+    // cwnd increases by (kMaxDatagramSize * bytes) / cwnd = (1200 * 1200) / 7960 = 180 bytes
+    const uint64_t prev_cwnd = cc.congestion_window();
+    cc.on_packet_acked(1200);
+    assert(cc.congestion_window() == prev_cwnd + (1200 * 1200) / prev_cwnd);
+
+    // 5. RTT Estimator (RFC 9002 §5)
+    RttStats rtt;
+    assert(rtt.first_rtt_sample);
+    // First sample: 100ms
+    rtt.update_rtt(std::chrono::microseconds(100000));
+    assert(!rtt.first_rtt_sample);
+    assert(rtt.latest_rtt.count() == 100000);
+    assert(rtt.min_rtt.count() == 100000);
+    assert(rtt.smoothed_rtt.count() == 100000);
+    assert(rtt.rttvar.count() == 50000);
+
+    // Second sample: 120ms with 10ms ack_delay -> adjusted_rtt = 110ms
+    // diff = |100ms - 110ms| = 10ms
+    // rttvar = (3 * 50ms + 10ms) / 4 = 40ms = 40000us
+    // smoothed_rtt = (7 * 100ms + 110ms) / 8 = 810ms / 8 = 101250us
+    rtt.update_rtt(std::chrono::microseconds(120000), std::chrono::microseconds(10000));
+    assert(rtt.min_rtt.count() == 100000);
+    assert(rtt.latest_rtt.count() == 120000);
+    assert(rtt.rttvar.count() == 40000);
+    assert(rtt.smoothed_rtt.count() == 101250);
+
+    std::cout << "  [PASS] RFC 9002 Congestion Control & RTT estimator passed." << std::endl;
+}
+
+void test_quic_packet_fuzzer() {
+    std::cout << "[Test QUIC] Pre-authentication packet parser fuzz harness..." << std::endl;
+
+    // Deterministic pseudo-random sequence for repeatability
+    uint32_t state = 0x12345678;
+    auto next_rand = [&state]() -> uint8_t {
+        state = state * 1103515245 + 12345;
+        return static_cast<uint8_t>((state >> 16) & 0xFF);
+    };
+
+    // 1. Fuzz unpack_packet_header on 1000 randomized buffers
+    for (int i = 0; i < 1000; ++i) {
+        const std::size_t len = (next_rand() % 128);
+        std::string garbage(len, '\0');
+        for (std::size_t j = 0; j < len; ++j) {
+            garbage[j] = static_cast<char>(next_rand());
+        }
+
+        PacketHeader hdr;
+        std::size_t hdr_len = 0;
+        // MUST NEVER crash or throw
+        unpack_packet_header(garbage, hdr, hdr_len);
+    }
+
+    // 2. Fuzz parse_frames on 1000 randomized frame sequences
+    for (int i = 0; i < 1000; ++i) {
+        const std::size_t len = (next_rand() % 256);
+        std::string garbage(len, '\0');
+        for (std::size_t j = 0; j < len; ++j) {
+            garbage[j] = static_cast<char>(next_rand());
+        }
+
+        std::vector<Frame> frames;
+        // MUST NEVER crash, hang, or throw
+        parse_frames(garbage, frames);
+    }
+
+    // 3. Fuzz mutation of valid Initial packet
+    const auto cid = ConnectionId::random(8);
+    ProtectionKeys client_keys, server_keys;
+    CryptoSuite::derive_initial_secrets(cid, client_keys, server_keys);
+
+    PacketHeader hdr;
+    hdr.is_long = true;
+    hdr.type = PacketType::Initial;
+    hdr.version = QUIC_VERSION_1;
+    hdr.dcid = cid;
+    hdr.scid = ConnectionId::random(8);
+    hdr.packet_number = 1;
+    hdr.packet_number_len = 4;
+
+    std::string valid_pkt;
+    CryptoSuite::protect_packet(client_keys, hdr, "Fuzz target sample payload 1234567890", valid_pkt);
+    assert(!valid_pkt.empty());
+
+    for (int i = 0; i < 500; ++i) {
+        std::string mutated = valid_pkt;
+        // Mutate random bytes
+        const int num_mutations = (next_rand() % 5) + 1;
+        for (int m = 0; m < num_mutations; ++m) {
+            const std::size_t pos = next_rand() % mutated.size();
+            mutated[pos] ^= static_cast<char>(next_rand() | 0x01);
+        }
+
+        PacketHeader dec_hdr;
+        std::string dec_payload;
+        // MUST cleanly reject invalid packets with false, never crash
+        CryptoSuite::unprotect_packet(client_keys, dec_hdr, mutated, dec_payload);
+    }
+
+    std::cout << "  [PASS] Pre-authentication packet parser fuzz harness passed (2500 mutations)." << std::endl;
+}
+
 int main() {
     std::cout << "=== Running WaveX QUIC Transport Tests ===\n";
     try {
@@ -974,8 +1121,10 @@ int main() {
         test_rfc9001_appendix_a();
         test_frames();
         test_malformed_packets_and_fuzzing();
+        test_quic_packet_fuzzer();
         test_packet_protection();
         test_rfc9002_loss_and_recovery();
+        test_congestion_controller();
         test_quic_stream_async();
         test_quic_server_client_loopback();
         test_quic_protocol();

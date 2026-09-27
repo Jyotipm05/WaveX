@@ -1647,6 +1647,15 @@ namespace wavex::network::quic {
                 if constexpr (std::is_same_v<T, PingFrame>) {
                     // ACK at the same level the PING arrived on (RFC 9000 §13.2)
                     send_ack(pn, pkt_type);
+                } else if constexpr (std::is_same_v<T, AckFrame>) {
+                    // RFC 9002 §7 Congestion Control ACK processing
+                    congestion_controller_.on_packet_acked(CongestionController::kMaxDatagramSize);
+                    if (frame.ack_delay > 0) {
+                        congestion_controller_.update_rtt(
+                            std::chrono::microseconds(frame.ack_delay * 1000),
+                            std::chrono::microseconds(frame.ack_delay * 1000)
+                        );
+                    }
                 } else if constexpr (std::is_same_v<T, StreamFrame>) {
                     send_ack(pn, PacketType::OneRTT); // STREAM frames are always 1-RTT
 
@@ -1828,6 +1837,7 @@ namespace wavex::network::quic {
                                    ? one_rtt_keys_local_
                                    : (one_rtt_keys_.valid ? one_rtt_keys_ : initial_keys_local_);
             if (CryptoSuite::protect_packet(keys, hdr, payload, packet)) {
+                congestion_controller_.on_packet_sent(packet.size(), true);
                 pending_outbound_datagrams_.push_back(std::move(packet));
             }
             cb = on_outbound_;
