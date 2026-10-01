@@ -570,8 +570,13 @@ namespace wavex::protos::http {
                     }
 
                     // 5. General Headers
-                    for (const auto &[name, value]: headers) {
-                        if (name.starts_with(':')) continue; // Skip pseudo-headers already handled
+                    for (const auto &[raw_name, value]: headers) {
+                        if (raw_name.starts_with(':')) continue; // Skip pseudo-headers already handled
+                        std::string name;
+                        name.reserve(raw_name.size());
+                        for (const char c : raw_name) {
+                            name.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+                        }
                         const auto [idx, exact] = find_static(name, value);
                         if (exact) {
                             encode_integer(out, idx, 7, 0x80);
@@ -611,8 +616,13 @@ namespace wavex::protos::http {
                     }
 
                     // 2. Regular headers
-                    for (const auto &[name, value]: headers) {
-                        if (name.starts_with(':')) continue;
+                    for (const auto &[raw_name, value]: headers) {
+                        if (raw_name.starts_with(':')) continue;
+                        std::string name;
+                        name.reserve(raw_name.size());
+                        for (const char c : raw_name) {
+                            name.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+                        }
                         const auto [idx, exact] = find_static(name, value);
                         if (exact) {
                             encode_integer(out, idx, 7, 0x80);

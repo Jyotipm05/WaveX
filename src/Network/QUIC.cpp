@@ -10,6 +10,7 @@
  */
 
 #include <wavex/Network/QUIC.hpp>
+#include <wavex/Base/Logger.hpp>
 
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
@@ -1039,6 +1040,7 @@ namespace wavex::network::quic {
         size_t *consumed, void *arg) {
         if (!arg || !buf || buf_len == 0) return 0;
         auto *conn = static_cast<QuicConnection *>(arg);
+        wavex::log::info("[QUIC] crypto_send_fn: {} bytes at write_level={}", buf_len, conn->current_write_level());
         conn->queue_crypto_frame(std::string_view(reinterpret_cast<const char *>(buf), buf_len));
         if (consumed) *consumed = buf_len;
         return 1;
@@ -1049,13 +1051,18 @@ namespace wavex::network::quic {
         void *arg) {
         if (!arg || !buf || !bytes_read) return 0;
         auto *conn = static_cast<QuicConnection *>(arg);
-        return conn->on_tls_crypto_recv(buf, bytes_read);
+        const int res = conn->on_tls_crypto_recv(buf, bytes_read);
+        if (*bytes_read > 0) {
+            wavex::log::info("[QUIC] crypto_recv_rcd: supplied {} bytes to TLS engine", *bytes_read);
+        }
+        return res;
     }
 
     static int quic_tls_crypto_release_rcd(
         SSL * /*s*/, size_t bytes_read, void *arg) {
         if (!arg) return 0;
         auto *conn = static_cast<QuicConnection *>(arg);
+        wavex::log::info("[QUIC] crypto_release_rcd: released {} bytes", bytes_read);
         return conn->on_tls_crypto_release(bytes_read);
     }
 
@@ -1064,6 +1071,8 @@ namespace wavex::network::quic {
         const unsigned char *secret, size_t secret_len, void *arg) {
         if (!arg || !secret) return 0;
         auto *conn = static_cast<QuicConnection *>(arg);
+        wavex::log::info("[QUIC] yield_secret: prot_level={} direction={} (0=read,1=write) len={}",
+                         prot_level, direction, secret_len);
         return conn->on_tls_secret(prot_level, direction, secret, secret_len);
     }
 
@@ -1072,17 +1081,71 @@ namespace wavex::network::quic {
         void *arg) {
         if (!arg) return 0;
         auto *conn = static_cast<QuicConnection *>(arg);
+        wavex::log::info("[QUIC] got_transport_params: len={}", params_len);
         return conn->on_tls_transport_params(params, params_len);
     }
 
     static int quic_tls_alert(
-        SSL * /*s*/, unsigned char /*alert_code*/, void * /*arg*/) {
+        SSL * /*s*/, unsigned char alert_code, void * /*arg*/) {
+        wavex::log::warn("[QUIC] tls_alert: alert_code={}", alert_code);
         return 1;
     }
     } // extern "C"
 #else
     QuicConnection::TlsCtx::~TlsCtx() = default;
 #endif
+
+    void QuicConnection::CryptoStreamReassembler::insert(const uint64_t offset, const std::string_view data) {
+        if (data.empty()) return;
+        if (offset + data.size() <= next_offset) return;
+        pending.emplace(offset, std::string(data));
+        while (!pending.empty()) {
+            const auto it = pending.begin();
+            if (it->first > next_offset) break;
+            const uint64_t end = it->first + it->second.size();
+            if (end > next_offset) {
+                const std::size_t overlap = static_cast<std::size_t>(next_offset - it->first);
+                ready.append(it->second.data() + overlap, it->second.size() - overlap);
+                next_offset = end;
+            }
+            pending.erase(it);
+        }
+    }
+
+    std::string_view QuicConnection::CryptoStreamReassembler::available() const noexcept {
+        if (ready_consumed >= ready.size()) return {};
+        return std::string_view(ready.data() + ready_consumed, ready.size() - ready_consumed);
+    }
+
+    void QuicConnection::CryptoStreamReassembler::consume(const std::size_t bytes) {
+        ready_consumed += bytes;
+        if (ready_consumed >= ready.size()) {
+            ready.clear();
+            ready_consumed = 0;
+        } else if (ready_consumed > 65536) {
+            ready.erase(0, ready_consumed);
+            ready_consumed = 0;
+        }
+    }
+
+    bool QuicConnection::CryptoStreamReassembler::has_available() const noexcept {
+        return ready_consumed < ready.size();
+    }
+
+    QuicConnection::CryptoStreamReassembler &QuicConnection::reassembler_for_level(uint32_t level) noexcept {
+        if (level >= crypto_reassemblers_.size()) level = 0;
+        return crypto_reassemblers_[level];
+    }
+
+    QuicConnection::CryptoStreamReassembler &QuicConnection::reassembler_for_pkt_type(const PacketType type) noexcept {
+        switch (type) {
+            case PacketType::Initial: return crypto_reassemblers_[0];
+            case PacketType::ZeroRTT: return crypto_reassemblers_[1];
+            case PacketType::Handshake: return crypto_reassemblers_[2];
+            case PacketType::OneRTT:
+            default: return crypto_reassemblers_[3];
+        }
+    }
 
     QuicConnection::~QuicConnection() = default;
 
@@ -1113,7 +1176,10 @@ namespace wavex::network::quic {
         if (!tls_) tls_ = std::make_unique<TlsCtx>();
 
         tls_->ctx = SSL_CTX_new(is_server_ ? TLS_server_method() : TLS_client_method());
-        if (!tls_->ctx) return false;
+        if (!tls_->ctx) {
+            wavex::log::error("[QUIC] init_tls_handshake_engine: SSL_CTX_new failed");
+            return false;
+        }
 
         SSL_CTX_set_min_proto_version(tls_->ctx, TLS1_3_VERSION);
         SSL_CTX_set_max_proto_version(tls_->ctx, TLS1_3_VERSION);
@@ -1159,11 +1225,17 @@ namespace wavex::network::quic {
                 }
 
                 if (SSL_CTX_use_certificate_file(tls_->ctx, cert_file.c_str(), SSL_FILETYPE_PEM) != 1) {
+                    wavex::log::error("[QUIC] init_tls_handshake_engine: SSL_CTX_use_certificate_file failed for '{}'", cert_file);
                     return false;
                 }
                 if (SSL_CTX_use_PrivateKey_file(tls_->ctx, key_file.c_str(), SSL_FILETYPE_PEM) != 1) {
+                    wavex::log::error("[QUIC] init_tls_handshake_engine: SSL_CTX_use_PrivateKey_file failed for '{}'", key_file);
                     return false;
                 }
+                wavex::log::info("[QUIC] init_tls_handshake_engine: loaded cert '{}' and key '{}'", cert_file, key_file);
+            } else {
+                wavex::log::warn("[QUIC] init_tls_handshake_engine: is_server=true but cert ('{}') or key ('{}') is empty!",
+                                 tls_cert_file_, tls_key_file_);
             }
 
             // ALPN selection callback for server (mandated by RFC 9001 §8.1)
@@ -1193,7 +1265,10 @@ namespace wavex::network::quic {
         }
 
         tls_->ssl = SSL_new(tls_->ctx);
-        if (!tls_->ssl) return false;
+        if (!tls_->ssl) {
+            wavex::log::error("[QUIC] init_tls_handshake_engine: SSL_new failed");
+            return false;
+        }
 
         if (is_server_) {
             SSL_set_accept_state(tls_->ssl);
@@ -1232,6 +1307,7 @@ namespace wavex::network::quic {
         };
 
         if (SSL_set_quic_tls_cbs(tls_->ssl, kDispatchTable, this) != 1) {
+            wavex::log::error("[QUIC] init_tls_handshake_engine: SSL_set_quic_tls_cbs failed");
             return false;
         }
 
@@ -1240,10 +1316,12 @@ namespace wavex::network::quic {
                 tls_->ssl,
                 reinterpret_cast<const unsigned char *>(transport_params.data()),
                 transport_params.size()) != 1) {
+            wavex::log::error("[QUIC] init_tls_handshake_engine: SSL_set_quic_tls_transport_params failed");
             return false;
         }
 
         tls_->initialized = true;
+        wavex::log::info("[QUIC] init_tls_handshake_engine: TLS engine initialized successfully (is_server={})", is_server_);
         if (!is_server_) {
             run_tls_engine();
         }
@@ -1287,17 +1365,21 @@ namespace wavex::network::quic {
         return out;
     }
 
-    int QuicConnection::on_tls_crypto_recv(const unsigned char **buf, size_t *bytes_read) const {
+    int QuicConnection::on_tls_crypto_recv(const unsigned char **buf, size_t *bytes_read) {
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
         static constexpr unsigned char kEmptyBuf[1] = {0};
-        if (!tls_ || tls_->recv_crypto_queue.empty()) {
+        auto &r = reassembler_for_level(current_read_level_);
+        last_read_crypto_level_ = current_read_level_;
+
+        if (!r.has_available()) {
             *buf = kEmptyBuf;
             *bytes_read = 0;
             return 1;
         }
-        const auto &front = tls_->recv_crypto_queue.front();
-        *buf = reinterpret_cast<const unsigned char *>(front.data());
-        *bytes_read = front.size();
+
+        const auto avail = r.available();
+        *buf = reinterpret_cast<const unsigned char *>(avail.data());
+        *bytes_read = avail.size();
         return 1;
 #else
         static const unsigned char kEmptyBuf[1] = {0};
@@ -1307,15 +1389,10 @@ namespace wavex::network::quic {
 #endif
     }
 
-    int QuicConnection::on_tls_crypto_release(size_t bytes_read) const {
+    int QuicConnection::on_tls_crypto_release(const size_t bytes_read) {
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
-        if (!tls_ || tls_->recv_crypto_queue.empty()) return 1;
-        auto &front = tls_->recv_crypto_queue.front();
-        if (bytes_read >= front.size()) {
-            tls_->recv_crypto_queue.pop_front();
-        } else {
-            front.erase(0, bytes_read);
-        }
+        auto &r = reassembler_for_level(last_read_crypto_level_);
+        r.consume(bytes_read);
         return 1;
 #else
         (void) bytes_read;
@@ -1439,7 +1516,15 @@ namespace wavex::network::quic {
             }
 
             std::string packet;
-            if (keys && CryptoSuite::protect_packet(*keys, hdr, payload, packet)) {
+            if (!keys || !keys->valid) {
+                wavex::log::error("[QUIC] queue_crypto_frame: No valid keys for write_level={}! Dropping crypto packet.",
+                                  current_write_level_);
+            } else if (!CryptoSuite::protect_packet(*keys, hdr, payload, packet)) {
+                wavex::log::error("[QUIC] queue_crypto_frame: CryptoSuite::protect_packet failed for write_level={}!",
+                                  current_write_level_);
+            } else {
+                wavex::log::info("[QUIC] queue_crypto_frame: successfully protected packet ({} bytes, type={:02x}, pn={}), enqueuing to pending_outbound_datagrams_ (total={})",
+                                 packet.size(), static_cast<uint8_t>(hdr.type), hdr.packet_number, pending_outbound_datagrams_.size() + 1);
                 pending_outbound_datagrams_.push_back(std::move(packet));
             }
 
@@ -1452,45 +1537,50 @@ namespace wavex::network::quic {
 
     void QuicConnection::run_tls_engine() {
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
-        if (!tls_ || !tls_->ssl || !tls_->initialized) return;
+        if (!tls_ || !tls_->ssl || !tls_->initialized) {
+            wavex::log::warn("[QUIC] run_tls_engine: TLS engine not initialized! tls_={} initialized={}",
+                             (tls_ != nullptr), (tls_ ? tls_->initialized : false));
+            return;
+        }
 
         const int ret = SSL_do_handshake(tls_->ssl);
-        if (ret == 1) {
-            // Handshake completed successfully
-            handshake_done_ = true;
-            state_ = ConnectionState::Connected;
-
-            if (is_server_) {
-                // Send HANDSHAKE_DONE in a 1-RTT short packet (RFC 9000 §19.20)
-                PacketHeader one_rtt_hdr;
-                one_rtt_hdr.is_long = false;
-                one_rtt_hdr.type = PacketType::OneRTT;
-                one_rtt_hdr.dcid = peer_cid_;
-                one_rtt_hdr.packet_number = next_packet_number_++;
-
-                HandshakeDoneFrame hdf;
-                std::string one_rtt_payload;
-                serialize_frame(hdf, one_rtt_payload);
-
-                const auto &keys = one_rtt_keys_local_.valid ? one_rtt_keys_local_ : initial_keys_local_;
-                std::string one_rtt_packet;
-                if (CryptoSuite::protect_packet(keys, one_rtt_hdr, one_rtt_payload, one_rtt_packet)) {
-                    pending_outbound_datagrams_.push_back(std::move(one_rtt_packet));
-                }
+        if (ret != 1) {
+            const int err = SSL_get_error(tls_->ssl, ret);
+            wavex::log::error("[QUIC] SSL_do_handshake rc={} SSL_get_error={}", ret, err);
+            if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+                if (on_outbound_) on_outbound_();
+                return;
             }
-
-            if (on_outbound_) on_outbound_();
+            // Fatal TLS error
+            state_ = ConnectionState::Closed;
             return;
         }
 
-        const int err = SSL_get_error(tls_->ssl, ret);
-        if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
-            if (on_outbound_) on_outbound_();
-            return;
+        // ret == 1: Handshake completed successfully
+        wavex::log::info("[QUIC] SSL_do_handshake succeeded (rc=1)! Handshake complete.");
+        handshake_done_ = true;
+        state_ = ConnectionState::Connected;
+
+        if (is_server_) {
+            // Send HANDSHAKE_DONE in a 1-RTT short packet (RFC 9000 §19.20)
+            PacketHeader one_rtt_hdr;
+            one_rtt_hdr.is_long = false;
+            one_rtt_hdr.type = PacketType::OneRTT;
+            one_rtt_hdr.dcid = peer_cid_;
+            one_rtt_hdr.packet_number = next_packet_number_++;
+
+            HandshakeDoneFrame hdf;
+            std::string one_rtt_payload;
+            serialize_frame(hdf, one_rtt_payload);
+
+            const auto &keys = one_rtt_keys_local_.valid ? one_rtt_keys_local_ : initial_keys_local_;
+            std::string one_rtt_packet;
+            if (CryptoSuite::protect_packet(keys, one_rtt_hdr, one_rtt_payload, one_rtt_packet)) {
+                pending_outbound_datagrams_.push_back(std::move(one_rtt_packet));
+            }
         }
 
-        // Fatal TLS error
-        state_ = ConnectionState::Closed;
+        if (on_outbound_) on_outbound_();
 #endif
     }
 
@@ -1601,16 +1691,29 @@ namespace wavex::network::quic {
                     bool has_crypto_frame = false;
                     for (const auto &f: frames) {
                         if (const auto *cf = std::get_if<CryptoFrame>(&f)) {
+                            wavex::log::info("[QUIC] Received CryptoFrame: {} bytes at offset {} (pkt_type={})",
+                                             cf->data.size(), cf->offset, static_cast<int>(hdr.type));
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
                             if (tls_ && tls_->initialized) {
-                                tls_->recv_crypto_queue.emplace_back(cf->data);
+                                auto &reassembler = reassembler_for_pkt_type(hdr.type);
+                                reassembler.insert(cf->offset, cf->data);
+                                wavex::log::info("[QUIC] Crypto reassembler for pkt_type={}: ready={} unconsumed={} next_offset={} pending_fragments={}",
+                                                 static_cast<int>(hdr.type),
+                                                 reassembler.ready.size(),
+                                                 reassembler.ready.size() - reassembler.ready_consumed,
+                                                 reassembler.next_offset,
+                                                 reassembler.pending.size());
                                 has_crypto_frame = true;
+                            } else {
+                                wavex::log::warn("[QUIC] Received CryptoFrame ({} bytes) but TLS engine not initialized! tls_={} initialized={}",
+                                                 cf->data.size(), (tls_ != nullptr), (tls_ ? tls_->initialized : false));
                             }
 #endif
                         }
                     }
 
                     if (has_crypto_frame) {
+                        wavex::log::info("[QUIC] invoking run_tls_engine() due to incoming CRYPTO frame");
                         run_tls_engine();
                     }
 
@@ -1622,6 +1725,7 @@ namespace wavex::network::quic {
             if (is_server_ && state_ == ConnectionState::Initial) {
                 // For mock or non-TLS connections (e.g. unit tests without certs), auto-complete handshake
                 if (!tls_ || !tls_->initialized) {
+                    wavex::log::info("[QUIC] Non-TLS or uninitialized fallback: calling send_initial_handshake_response()");
                     send_initial_handshake_response();
                     state_ = ConnectionState::Connected;
                 }
@@ -1853,6 +1957,9 @@ namespace wavex::network::quic {
             pkts.push_back(std::move(pending_outbound_datagrams_.front()));
             pending_outbound_datagrams_.pop_front();
         }
+        if (!pkts.empty()) {
+            wavex::log::info("[QUIC] poll_outgoing_datagrams: drained {} datagram(s)", pkts.size());
+        }
         return pkts;
     }
 
@@ -1982,7 +2089,11 @@ namespace wavex::network::quic {
                             std::string key = tls_key_file_;
                             if (!cert.empty() && !key.empty()) {
                                 conn->set_tls_credentials(std::move(cert), std::move(key));
-                                conn->init_tls_handshake_engine();
+                                if (!conn->init_tls_handshake_engine()) {
+                                    wavex::log::error("[QUIC] Failed to init_tls_handshake_engine for new incoming connection!");
+                                }
+                            } else {
+                                wavex::log::warn("[QUIC] New incoming connection without TLS credentials: cert='{}' key='{}'", cert, key);
                             }
                             connections_[server_cid] = conn;
                             connections_[hdr.dcid] = conn;
@@ -2018,11 +2129,17 @@ namespace wavex::network::quic {
 
     void QuicServer::flush_outbound(const std::shared_ptr<QuicConnection> &conn) {
         auto datagrams = conn->poll_outgoing_datagrams();
+        if (!datagrams.empty()) {
+            wavex::log::info("[QUIC] flush_outbound: sending {} datagram(s) via UDP to {}", datagrams.size(), conn->peer_endpoint().port());
+        }
         for (auto &dgram: datagrams) {
             auto buf = std::make_shared<std::string>(std::move(dgram));
             socket_.async_send_to(
                 asio::buffer(*buf), conn->peer_endpoint(),
-                [buf](std::error_code, std::size_t) {
+                [buf](std::error_code ec, std::size_t) {
+                    if (ec) {
+                        wavex::log::error("[QUIC] async_send_to failed: {}", ec.message());
+                    }
                 }
             );
         }
@@ -2783,7 +2900,11 @@ namespace wavex::network::quic {
                             );
                             if (!tls_cert_file_.empty() && !tls_key_file_.empty()) {
                                 conn->set_tls_credentials(tls_cert_file_, tls_key_file_);
-                                conn->init_tls_handshake_engine();
+                                if (!conn->init_tls_handshake_engine()) {
+                                    wavex::log::error("[QUIC] [acceptor] Failed to init_tls_handshake_engine!");
+                                }
+                            } else {
+                                wavex::log::warn("[QUIC] [acceptor] New incoming connection without TLS credentials: cert='{}' key='{}'", tls_cert_file_, tls_key_file_);
                             }
                             connections_[server_cid] = conn;
                             connections_[hdr.dcid] = conn;

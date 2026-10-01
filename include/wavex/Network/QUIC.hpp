@@ -23,6 +23,7 @@
 #endif
 
 #include <array>
+#include <map>
 #include <cstdint>
 #include <cstddef>
 #include <chrono>
@@ -695,13 +696,33 @@ namespace wavex::network::quic {
         using StreamCreatedCallback = std::function<void(std::shared_ptr<QuicStream>)>;
         using OutboundCallback = std::function<void()>;
 
+        struct CryptoStreamReassembler {
+            // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+            std::map<uint64_t, std::string> pending{};
+            std::string ready{};
+            uint64_t next_offset{0};
+            std::size_t ready_consumed{0};
+
+            // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+            CryptoStreamReassembler() = default;
+            ~CryptoStreamReassembler() = default;
+            CryptoStreamReassembler(const CryptoStreamReassembler &) = default;
+            CryptoStreamReassembler &operator=(const CryptoStreamReassembler &) = default;
+            CryptoStreamReassembler(CryptoStreamReassembler &&) noexcept = default;
+            CryptoStreamReassembler &operator=(CryptoStreamReassembler &&) noexcept = default;
+
+            // ─── 4. Member Functions (LAST) ────────────────────────────────────
+            void insert(uint64_t offset, std::string_view data);
+            [[nodiscard]] std::string_view available() const noexcept;
+            void consume(std::size_t bytes);
+            [[nodiscard]] bool has_available() const noexcept;
+        };
+
         struct TlsCtx {
             // ─── 2. Member Variables ────
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
             SSL *ssl{nullptr};
             SSL_CTX *ctx{nullptr};
-            std::deque<std::string> recv_crypto_queue{};
-            std::deque<std::string> send_crypto_queue{};
             uint32_t current_write_level{0};
             uint32_t current_read_level{0};
             bool initialized{false};
@@ -741,6 +762,7 @@ namespace wavex::network::quic {
         ProtectionKeys one_rtt_keys_local_{};
         ProtectionKeys one_rtt_keys_{};
         CongestionController congestion_controller_{};
+        std::array<CryptoStreamReassembler, 4> crypto_reassemblers_{};
         uint64_t max_data_{1024 * 1024}; // 1 MB
         uint64_t max_stream_data_{256 * 1024}; // 256 KB
         uint64_t data_sent_{0};
@@ -757,6 +779,7 @@ namespace wavex::network::quic {
         uint32_t version_{QUIC_VERSION_1};
         uint32_t current_write_level_{0};
         uint32_t current_read_level_{0};
+        uint32_t last_read_crypto_level_{0};
         ConnectionId local_cid_{};
         ConnectionId peer_cid_{};
         ConnectionId original_dcid_{};
@@ -805,6 +828,12 @@ namespace wavex::network::quic {
             tls_key_file_ = std::move(key_file);
         }
 
+        [[nodiscard]] uint32_t current_write_level() const noexcept { return current_write_level_; }
+        [[nodiscard]] uint32_t current_read_level() const noexcept { return current_read_level_; }
+
+        CryptoStreamReassembler &reassembler_for_level(uint32_t level) noexcept;
+        CryptoStreamReassembler &reassembler_for_pkt_type(PacketType type) noexcept;
+
         bool init_tls_handshake_engine();
 
         // Inbound packet handling
@@ -828,8 +857,8 @@ namespace wavex::network::quic {
 
         // Internal TLS engine plumbing
         void queue_crypto_frame(std::string_view data);
-        int on_tls_crypto_recv(const unsigned char **buf, size_t *bytes_read) const;
-        int on_tls_crypto_release(size_t bytes_read) const;
+        int on_tls_crypto_recv(const unsigned char **buf, size_t *bytes_read);
+        int on_tls_crypto_release(size_t bytes_read);
         int on_tls_secret(uint32_t prot_level, int direction, const unsigned char *secret, size_t secret_len);
         int on_tls_transport_params(const unsigned char *params, size_t params_len);
 

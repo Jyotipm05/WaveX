@@ -414,6 +414,7 @@ int main(int argc, char *argv[]) {
         }
 
         std::cout << "Press Ctrl+C to stop.\n\n";
+        // system((R"(set NO_POSH=1 && powershell.exe -NoProfile; & "C:\Program Files\Google\Chrome\Application\chrome.exe" --origin-to-force-quic-on=)"+base_url+R"( --ignore-certificate-errors https://)"+base_url).data());
         server.run();
     } catch (const std::exception &e) {
         std::cerr << "[Composed Server Error] " << e.what() << "\n";

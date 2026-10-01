@@ -1186,9 +1186,9 @@ namespace wavex::server {
                     // Dynamic Alt-Svc injection for HTTP/3 servers on HTTP/1.x and HTTP/2 fallback connections
                     if (has_quic_transport || http3_enabled_) {
                         if constexpr (requires { req.version_major(); }) {
-                            if ((req.version_major() == 1 || req.version_major() == 2) && !res.header("Alt-Svc")) {
+                            if ((req.version_major() == 1 || req.version_major() == 2) && !res.header("alt-svc")) {
                                 const auto port_str = std::to_string(port_);
-                                res.set("Alt-Svc", "h3=\":" + port_str + "\"; ma=2592000,h3-29=\":" + port_str + "\"; ma=2592000");
+                                res.set("alt-svc", "h3=\":" + port_str + "\"; ma=2592000,h3-29=\":" + port_str + "\"; ma=2592000");
                             }
                         }
                     }
