@@ -718,6 +718,34 @@ namespace wavex::network::quic {
             [[nodiscard]] bool has_available() const noexcept;
         };
 
+        struct ReceivedPacketTracker {
+            // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+            std::vector<std::pair<uint64_t, uint64_t>> intervals{};
+            uint64_t largest_pn{0};
+            bool has_packets{false};
+            bool ack_eliciting_pending{false};
+
+            // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+            ReceivedPacketTracker() = default;
+            ~ReceivedPacketTracker() = default;
+            ReceivedPacketTracker(const ReceivedPacketTracker &) = default;
+            ReceivedPacketTracker &operator=(const ReceivedPacketTracker &) = default;
+            ReceivedPacketTracker(ReceivedPacketTracker &&) noexcept = default;
+            ReceivedPacketTracker &operator=(ReceivedPacketTracker &&) noexcept = default;
+
+            // ─── 4. Member Functions (LAST) ────────────────────────────────────
+            void add_packet(uint64_t pn, bool ack_eliciting = true);
+            [[nodiscard]] AckFrame build_ack_frame(uint64_t ack_delay = 0) const;
+            void mark_ack_sent() noexcept { ack_eliciting_pending = false; }
+            [[nodiscard]] bool needs_ack() const noexcept { return has_packets && ack_eliciting_pending; }
+            void reset() noexcept {
+                intervals.clear();
+                largest_pn = 0;
+                has_packets = false;
+                ack_eliciting_pending = false;
+            }
+        };
+
         struct TlsCtx {
             // ─── 2. Member Variables ────
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
@@ -747,6 +775,8 @@ namespace wavex::network::quic {
         std::unordered_map<uint64_t, std::shared_ptr<QuicStream>> streams_{};
         std::unordered_map<uint64_t, uint64_t> stream_send_offsets_{};
         std::deque<std::string> pending_outbound_datagrams_{};
+        std::deque<std::string> buffered_handshake_packets_{};
+        std::deque<std::string> buffered_one_rtt_packets_{};
         std::deque<std::shared_ptr<QuicStream>> accepted_streams_{};
         std::optional<std::function<void(std::shared_ptr<QuicStream>)>> stream_acceptor_{};
         StreamCreatedCallback on_stream_created_{};
@@ -763,16 +793,14 @@ namespace wavex::network::quic {
         ProtectionKeys one_rtt_keys_{};
         CongestionController congestion_controller_{};
         std::array<CryptoStreamReassembler, 4> crypto_reassemblers_{};
+        std::array<ReceivedPacketTracker, 3> ack_trackers_{};
+        std::array<uint64_t, 3> next_packet_number_{0, 0, 0};
         uint64_t max_data_{1024 * 1024}; // 1 MB
         uint64_t max_stream_data_{256 * 1024}; // 256 KB
         uint64_t data_sent_{0};
         uint64_t data_received_{0};
         uint64_t next_bidi_stream_id_{0};
         uint64_t next_uni_stream_id_{0};
-        uint64_t next_packet_number_{0};
-        uint64_t largest_received_pn_{0};
-        uint64_t largest_received_initial_pn_{0};
-        uint64_t largest_received_handshake_pn_{0};
         uint64_t crypto_send_offset_initial_{0};
         uint64_t crypto_send_offset_handshake_{0};
         uint64_t crypto_send_offset_app_{0};
@@ -789,6 +817,7 @@ namespace wavex::network::quic {
         bool has_received_initial_{false};
         bool has_received_handshake_{false};
         bool settings_received_{false};
+        bool draining_buffered_packets_{false};
 
     public:
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
@@ -862,11 +891,35 @@ namespace wavex::network::quic {
         int on_tls_secret(uint32_t prot_level, int direction, const unsigned char *secret, size_t secret_len);
         int on_tls_transport_params(const unsigned char *params, size_t params_len);
 
+        static constexpr std::size_t space_index(const PacketType type) noexcept {
+            switch (type) {
+                case PacketType::Initial: return 0;
+                case PacketType::Handshake: return 1;
+                case PacketType::ZeroRTT:
+                case PacketType::OneRTT:
+                default: return 2;
+            }
+        }
+
+        [[nodiscard]] ReceivedPacketTracker &ack_tracker_for_pkt_type(const PacketType type) noexcept {
+            return ack_trackers_[space_index(type)];
+        }
+
+        [[nodiscard]] const ReceivedPacketTracker &ack_tracker_for_pkt_type(const PacketType type) const noexcept {
+            return ack_trackers_[space_index(type)];
+        }
+
+        [[nodiscard]] uint64_t allocate_next_pn(const PacketType type) noexcept {
+            return next_packet_number_[space_index(type)]++;
+        }
+
     private:
         void send_ack(uint64_t pn, PacketType type);
+        void send_ack_for_space(PacketType type);
         void process_frames(const std::vector<Frame> &frames, uint64_t pn, PacketType pkt_type, std::vector<std::shared_ptr<QuicStream>> &new_streams);
         void send_initial_handshake_response();
         void run_tls_engine();
+        void drain_buffered_packets();
         [[nodiscard]] std::string build_quic_transport_params() const;
     };
 

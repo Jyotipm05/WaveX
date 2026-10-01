@@ -211,8 +211,8 @@ int main(int argc, char *argv[]) {
     engine::Http3Router h3_router;
 
     auto configure_routes = [&](auto &r, const std::string &proto) {
-        using Req = typename std::decay_t<decltype(r)>::RequestType;
-        using Res = typename std::decay_t<decltype(r)>::ResponseType;
+        using Req = std::decay_t<decltype(r)>::RequestType;
+        using Res = std::decay_t<decltype(r)>::ResponseType;
 
         // Attach global logger middleware
         r.use(logger_middleware<Req, Res>);

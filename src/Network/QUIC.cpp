@@ -287,10 +287,15 @@ namespace wavex::network::quic {
     }
 
     bool parse_frames(const std::string_view payload, std::vector<Frame> &out_frames) {
+#define PARSE_FAIL(reason) do { \
+    wavex::log::warn("[QUIC] parse_frames: FAILED at cursor={} type=0x{:02x} reason={}", cursor, raw_type, reason); \
+    return false; \
+} while (0)
+
         std::size_t cursor = 0;
         while (cursor < payload.size()) {
             uint64_t raw_type = 0;
-            if (!VarInt::decode(payload, cursor, raw_type)) return false;
+            if (!VarInt::decode(payload, cursor, raw_type)) PARSE_FAIL("decode raw_type");
 
             if (raw_type == 0x00) {
                 // PADDING
@@ -306,43 +311,43 @@ namespace wavex::network::quic {
                 AckFrame ack;
                 ack.ecn = (raw_type == 0x03);
                 uint64_t range_count = 0, first_range = 0;
-                if (!VarInt::decode(payload, cursor, ack.largest_acknowledged)) return false;
-                if (!VarInt::decode(payload, cursor, ack.ack_delay)) return false;
-                if (!VarInt::decode(payload, cursor, range_count)) return false;
-                if (!VarInt::decode(payload, cursor, first_range)) return false;
+                if (!VarInt::decode(payload, cursor, ack.largest_acknowledged)) PARSE_FAIL("ACK decode largest_acknowledged");
+                if (!VarInt::decode(payload, cursor, ack.ack_delay)) PARSE_FAIL("ACK decode ack_delay");
+                if (!VarInt::decode(payload, cursor, range_count)) PARSE_FAIL("ACK decode range_count");
+                if (!VarInt::decode(payload, cursor, first_range)) PARSE_FAIL("ACK decode first_range");
                 ack.ranges.push_back(AckRange{0, first_range});
                 for (std::size_t i = 0; i < range_count; ++i) {
                     uint64_t gap = 0, len = 0;
-                    if (!VarInt::decode(payload, cursor, gap)) return false;
-                    if (!VarInt::decode(payload, cursor, len)) return false;
+                    if (!VarInt::decode(payload, cursor, gap)) PARSE_FAIL("ACK decode range gap");
+                    if (!VarInt::decode(payload, cursor, len)) PARSE_FAIL("ACK decode range len");
                     ack.ranges.push_back(AckRange{gap, len});
                 }
                 out_frames.emplace_back(std::move(ack));
             } else if (raw_type == 0x04) {
                 ResetStreamFrame rsf;
-                if (!VarInt::decode(payload, cursor, rsf.stream_id)) return false;
-                if (!VarInt::decode(payload, cursor, rsf.error_code)) return false;
-                if (!VarInt::decode(payload, cursor, rsf.final_size)) return false;
+                if (!VarInt::decode(payload, cursor, rsf.stream_id)) PARSE_FAIL("RESET_STREAM decode stream_id");
+                if (!VarInt::decode(payload, cursor, rsf.error_code)) PARSE_FAIL("RESET_STREAM decode error_code");
+                if (!VarInt::decode(payload, cursor, rsf.final_size)) PARSE_FAIL("RESET_STREAM decode final_size");
                 out_frames.emplace_back(rsf);
             } else if (raw_type == 0x05) {
                 StopSendingFrame ssf;
-                if (!VarInt::decode(payload, cursor, ssf.stream_id)) return false;
-                if (!VarInt::decode(payload, cursor, ssf.error_code)) return false;
+                if (!VarInt::decode(payload, cursor, ssf.stream_id)) PARSE_FAIL("STOP_SENDING decode stream_id");
+                if (!VarInt::decode(payload, cursor, ssf.error_code)) PARSE_FAIL("STOP_SENDING decode error_code");
                 out_frames.emplace_back(ssf);
             } else if (raw_type == 0x06) {
                 CryptoFrame cf;
                 uint64_t len = 0;
-                if (!VarInt::decode(payload, cursor, cf.offset)) return false;
-                if (!VarInt::decode(payload, cursor, len)) return false;
-                if (cursor + len > payload.size()) return false;
+                if (!VarInt::decode(payload, cursor, cf.offset)) PARSE_FAIL("CRYPTO decode offset");
+                if (!VarInt::decode(payload, cursor, len)) PARSE_FAIL("CRYPTO decode len");
+                if (cursor + len > payload.size()) PARSE_FAIL("CRYPTO len exceeds payload bounds");
                 cf.data = std::string(payload.substr(cursor, len));
                 cursor += len;
                 out_frames.emplace_back(std::move(cf));
             } else if (raw_type == 0x07) {
                 NewTokenFrame ntf;
                 uint64_t t_len = 0;
-                if (!VarInt::decode(payload, cursor, t_len)) return false;
-                if (cursor + t_len > payload.size()) return false;
+                if (!VarInt::decode(payload, cursor, t_len)) PARSE_FAIL("NEW_TOKEN decode t_len");
+                if (cursor + t_len > payload.size()) PARSE_FAIL("NEW_TOKEN token exceeds payload bounds");
                 ntf.token = std::string(payload.substr(cursor, t_len));
                 cursor += t_len;
                 out_frames.emplace_back(std::move(ntf));
@@ -351,63 +356,93 @@ namespace wavex::network::quic {
                 sf.has_offset = (raw_type & 0x04) != 0;
                 sf.has_length = (raw_type & 0x02) != 0;
                 sf.fin = (raw_type & 0x01) != 0;
-                if (!VarInt::decode(payload, cursor, sf.stream_id)) return false;
-                if (sf.has_offset && !VarInt::decode(payload, cursor, sf.offset)) return false;
+                if (!VarInt::decode(payload, cursor, sf.stream_id)) PARSE_FAIL("STREAM decode stream_id");
+                if (sf.has_offset && !VarInt::decode(payload, cursor, sf.offset)) PARSE_FAIL("STREAM decode offset");
                 uint64_t data_len = payload.size() - cursor;
                 if (sf.has_length) {
-                    if (!VarInt::decode(payload, cursor, data_len)) return false;
+                    if (!VarInt::decode(payload, cursor, data_len)) PARSE_FAIL("STREAM decode data_len");
                 }
-                if (cursor + data_len > payload.size()) return false;
+                if (cursor + data_len > payload.size()) PARSE_FAIL("STREAM data_len exceeds payload bounds");
                 sf.data = std::string(payload.substr(cursor, data_len));
                 cursor += data_len;
                 out_frames.emplace_back(std::move(sf));
             } else if (raw_type == 0x10) {
                 MaxDataFrame mdf;
-                if (!VarInt::decode(payload, cursor, mdf.max_data)) return false;
+                if (!VarInt::decode(payload, cursor, mdf.max_data)) PARSE_FAIL("MAX_DATA decode max_data");
                 out_frames.emplace_back(mdf);
             } else if (raw_type == 0x11) {
                 MaxStreamDataFrame msdf;
-                if (!VarInt::decode(payload, cursor, msdf.stream_id)) return false;
-                if (!VarInt::decode(payload, cursor, msdf.max_stream_data)) return false;
+                if (!VarInt::decode(payload, cursor, msdf.stream_id)) PARSE_FAIL("MAX_STREAM_DATA decode stream_id");
+                if (!VarInt::decode(payload, cursor, msdf.max_stream_data)) PARSE_FAIL("MAX_STREAM_DATA decode max_stream_data");
                 out_frames.emplace_back(msdf);
             } else if (raw_type == 0x12 || raw_type == 0x13) {
                 MaxStreamsFrame msf;
                 msf.bidirectional = (raw_type == 0x12);
-                if (!VarInt::decode(payload, cursor, msf.max_streams)) return false;
+                if (!VarInt::decode(payload, cursor, msf.max_streams)) PARSE_FAIL("MAX_STREAMS decode max_streams");
                 out_frames.emplace_back(msf);
             } else if (raw_type == 0x14) {
                 DataBlockedFrame dbf;
-                if (!VarInt::decode(payload, cursor, dbf.data_limit)) return false;
+                if (!VarInt::decode(payload, cursor, dbf.data_limit)) PARSE_FAIL("DATA_BLOCKED decode data_limit");
                 out_frames.emplace_back(dbf);
             } else if (raw_type == 0x15) {
                 StreamDataBlockedFrame sdbf;
-                if (!VarInt::decode(payload, cursor, sdbf.stream_id)) return false;
-                if (!VarInt::decode(payload, cursor, sdbf.stream_data_limit)) return false;
+                if (!VarInt::decode(payload, cursor, sdbf.stream_id)) PARSE_FAIL("STREAM_DATA_BLOCKED decode stream_id");
+                if (!VarInt::decode(payload, cursor, sdbf.stream_data_limit)) PARSE_FAIL("STREAM_DATA_BLOCKED decode stream_data_limit");
                 out_frames.emplace_back(sdbf);
             } else if (raw_type == 0x16 || raw_type == 0x17) {
                 StreamsBlockedFrame sbf;
                 sbf.bidirectional = (raw_type == 0x16);
-                if (!VarInt::decode(payload, cursor, sbf.stream_limit)) return false;
+                if (!VarInt::decode(payload, cursor, sbf.stream_limit)) PARSE_FAIL("STREAMS_BLOCKED decode stream_limit");
                 out_frames.emplace_back(sbf);
             } else if (raw_type == 0x1c || raw_type == 0x1d) {
                 ConnectionCloseFrame ccf;
                 ccf.is_application = (raw_type == 0x1d);
-                if (!VarInt::decode(payload, cursor, ccf.error_code)) return false;
-                if (!ccf.is_application && !VarInt::decode(payload, cursor, ccf.frame_type)) return false;
+                if (!VarInt::decode(payload, cursor, ccf.error_code)) PARSE_FAIL("CONNECTION_CLOSE decode error_code");
+                if (!ccf.is_application && !VarInt::decode(payload, cursor, ccf.frame_type)) PARSE_FAIL("CONNECTION_CLOSE decode frame_type");
                 uint64_t r_len = 0;
-                if (!VarInt::decode(payload, cursor, r_len)) return false;
-                if (cursor + r_len > payload.size()) return false;
+                if (!VarInt::decode(payload, cursor, r_len)) PARSE_FAIL("CONNECTION_CLOSE decode reason_phrase len");
+                if (cursor + r_len > payload.size()) PARSE_FAIL("CONNECTION_CLOSE reason exceeds payload bounds");
                 ccf.reason_phrase = std::string(payload.substr(cursor, r_len));
                 cursor += r_len;
                 out_frames.emplace_back(std::move(ccf));
+            } else if (raw_type == 0x18) {
+                // NEW_CONNECTION_ID (RFC 9000 §19.15)
+                uint64_t seq_num = 0, retire_prior_to = 0;
+                if (!VarInt::decode(payload, cursor, seq_num)) PARSE_FAIL("NEW_CONNECTION_ID decode seq_num");
+                if (!VarInt::decode(payload, cursor, retire_prior_to)) PARSE_FAIL("NEW_CONNECTION_ID decode retire_prior_to");
+                if (cursor >= payload.size()) PARSE_FAIL("NEW_CONNECTION_ID missing cid_len");
+                const auto cid_len = static_cast<uint8_t>(payload[cursor++]);
+                if (cid_len < 1 || cid_len > MAX_CONNECTION_ID_LEN || cursor + cid_len + 16 > payload.size()) {
+                    PARSE_FAIL("NEW_CONNECTION_ID invalid cid_len or exceeds payload bounds");
+                }
+                cursor += cid_len + 16; // Skip Connection ID + 16-byte Stateless Reset Token
+            } else if (raw_type == 0x19) {
+                // RETIRE_CONNECTION_ID (RFC 9000 §19.16)
+                uint64_t seq_num = 0;
+                if (!VarInt::decode(payload, cursor, seq_num)) PARSE_FAIL("RETIRE_CONNECTION_ID decode seq_num");
+            } else if (raw_type == 0x1a || raw_type == 0x1b) {
+                // PATH_CHALLENGE (0x1a) / PATH_RESPONSE (0x1b) (RFC 9000 §19.17-18)
+                if (cursor + 8 > payload.size()) PARSE_FAIL("PATH_CHALLENGE/RESPONSE data exceeds payload bounds");
+                cursor += 8;
             } else if (raw_type == 0x1e) {
                 out_frames.emplace_back(HandshakeDoneFrame{});
+            } else if (raw_type == 0x30) {
+                // DATAGRAM without length (RFC 9221)
+                cursor = payload.size();
+            } else if (raw_type == 0x31) {
+                // DATAGRAM with length (RFC 9221)
+                uint64_t dlen = 0;
+                if (!VarInt::decode(payload, cursor, dlen)) PARSE_FAIL("DATAGRAM decode dlen");
+                if (cursor + dlen > payload.size()) PARSE_FAIL("DATAGRAM dlen exceeds payload bounds");
+                cursor += dlen;
             } else {
-                // Unknown or unhandled frame, skip payload remainder
+                wavex::log::warn("[QUIC] parse_frames: unrecognized frame type 0x{:02x} at offset {} in {} bytes payload, stopping packet frame parsing",
+                                 raw_type, cursor, payload.size());
                 break;
             }
         }
         return true;
+#undef PARSE_FAIL
     }
 
     // ─── 4. Packet Packing & Unpacking ─────────────────────────────────────────
@@ -739,14 +774,21 @@ namespace wavex::network::quic {
         if (packet_bytes.empty()) return false;
 
         std::size_t hdr_len = 0;
-        if (!unpack_packet_header(packet_bytes, hdr, hdr_len, expected_dcid_len)) return false;
+        if (!unpack_packet_header(packet_bytes, hdr, hdr_len, expected_dcid_len)) {
+            wavex::log::warn("[QUIC] unprotect_packet: unpack_packet_header failed (bytes={})", packet_bytes.size());
+            return false;
+        }
 
         const std::size_t pn_offset = hdr.pn_offset;
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
         // Step 1: Remove Header Protection (RFC 9001 §5.4)
         const std::size_t sample_offset = pn_offset + 4;
-        if (packet_bytes.size() < sample_offset + 16) return false;
+        if (packet_bytes.size() < sample_offset + 16) {
+            wavex::log::warn("[QUIC] unprotect_packet: packet too small for sample (size={}, needed={})",
+                             packet_bytes.size(), sample_offset + 16);
+            return false;
+        }
 
         const auto *sample = reinterpret_cast<const uint8_t *>(packet_bytes.data() + sample_offset);
         uint8_t mask[16] = {0};
@@ -759,7 +801,10 @@ namespace wavex::network::quic {
                       EVP_CIPHER_CTX_set_padding(hp_ctx, 0) == 1 &&
                       EVP_EncryptUpdate(hp_ctx, mask, &hp_len, sample, 16) == 1);
         EVP_CIPHER_CTX_free(hp_ctx);
-        if (!hp_ok) return false;
+        if (!hp_ok) {
+            wavex::log::warn("[QUIC] unprotect_packet: HP cipher failed");
+            return false;
+        }
 
         // Unmask first byte
         uint8_t first_byte = static_cast<uint8_t>(packet_bytes[0]);
@@ -771,7 +816,11 @@ namespace wavex::network::quic {
         const auto pn_len = static_cast<uint8_t>((first_byte & 0x03) + 1);
         hdr.packet_number_len = pn_len;
 
-        if (packet_bytes.size() < pn_offset + pn_len + 16) return false;
+        if (packet_bytes.size() < pn_offset + pn_len + 16) {
+            wavex::log::warn("[QUIC] unprotect_packet: packet too small for PN and tag (size={}, needed={})",
+                             packet_bytes.size(), pn_offset + pn_len + 16);
+            return false;
+        }
 
         // Unmask packet number
         uint64_t truncated_pn = 0;
@@ -802,7 +851,11 @@ namespace wavex::network::quic {
             }
         }
 
-        if (total_packet_len < real_hdr_len + 16) return false;
+        if (total_packet_len < real_hdr_len + 16) {
+            wavex::log::warn("[QUIC] unprotect_packet: total_packet_len < real_hdr_len + 16 (total={}, hdr={})",
+                             total_packet_len, real_hdr_len);
+            return false;
+        }
         const std::string_view payload = packet_bytes.substr(real_hdr_len, total_packet_len - real_hdr_len);
 
         // Step 4: Calculate Nonce = IV ^ FullPacketNumber (RFC 9001 §5.3)
@@ -828,7 +881,11 @@ namespace wavex::network::quic {
         if (ok && EVP_DecryptUpdate(ctx, decrypted.data(), &out_len, cipher_data, static_cast<int>(cipher_len)) != 1)
             ok = false;
         if (ok && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16, const_cast<uint8_t *>(tag_data)) != 1) ok = false;
-        if (ok && EVP_DecryptFinal_ex(ctx, decrypted.data() + out_len, &out_len) <= 0) ok = false;
+        if (ok && EVP_DecryptFinal_ex(ctx, decrypted.data() + out_len, &out_len) <= 0) {
+            wavex::log::warn("[QUIC] unprotect_packet: AEAD GCM tag verification failed (pn={}, type={})",
+                             full_packet_num, static_cast<int>(hdr.type));
+            ok = false;
+        }
 
         EVP_CIPHER_CTX_free(ctx);
         if (!ok) return false;
@@ -1132,6 +1189,89 @@ namespace wavex::network::quic {
         return ready_consumed < ready.size();
     }
 
+    void QuicConnection::ReceivedPacketTracker::add_packet(const uint64_t pn, const bool ack_eliciting) {
+        has_packets = true;
+        if (ack_eliciting) {
+            ack_eliciting_pending = true;
+        }
+
+        if (intervals.empty()) {
+            intervals.push_back({pn, pn});
+            largest_pn = pn;
+            return;
+        }
+
+        largest_pn = std::max(largest_pn, pn);
+
+        auto it = intervals.begin();
+        while (it != intervals.end() && it->second < pn) {
+            ++it;
+        }
+
+        if (it != intervals.end()) {
+            if (it->first <= pn && pn <= it->second) {
+                return;
+            }
+            if (pn + 1 == it->first) {
+                it->first = pn;
+                if (it != intervals.begin()) {
+                    auto prev = std::prev(it);
+                    if (prev->second + 1 == it->first) {
+                        prev->second = it->second;
+                        intervals.erase(it);
+                    }
+                }
+                return;
+            }
+        }
+
+        if (it != intervals.begin()) {
+            auto prev = std::prev(it);
+            if (prev->second + 1 == pn) {
+                prev->second = pn;
+                if (it != intervals.end() && prev->second + 1 == it->first) {
+                    prev->second = it->second;
+                    intervals.erase(it);
+                }
+                return;
+            }
+        }
+
+        intervals.insert(it, {pn, pn});
+
+        if (intervals.size() > 64) {
+            intervals.erase(intervals.begin());
+        }
+    }
+
+    AckFrame QuicConnection::ReceivedPacketTracker::build_ack_frame(const uint64_t ack_delay) const {
+        AckFrame ack;
+        if (intervals.empty()) {
+            ack.largest_acknowledged = largest_pn;
+            ack.ack_delay = ack_delay;
+            ack.ranges.push_back(AckRange{0, 0});
+            return ack;
+        }
+
+        ack.largest_acknowledged = intervals.back().second;
+        ack.ack_delay = ack_delay;
+
+        const uint64_t first_ack_range = intervals.back().second - intervals.back().first;
+        ack.ranges.push_back(AckRange{0, first_ack_range});
+
+        if (intervals.size() > 1) {
+            for (std::size_t i = intervals.size() - 1; i > 0; --i) {
+                const auto &curr = intervals[i - 1];
+                const auto &prev = intervals[i];
+                const uint64_t gap = (prev.first > curr.second + 2) ? (prev.first - curr.second - 2) : 0;
+                const uint64_t range_len = curr.second - curr.first;
+                ack.ranges.push_back(AckRange{gap, range_len});
+            }
+        }
+
+        return ack;
+    }
+
     QuicConnection::CryptoStreamReassembler &QuicConnection::reassembler_for_level(uint32_t level) noexcept {
         if (level >= crypto_reassemblers_.size()) level = 0;
         return crypto_reassemblers_[level];
@@ -1404,8 +1544,11 @@ namespace wavex::network::quic {
         uint32_t prot_level, int direction,
         const unsigned char *secret, size_t secret_len) {
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+        wavex::log::info("[QUIC] on_tls_secret: prot_level={} direction={} (0=read, 1=write) secret_len={}",
+                         prot_level, direction, secret_len);
         ProtectionKeys keys;
         if (!CryptoSuite::expand_quic_keys(secret, secret_len, keys)) {
+            wavex::log::error("[QUIC] on_tls_secret: expand_quic_keys failed for level={}", prot_level);
             return 0;
         }
 
@@ -1415,10 +1558,12 @@ namespace wavex::network::quic {
             if (prot_level == 2) {
                 // OSSL_RECORD_PROTECTION_LEVEL_HANDSHAKE
                 handshake_keys_local_ = keys;
+                wavex::log::info("[QUIC] on_tls_secret: handshake_keys_local_ expanded and marked valid");
             } else if (prot_level == 3) {
                 // OSSL_RECORD_PROTECTION_LEVEL_APPLICATION
                 one_rtt_keys_local_ = keys;
                 one_rtt_keys_ = keys;
+                wavex::log::info("[QUIC] on_tls_secret: one_rtt_keys_local_ expanded and marked valid");
             }
         } else {
             // 0 = read (peer/receiver)
@@ -1426,9 +1571,13 @@ namespace wavex::network::quic {
             if (prot_level == 2) {
                 // OSSL_RECORD_PROTECTION_LEVEL_HANDSHAKE
                 handshake_keys_peer_ = keys;
+                wavex::log::info("[QUIC] on_tls_secret: handshake_keys_peer_ expanded and marked valid! Draining buffered packets...");
+                drain_buffered_packets();
             } else if (prot_level == 3) {
                 // OSSL_RECORD_PROTECTION_LEVEL_APPLICATION
                 one_rtt_keys_peer_ = keys;
+                wavex::log::info("[QUIC] on_tls_secret: one_rtt_keys_peer_ expanded and marked valid! Draining buffered packets...");
+                drain_buffered_packets();
             }
         }
         return 1;
@@ -1462,22 +1611,21 @@ namespace wavex::network::quic {
             hdr.version = version_;
             hdr.dcid = peer_cid_;
             hdr.scid = local_cid_;
-            hdr.packet_number = next_packet_number_++;
 
             const ProtectionKeys *keys = nullptr;
 
             if (current_write_level_ == 0) {
                 // OSSL_RECORD_PROTECTION_LEVEL_NONE (Initial)
                 hdr.type = PacketType::Initial;
+                hdr.packet_number = allocate_next_pn(PacketType::Initial);
                 cf.offset = crypto_send_offset_initial_;
                 crypto_send_offset_initial_ += chunk.size();
                 cf.data = std::string(chunk);
 
-                if (has_received_initial_) {
-                    AckFrame ack;
-                    ack.largest_acknowledged = largest_received_initial_pn_;
-                    ack.ranges.push_back({0, 0});
+                if (ack_trackers_[0].has_packets) {
+                    AckFrame ack = ack_trackers_[0].build_ack_frame();
                     serialize_frame(ack, payload);
+                    ack_trackers_[0].mark_ack_sent();
                 }
                 serialize_frame(cf, payload);
 
@@ -1492,27 +1640,33 @@ namespace wavex::network::quic {
             } else if (current_write_level_ == 2) {
                 // OSSL_RECORD_PROTECTION_LEVEL_HANDSHAKE
                 hdr.type = PacketType::Handshake;
+                hdr.packet_number = allocate_next_pn(PacketType::Handshake);
                 cf.offset = crypto_send_offset_handshake_;
                 crypto_send_offset_handshake_ += chunk.size();
                 cf.data = std::string(chunk);
 
-                if (has_received_handshake_) {
-                    AckFrame ack;
-                    ack.largest_acknowledged = largest_received_handshake_pn_;
-                    ack.ranges.push_back({0, 0});
+                if (ack_trackers_[1].has_packets) {
+                    AckFrame ack = ack_trackers_[1].build_ack_frame();
                     serialize_frame(ack, payload);
+                    ack_trackers_[1].mark_ack_sent();
                 }
                 serialize_frame(cf, payload);
-                keys = handshake_keys_local_.valid ? &handshake_keys_local_ : &initial_keys_local_;
+                keys = handshake_keys_local_.valid ? &handshake_keys_local_ : nullptr;
             } else {
                 // OSSL_RECORD_PROTECTION_LEVEL_APPLICATION (1-RTT)
                 hdr.is_long = false;
                 hdr.type = PacketType::OneRTT;
+                hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
                 cf.offset = crypto_send_offset_app_;
                 crypto_send_offset_app_ += chunk.size();
                 cf.data = std::string(chunk);
+                if (ack_trackers_[2].has_packets && ack_trackers_[2].needs_ack()) {
+                    AckFrame ack = ack_trackers_[2].build_ack_frame();
+                    serialize_frame(ack, payload);
+                    ack_trackers_[2].mark_ack_sent();
+                }
                 serialize_frame(cf, payload);
-                keys = one_rtt_keys_local_.valid ? &one_rtt_keys_local_ : &initial_keys_local_;
+                keys = one_rtt_keys_local_.valid ? &one_rtt_keys_local_ : (!tls_ || !tls_->initialized ? &initial_keys_local_ : nullptr);
             }
 
             std::string packet;
@@ -1560,6 +1714,7 @@ namespace wavex::network::quic {
         wavex::log::info("[QUIC] SSL_do_handshake succeeded (rc=1)! Handshake complete.");
         handshake_done_ = true;
         state_ = ConnectionState::Connected;
+        drain_buffered_packets();
 
         if (is_server_) {
             // Send HANDSHAKE_DONE in a 1-RTT short packet (RFC 9000 §19.20)
@@ -1567,7 +1722,7 @@ namespace wavex::network::quic {
             one_rtt_hdr.is_long = false;
             one_rtt_hdr.type = PacketType::OneRTT;
             one_rtt_hdr.dcid = peer_cid_;
-            one_rtt_hdr.packet_number = next_packet_number_++;
+            one_rtt_hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
 
             HandshakeDoneFrame hdf;
             std::string one_rtt_payload;
@@ -1584,14 +1739,18 @@ namespace wavex::network::quic {
 #endif
     }
 
-    void QuicConnection::send_ack(const uint64_t pn, const PacketType type) {
+    void QuicConnection::send_ack_for_space(const PacketType type) {
+        const std::size_t s = space_index(type);
+        auto &tracker = ack_trackers_[s];
+        if (!tracker.has_packets) return;
+
         PacketHeader hdr;
         const ProtectionKeys *keys = nullptr;
         if (type == PacketType::OneRTT) {
             hdr.is_long = false;
             hdr.type = PacketType::OneRTT;
             hdr.dcid = peer_cid_;
-            hdr.packet_number = next_packet_number_++;
+            hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
             keys = one_rtt_keys_local_.valid
                        ? &one_rtt_keys_local_
                        : (one_rtt_keys_.valid ? &one_rtt_keys_ : &initial_keys_local_);
@@ -1601,7 +1760,7 @@ namespace wavex::network::quic {
             hdr.version = version_;
             hdr.dcid = peer_cid_;
             hdr.scid = local_cid_;
-            hdr.packet_number = next_packet_number_++;
+            hdr.packet_number = allocate_next_pn(PacketType::Handshake);
             keys = handshake_keys_local_.valid ? &handshake_keys_local_ : nullptr;
         } else {
             hdr.is_long = true;
@@ -1609,22 +1768,62 @@ namespace wavex::network::quic {
             hdr.version = version_;
             hdr.dcid = peer_cid_;
             hdr.scid = local_cid_;
-            hdr.packet_number = next_packet_number_++;
+            hdr.packet_number = allocate_next_pn(PacketType::Initial);
             keys = &initial_keys_local_;
         }
         if (!keys || !keys->valid) return;
 
-        AckFrame ack;
-        ack.largest_acknowledged = pn;
-        ack.ranges.push_back({0, 0});
+        AckFrame ack = tracker.build_ack_frame();
+        tracker.mark_ack_sent();
+
         std::string payload;
         serialize_frame(ack, payload);
 
         std::string packet;
         if (CryptoSuite::protect_packet(*keys, hdr, payload, packet)) {
+            wavex::log::info("[QUIC] send_ack_for_space: Sent coalesced ACK (space={}, pn={}, largest_ack={}, ranges={})",
+                             s, hdr.packet_number, ack.largest_acknowledged, ack.ranges.size());
             pending_outbound_datagrams_.push_back(std::move(packet));
         }
         if (on_outbound_) on_outbound_();
+    }
+
+    void QuicConnection::send_ack(const uint64_t pn, const PacketType type) {
+        const std::size_t s = space_index(type);
+        ack_trackers_[s].add_packet(pn, true);
+        send_ack_for_space(type);
+    }
+
+    void QuicConnection::drain_buffered_packets() {
+        if (draining_buffered_packets_) return;
+        draining_buffered_packets_ = true;
+
+        bool progress = true;
+        while (progress) {
+            progress = false;
+
+            if (handshake_keys_peer_.valid && !buffered_handshake_packets_.empty()) {
+                auto pkt = std::move(buffered_handshake_packets_.front());
+                buffered_handshake_packets_.pop_front();
+                wavex::log::info("[QUIC] Draining buffered Handshake packet ({} bytes, remaining in queue={})",
+                                 pkt.size(), buffered_handshake_packets_.size());
+                handle_datagram(pkt);
+                progress = true;
+                continue;
+            }
+
+            if (one_rtt_keys_peer_.valid && !buffered_one_rtt_packets_.empty()) {
+                auto pkt = std::move(buffered_one_rtt_packets_.front());
+                buffered_one_rtt_packets_.pop_front();
+                wavex::log::info("[QUIC] Draining buffered 1-RTT packet ({} bytes, remaining in queue={})",
+                                 pkt.size(), buffered_one_rtt_packets_.size());
+                handle_datagram(pkt);
+                progress = true;
+                continue;
+            }
+        }
+
+        draining_buffered_packets_ = false;
     }
 
     void QuicConnection::handle_datagram(const std::string_view datagram) {
@@ -1638,6 +1837,7 @@ namespace wavex::network::quic {
                 PacketHeader hdr;
                 std::size_t hdr_len = 0;
                 if (!unpack_packet_header(remaining, hdr, hdr_len, local_cid_.length())) {
+                    wavex::log::warn("[QUIC] handle_datagram: failed to unpack packet header from remaining {} bytes", remaining.size());
                     break;
                 }
 
@@ -1652,44 +1852,92 @@ namespace wavex::network::quic {
                 const std::string_view packet_bytes = remaining.substr(0, packet_size);
                 remaining.remove_prefix(packet_size);
 
+                wavex::log::info("[QUIC] handle_datagram: processing packet ({} bytes, is_long={}, type={}, dcid={})",
+                                 packet_bytes.size(), hdr.is_long, static_cast<int>(hdr.type), hdr.dcid.to_string());
+
                 const ProtectionKeys *keys = nullptr;
                 if (hdr.is_long) {
                     if (hdr.type == PacketType::Initial) {
                         keys = &initial_keys_peer_;
                     } else if (hdr.type == PacketType::Handshake) {
-                        keys = handshake_keys_peer_.valid ? &handshake_keys_peer_ : &initial_keys_peer_;
+                        if (!handshake_keys_peer_.valid) {
+                            if (buffered_handshake_packets_.size() < 16) {
+                                buffered_handshake_packets_.emplace_back(packet_bytes);
+                                wavex::log::info("[QUIC] Buffering Handshake packet ({} bytes) - handshake_keys_peer not yet valid (queue_size={})",
+                                                 packet_bytes.size(), buffered_handshake_packets_.size());
+                            } else {
+                                wavex::log::warn("[QUIC] Dropping Handshake packet ({} bytes) - buffer limit reached", packet_bytes.size());
+                            }
+                            continue;
+                        }
+                        keys = &handshake_keys_peer_;
                     }
                 } else {
-                    // 1-RTT: prefer derived peer keys, then negotiated symmetric keys, then initial peer keys (test/mock)
-                    keys = (one_rtt_keys_peer_.valid)
-                               ? &one_rtt_keys_peer_
-                               : (one_rtt_keys_.valid ? &one_rtt_keys_ : &initial_keys_peer_);
+                    if (!one_rtt_keys_peer_.valid) {
+                        if (!tls_ || !tls_->initialized) {
+                            // Non-TLS or mock test fallback
+                            keys = one_rtt_keys_.valid ? &one_rtt_keys_ : &initial_keys_peer_;
+                        } else {
+                            if (buffered_one_rtt_packets_.size() < 16) {
+                                buffered_one_rtt_packets_.emplace_back(packet_bytes);
+                                wavex::log::info("[QUIC] Buffering 1-RTT packet ({} bytes) - one_rtt_keys_peer not yet valid (queue_size={})",
+                                                 packet_bytes.size(), buffered_one_rtt_packets_.size());
+                            } else {
+                                wavex::log::warn("[QUIC] Dropping 1-RTT packet ({} bytes) - buffer limit reached", packet_bytes.size());
+                            }
+                            continue;
+                        }
+                    } else {
+                        keys = &one_rtt_keys_peer_;
+                    }
                 }
 
                 // Drop packet if we don't have the right keys for this level yet
-                if (!keys || !keys->valid) continue;
-
-                std::string plaintext;
-                if (!CryptoSuite::unprotect_packet(*keys, hdr, packet_bytes, plaintext, largest_received_pn_,
-                                                   local_cid_.length())) {
+                if (!keys || !keys->valid) {
+                    wavex::log::warn("[QUIC] handle_datagram: no valid keys for packet type={}! Dropping packet.", static_cast<int>(hdr.type));
                     continue;
                 }
 
-                largest_received_pn_ = std::max(largest_received_pn_, hdr.packet_number);
+                const std::size_t space_idx = space_index(hdr.type);
+                const uint64_t largest_pn_in_space = ack_trackers_[space_idx].largest_pn;
+
+                std::string plaintext;
+                if (!CryptoSuite::unprotect_packet(*keys, hdr, packet_bytes, plaintext, largest_pn_in_space,
+                                                   local_cid_.length())) {
+                    wavex::log::warn("[QUIC] handle_datagram: unprotect_packet failed for packet type={} ({} bytes)!",
+                                     static_cast<int>(hdr.type), packet_bytes.size());
+                    continue;
+                }
+
+                wavex::log::info("[QUIC] handle_datagram: packet decrypted! type={} pn={} plaintext_len={}",
+                                 static_cast<int>(hdr.type), hdr.packet_number, plaintext.size());
+
+                if (plaintext.size() == 224) {
+                    std::string hex;
+                    for (unsigned char c : plaintext) hex += std::format("{:02x} ", c);
+                    wavex::log::info("[QUIC] pn={} plaintext hex dump: {}", hdr.packet_number, hex);
+                }
+
                 if (hdr.is_long) {
                     if (hdr.type == PacketType::Initial) {
-                        largest_received_initial_pn_ = std::max(largest_received_initial_pn_, hdr.packet_number);
                         has_received_initial_ = true;
                     } else if (hdr.type == PacketType::Handshake) {
-                        largest_received_handshake_pn_ = std::max(largest_received_handshake_pn_, hdr.packet_number);
                         has_received_handshake_ = true;
                     }
                 }
 
                 std::vector<Frame> frames;
                 if (parse_frames(plaintext, frames)) {
+                    wavex::log::info("[QUIC] parse_frames succeeded: {} frames extracted", frames.size());
+                    bool is_ack_eliciting = false;
                     bool has_crypto_frame = false;
                     for (const auto &f: frames) {
+                        if (!std::holds_alternative<AckFrame>(f) &&
+                            !std::holds_alternative<PaddingFrame>(f) &&
+                            !std::holds_alternative<ConnectionCloseFrame>(f)) {
+                            is_ack_eliciting = true;
+                        }
+
                         if (const auto *cf = std::get_if<CryptoFrame>(&f)) {
                             wavex::log::info("[QUIC] Received CryptoFrame: {} bytes at offset {} (pkt_type={})",
                                              cf->data.size(), cf->offset, static_cast<int>(hdr.type));
@@ -1712,14 +1960,33 @@ namespace wavex::network::quic {
                         }
                     }
 
+                    // Record packet into tracker ONCE per packet
+                    ack_trackers_[space_idx].add_packet(hdr.packet_number, is_ack_eliciting);
+
                     if (has_crypto_frame) {
                         wavex::log::info("[QUIC] invoking run_tls_engine() due to incoming CRYPTO frame");
                         run_tls_engine();
                     }
 
-                    // Pass the packet type so process_frames can ACK at the correct level
+                    // Pass the packet type so process_frames can handle frames
                     process_frames(frames, hdr.packet_number, hdr.type, created_streams);
+                } else {
+                    std::string hex;
+                    for (unsigned char c : plaintext) hex += std::format("{:02x} ", c);
+                    wavex::log::warn("[QUIC] parse_frames failed for packet pn={} (plaintext_len={}) hex: {}",
+                                     hdr.packet_number, plaintext.size(), hex);
                 }
+            }
+
+            // Coalesced ACK dispatch for any space that still has pending ack-eliciting packets
+            if (ack_trackers_[0].needs_ack()) {
+                send_ack_for_space(PacketType::Initial);
+            }
+            if (ack_trackers_[1].needs_ack()) {
+                send_ack_for_space(PacketType::Handshake);
+            }
+            if (ack_trackers_[2].needs_ack()) {
+                send_ack_for_space(PacketType::OneRTT);
             }
 
             if (is_server_ && state_ == ConnectionState::Initial) {
@@ -1730,6 +1997,8 @@ namespace wavex::network::quic {
                     state_ = ConnectionState::Connected;
                 }
             }
+
+            drain_buffered_packets();
 
             outbound_cb = on_outbound_;
             stream_created_cb = on_stream_created_;
@@ -1749,8 +2018,7 @@ namespace wavex::network::quic {
             std::visit([this, pn, pkt_type, &new_streams]<typename T0>(const T0 &frame) {
                 using T = std::decay_t<T0>;
                 if constexpr (std::is_same_v<T, PingFrame>) {
-                    // ACK at the same level the PING arrived on (RFC 9000 §13.2)
-                    send_ack(pn, pkt_type);
+                    // PING frames are ack-eliciting; coalesced ACK is handled at packet/datagram level
                 } else if constexpr (std::is_same_v<T, AckFrame>) {
                     // RFC 9002 §7 Congestion Control ACK processing
                     congestion_controller_.on_packet_acked(CongestionController::kMaxDatagramSize);
@@ -1761,8 +2029,7 @@ namespace wavex::network::quic {
                         );
                     }
                 } else if constexpr (std::is_same_v<T, StreamFrame>) {
-                    send_ack(pn, PacketType::OneRTT); // STREAM frames are always 1-RTT
-
+                    // STREAM frames are ack-eliciting; coalesced ACK is handled at packet/datagram level
                     auto it = streams_.find(frame.stream_id);
                     if (it == streams_.end()) {
                         auto stream = std::make_shared<QuicStream>(shared_from_this(), frame.stream_id, executor_);
@@ -1810,11 +2077,10 @@ namespace wavex::network::quic {
         hdr.version = version_;
         hdr.dcid = peer_cid_;
         hdr.scid = local_cid_;
-        hdr.packet_number = next_packet_number_++;
+        hdr.packet_number = allocate_next_pn(PacketType::Initial);
 
-        AckFrame ack;
-        ack.largest_acknowledged = largest_received_pn_;
-        ack.ranges.push_back({0, 0});
+        AckFrame ack = ack_trackers_[0].has_packets ? ack_trackers_[0].build_ack_frame() : AckFrame{};
+        ack_trackers_[0].mark_ack_sent();
 
         std::string payload;
         serialize_frame(ack, payload);
@@ -1830,7 +2096,7 @@ namespace wavex::network::quic {
         one_rtt_hdr.is_long = false;
         one_rtt_hdr.type = PacketType::OneRTT;
         one_rtt_hdr.dcid = peer_cid_;
-        one_rtt_hdr.packet_number = next_packet_number_++;
+        one_rtt_hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
 
         HandshakeDoneFrame hdf;
         std::string one_rtt_payload;
@@ -1934,7 +2200,7 @@ namespace wavex::network::quic {
             hdr.is_long = false;
             hdr.type = PacketType::OneRTT;
             hdr.dcid = peer_cid_;
-            hdr.packet_number = next_packet_number_++;
+            hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
 
             std::string packet;
             const auto &keys = (one_rtt_keys_local_.valid)
@@ -1980,7 +2246,7 @@ namespace wavex::network::quic {
             hdr.is_long = false;
             hdr.type = PacketType::OneRTT;
             hdr.dcid = peer_cid_;
-            hdr.packet_number = next_packet_number_++;
+            hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
 
             std::string packet;
             const auto &keys = (one_rtt_keys_local_.valid)
@@ -2045,11 +2311,19 @@ namespace wavex::network::quic {
                     return;
                 }
 
+                wavex::log::info("[QUIC] [server] Received UDP datagram ({} bytes) from {}:{}",
+                                 bytes_recvd, sender_endpoint_.address().to_string(), sender_endpoint_.port());
+
                 const std::string_view datagram(reinterpret_cast<const char *>(recv_buf_.data()), bytes_recvd);
                 PacketHeader hdr;
                 std::size_t hdr_len = 0;
 
-                if (unpack_packet_header(datagram, hdr, hdr_len)) {
+                if (!unpack_packet_header(datagram, hdr, hdr_len)) {
+                    wavex::log::warn("[QUIC] [server] Failed to unpack packet header from {} bytes UDP datagram", bytes_recvd);
+                } else {
+                    wavex::log::info("[QUIC] [server] Datagram header unpacked: is_long={} type={} dcid={} scid={}",
+                                     hdr.is_long, static_cast<int>(hdr.type), hdr.dcid.to_string(), hdr.scid.to_string());
+
                     if (hdr.is_long && hdr.version != QUIC_VERSION_1 && hdr.version != 0) {
                         // RFC 9000 §6: Version Negotiation packet
                         std::string vn_packet;
@@ -2119,6 +2393,9 @@ namespace wavex::network::quic {
                     if (conn) {
                         conn->handle_datagram(datagram);
                         flush_outbound(conn);
+                    } else {
+                        wavex::log::warn("[QUIC] [server] No connection found for DCID={} (type={})",
+                                         hdr.dcid.to_string(), static_cast<int>(hdr.type));
                     }
                 }
 
@@ -2858,11 +3135,19 @@ namespace wavex::network::quic {
                     return;
                 }
 
+                wavex::log::info("[QUIC] [acceptor] Received UDP datagram ({} bytes) from {}:{}",
+                                 bytes_recvd, sender_endpoint_.address().to_string(), sender_endpoint_.port());
+
                 const std::string_view datagram(reinterpret_cast<const char *>(recv_buf_.data()), bytes_recvd);
                 PacketHeader hdr;
                 std::size_t hdr_len = 0;
 
-                if (unpack_packet_header(datagram, hdr, hdr_len)) {
+                if (!unpack_packet_header(datagram, hdr, hdr_len)) {
+                    wavex::log::warn("[QUIC] [acceptor] Failed to unpack packet header from {} bytes UDP datagram", bytes_recvd);
+                } else {
+                    wavex::log::info("[QUIC] [acceptor] Datagram header unpacked: is_long={} type={} dcid={} scid={}",
+                                     hdr.is_long, static_cast<int>(hdr.type), hdr.dcid.to_string(), hdr.scid.to_string());
+
                     if (hdr.is_long && hdr.version != QUIC_VERSION_1 && hdr.version != 0) {
                         std::string vn_packet;
                         vn_packet.push_back(static_cast<char>(0x80 | 0x40));
@@ -2931,6 +3216,9 @@ namespace wavex::network::quic {
                             auto stream0 = conn->get_or_create_stream(0);
                             on_stream_ready(stream0, conn, sender_endpoint_);
                         }
+                    } else {
+                        wavex::log::warn("[QUIC] [acceptor] No connection found for DCID={} (type={})",
+                                         hdr.dcid.to_string(), static_cast<int>(hdr.type));
                     }
                 }
 

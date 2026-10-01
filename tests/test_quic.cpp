@@ -944,6 +944,35 @@ void test_rfc9002_loss_and_recovery() {
     assert(parsed_ack.ranges[2].gap == 1);
     assert(parsed_ack.ranges[2].ack_range_len == 2);
 
+    // Test ReceivedPacketTracker interval coalescence and ACK range production
+    QuicConnection::ReceivedPacketTracker tracker;
+    assert(!tracker.needs_ack());
+    tracker.add_packet(0, true);
+    tracker.add_packet(1, true);
+    tracker.add_packet(2, true);
+    tracker.add_packet(5, true);
+    tracker.add_packet(6, true);
+    tracker.add_packet(9, true);
+    assert(tracker.needs_ack());
+
+    AckFrame generated_ack = tracker.build_ack_frame(5);
+    assert(generated_ack.largest_acknowledged == 9);
+    assert(generated_ack.ack_delay == 5);
+    assert(generated_ack.ranges.size() == 3);
+    assert(generated_ack.ranges[0].ack_range_len == 0);
+    assert(generated_ack.ranges[1].gap == 1);
+    assert(generated_ack.ranges[1].ack_range_len == 1);
+    assert(generated_ack.ranges[2].gap == 1);
+    assert(generated_ack.ranges[2].ack_range_len == 2);
+
+    tracker.mark_ack_sent();
+    assert(!tracker.needs_ack());
+
+    // Out-of-order and duplicate packet insertion
+    tracker.add_packet(4, true); // Inserts between {0..2} and {5,6}
+    tracker.add_packet(1, false); // Duplicate, ignored
+    assert(tracker.needs_ack());
+
     // Flow control frame roundtrips
     MaxDataFrame mdf{2097152}; // 2 MB connection limit
     std::string mdf_bytes;
