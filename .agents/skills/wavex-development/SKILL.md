@@ -36,7 +36,8 @@ This skill provides essential domain context for developing, extending, and debu
     - `Router.hpp`: Protocol-agnostic radix tree with RE2 regex (`{id:[0-9]+}`), dynamic `:param`, wildcard `*param`,
       scoped middlewares, and 404 handler. Wildcard captures are zero-allocation contiguous string slices
       `std::string_view(w_begin, w_end - w_begin)` guarded by a contiguous path buffer invariant assertion.
-    - `HttpRouter.hpp`: HTTP-specific convenience wrapper (`get`, `post`, `put`, `del`, `patch`, `query`).
+    - `HttpRouter.hpp`: HTTP-specific convenience wrapper (`get`, `post`, `put`, `del`, `patch`, `query`). Aliases
+      `Http1Router`, `Http2Router`, and `Http3Router`.
 
 3. **Server Subsystem (`include/wavex/Server/`)**:
     - `Server.hpp`: Coroutine TCP & TLS 1.3 server (`Server<Codec, RouterType>`), completely protocol-agnostic. Employs
@@ -47,7 +48,8 @@ This skill provides essential domain context for developing, extending, and debu
       Features atomic `ServerState` (`Stopped`, `Running`, `ShuttingDown`), type-erased `ConnectionTracker` for thread-safe
       socket lifecycle management, proactive idle cancellation (`cancel_all_idle()`), and graceful in-flight request
       drain (`server.exit()`, `server.shutdown()`, `attach_shutdown_event()`). Supports complete server restartability
-      across `run()` / `exit()` lifecycles without process termination.
+      across `run()` / `exit()` lifecycles without process termination. Concrete server aliases include `Http1Server`,
+      `Http2Server`, and `Http3Server`.
     - `TlsConfig.hpp`: TLS 1.3 configuration struct (`cert_file`, `key_file`, `key_password`, `dh_file`, `force_tls13`).
     - `ThreadPool.hpp`: Adaptive Tokio-style work-stealing thread pool with proportional hysteresis scaling. Hot paths
       (stealing and round-robin dispatch) access an atomic pointer table (`worker_table_`) without `workers_mutex_` lock
@@ -71,13 +73,25 @@ This skill provides essential domain context for developing, extending, and debu
     - `http/http1codec.hpp`: Zero-copy HTTP/1.x parser, encoder, chunked decoder, and standard status text mapping (
       including 301, 302, 303, 304, 307, 308).
     - `http/http2codec.hpp`: RFC 7540 binary framing parser, encoder, and RFC 7541 HPACK compression engine.
+    - `http/http3codec.hpp`: RFC 9114 HTTP/3 binary framing parser and encoder (`http3codec`), RFC 9204 QPACK encoder/decoder,
+      static table lookup, literal field section processing, and VarInt framed streams. Provides `Http3Request`,
+      `Http3Response`, and `Http3Router`.
     - `http/HttpRequest.hpp`: Concrete request parsing from socket streams (`parse_stream`, `consumed_bytes`), multipart
       form accessors (`is_multipart`, `multipart`, `file`, `files`), decompression (`decompressed_body`), and disk
-      persistence (`save_body_to_file`).
+      persistence (`save_body_to_file`). Concrete specializations include `Http1Request`, `Http2Request`, and `Http3Request`.
     - `http/HttpResponse.hpp`: Concrete response with injected write sink for streaming (`write_chunk`, `send_file`),
-      committed state (`is_sent`), and headers sent state (`is_headers_sent`).
+      committed state (`is_sent`), and headers sent state (`is_headers_sent`). Concrete specializations include
+      `Http1Response`, `Http2Response`, and `Http3Response`.
 
-6. **Utils Subsystem (`include/wavex/Utils/`, `src/Utils/`)**:
+6. **Network Subsystem (`include/wavex/Network/`, `src/Network/`)**:
+    - `QUIC.hpp`, `QUIC.cpp`: Native RFC 9000 & RFC 9001 QUIC UDP transport engine, packet framing, connection ID routing,
+      TLS 1.3 BoringSSL/OpenSSL QUIC method (`SSL_set_quic_method`), congestion control, packet acknowledgment, flow
+      control, and stream demuxing. Exposes `QuicStream` compliant with the `AsyncStream` concept (`async_read_some`,
+      `async_write_some`, `close()`), `QuicConnection`, and `QuicServer`. Handles automatic opening of server-initiated
+      unidirectional Control (Stream 3 with `SETTINGS`) and QPACK encoder/decoder streams (Streams 7 and 11), while
+      filtering and draining client unidirectional streams (`(sid & 0x03) == 0x02`).
+
+7. **Utils Subsystem (`include/wavex/Utils/`, `src/Utils/`)**:
     - `Utils.hpp` (`wavex:utils`): Umbrella header and primary C++ module interface partition for utilities.
     - `AsyncFs.hpp` (`wavex::fs`): Non-blocking file I/O operations (`read_file`, `read_bytes`, `write_file`,
       `append_file`, `copy_file`, `remove`) built on `spawn_blocking`.
@@ -88,7 +102,7 @@ This skill provides essential domain context for developing, extending, and debu
     - `Multipart.hpp` (`wavex:utils_multipart`): Complete RFC 7578 multipart/form-data parser, builder, and disk
       spooler (`MultipartFormData`, `MultipartLimits`, `UploadedFile`, `FormField`).
 
-7. **Client Subsystem (`include/wavex/Client/`)**:
+8. **Client Subsystem (`include/wavex/Client/`)**:
     - `HttpClient.hpp`: Async coroutine client supporting HTTP/1.1 & HTTP/2, plain TCP & TLS 1.3, fluent query builders,
       JSON, binary bodies, multipart/form-data uploads (`add_field`, `add_file`, `add_file_from_path`), payload
       compression (`compress`), response decompression (`decompressed_body`), and response saving (`save_to_file`).
@@ -130,9 +144,10 @@ This skill provides essential domain context for developing, extending, and debu
     - `Server.hpp` must remain protocol-agnostic. Never branch on `if constexpr (is_http2)` in `Server.hpp`; all
       protocol connection behavior must query `protocol_traits<Codec>`.
 
-8. **Future Protocols (GraphQL, HTTP/3 QUIC, WebSockets)**:
+8. **Future Protocols (GraphQL, WebSockets)**:
     - Refer to `.agents/rules/future-protocols-architecture.md` for architectural blueprints.
-    - Maintain the 3-seam architecture so new protocols integrate seamlessly when scheduled.
+    - Native HTTP/3 (RFC 9114, RFC 9204) over QUIC (RFC 9000, RFC 9001) is fully implemented and verified.
+    - Maintain the 3-seam architecture so remaining future protocols (GraphQL, WebSockets) integrate seamlessly when scheduled.
 
 9. **`string_view` Lifetime Safety Contract**:
     - `req.param(name)`, `req.query[key]`, and `res.get_body()` return `std::string_view` that is valid only within the
@@ -221,3 +236,21 @@ This skill provides essential domain context for developing, extending, and debu
 
 26. **Unsupported Pre-C++23 Compilers (GCC < 16, Clang < 18.1, MSVC < 19.44)**:
     - As specified in `README.md`, attempting to compile WaveX on pre-baseline compilers (GCC < 16, Clang < 18.1, or MSVC < 19.44) is unsupported and fails due to missing C++23 explicit object parameter ("deducing this", P0847R7), missing `<print>` (P2093R14), or module partition regressions.
+
+27. **QUIC TLS Transport Parameter Lifetime (`SSL_set_quic_tls_transport_params`)**:
+    - The OpenSSL / BoringSSL QUIC API (`SSL_set_quic_tls_transport_params`) registers a non-owning raw pointer to encoded transport parameters without copying them.
+    - The underlying buffer is read asynchronously during TLS handshake execution (`SSL_do_handshake()`).
+    - Never store transport parameters in stack-local or temporary variables. On Windows under MSVC Debug CRT, stack deallocations overwrite memory with `0xDD` ("dead land"), causing BoringSSL to abort the handshake with `PROTOCOL_VIOLATION: Unknown transport parameter 0x1ddddddddddddddd`.
+    - Always bind encoded transport parameters to the lifetime of the connection object (`local_transport_params_` in `QuicConnection`).
+
+28. **QUIC Stream Demultiplexing & Peer Unidirectional Stream Drain (RFC 9000 §2.1 & RFC 9114 §6.2)**:
+    - In QUIC, stream IDs encode the stream initiator and direction via the lowest 2 bits:
+      - `(sid & 0x03) == 0x00`: Client-initiated bidirectional (HTTP/3 request stream).
+      - `(sid & 0x03) == 0x02`: Client-initiated unidirectional (Peer Control or QPACK stream).
+      - `(sid & 0x03) == 0x03`: Server-initiated unidirectional (Server Control Stream 3, QPACK streams 7 and 11).
+    - Servers must never treat client unidirectional streams (`0x02`) as HTTP request streams or attempt to write HTTP responses to them; doing so violates RFC 9000 §2.1 (writing to a unidirectional stream opened by the peer is a fatal stream state error) and stalls clients like `curl --http3`. Peer unidirectional streams must be drained and processed asynchronously.
+
+29. **HTTP/3 Server Unidirectional Control & QPACK Streams**:
+    - Per RFC 9114 §6.2, both endpoints must open a control stream and send a `SETTINGS` frame (`0x04`) as the very first frame.
+    - WaveX servers must immediately open Stream 3 (`0x00` VarInt control stream type followed by `SETTINGS`), Stream 7 (`0x02` QPACK encoder), and Stream 11 (`0x03` QPACK decoder) upon handshake completion (`SSL_do_handshake == 1`) after emitting `HANDSHAKE_DONE`.
+

@@ -417,7 +417,12 @@ namespace wavex::server {
                 quic_server_->set_stream_handler(
                     [this](std::shared_ptr<network::quic::QuicStream> stream)
                         -> asio::awaitable<void> {
-                        spawn_http3_stream(std::move(stream));
+                        if (!stream) co_return;
+                        wavex::log::info("[Server] quic_server_ stream_handler invoked for stream_id={}",
+                                         stream->stream_id());
+                        if ((stream->stream_id() & 0x03) == 0x00) {
+                            spawn_http3_stream(std::move(stream));
+                        }
                         co_return;
                     });
                 quic_server_->start();
@@ -867,8 +872,12 @@ namespace wavex::server {
          * @brief HTTP/3 connection handler — processes incoming QUIC streams using http3codec and the attached Http3Router.
          */
         asio::awaitable<void> handle_http3_connection(std::shared_ptr<network::quic::QuicStream> stream_ptr) {
+            wavex::log::info("[QUIC] handle_http3_connection: entered, stream_id={}, h3_router_={}",
+                             stream_ptr ? stream_ptr->stream_id() : 999999, (void*)h3_router_);
             if (h3_router_) {
                 co_await handle_connection_impl<protos::http::http3codec, engine::Http3Router>(std::move(stream_ptr), *h3_router_);
+            } else {
+                wavex::log::warn("[QUIC] handle_http3_connection: h3_router_ is null, dropping stream");
             }
             co_return;
         }
@@ -970,6 +979,10 @@ namespace wavex::server {
                     if (!co_await CustTraits::on_connection_start(stream, stream_buf)) co_return;
                 }
 
+                if constexpr (std::is_same_v<CustomCodec, protos::http::http3codec>) {
+                    wavex::log::info("[H3] handle_connection_impl: stream_id={} started", stream.stream_id());
+                }
+
                 unsigned request_count = 0;
                 while (state_.load(std::memory_order_acquire) != ServerState::Stopped) {
                     if (state_.load(std::memory_order_acquire) == ServerState::ShuttingDown && stream_buf.empty()) [[
@@ -1018,7 +1031,16 @@ namespace wavex::server {
 
                         conn_tracker_.mark_active(conn_id);
 
+                        if constexpr (std::is_same_v<CustomCodec, protos::http::http3codec>) {
+                            wavex::log::info("[H3] stream_id={} read {} bytes (read_ec='{}', timed_out={})",
+                                             stream.stream_id(), bytes_read, read_ec.message(), timed_out);
+                        }
+
                         if (timed_out || read_ec || bytes_read == 0) [[unlikely]] {
+                            if constexpr (std::is_same_v<CustomCodec, protos::http::http3codec>) {
+                                wavex::log::warn("[H3] stream_id={} read loop exited: timed_out={} read_ec='{}' bytes_read={}",
+                                                 stream.stream_id(), timed_out, read_ec.message(), bytes_read);
+                            }
                             co_return;
                         }
 
@@ -1037,9 +1059,17 @@ namespace wavex::server {
                         unconsumed = std::string_view(stream_buf.data() + stream_buf_consumed,
                                                       stream_buf.size() - stream_buf_consumed);
                         p_res = req.parse_stream(unconsumed, conn_ctx);
+                        if constexpr (std::is_same_v<CustomCodec, protos::http::http3codec>) {
+                            wavex::log::info("[H3] stream_id={} parse_stream result={} (0=success, 1=incomplete, 2=error) unconsumed_size={}",
+                                             stream.stream_id(), static_cast<int>(p_res), unconsumed.size());
+                        }
                     }
 
                     if (p_res != CustomCodec::result::success) [[unlikely]] {
+                        if constexpr (std::is_same_v<CustomCodec, protos::http::http3codec>) {
+                            wavex::log::warn("[H3] stream_id={} parse failed with result={}, emitting 400 Bad Request",
+                                             stream.stream_id(), static_cast<int>(p_res));
+                        }
                         CustRes err_res;
                         err_res.status(400).send("Bad Request");
                         std::string err_wire = err_res.serialize();
@@ -1047,6 +1077,11 @@ namespace wavex::server {
                                                    asio::use_awaitable);
                         co_await drain_and_abort(stream);
                         co_return;
+                    }
+
+                    if constexpr (std::is_same_v<CustomCodec, protos::http::http3codec>) {
+                        wavex::log::info("[H3] stream_id={} request parsed successfully: method_type={} path={}",
+                                         stream.stream_id(), static_cast<int>(req.method_type()), req.path());
                     }
 
                     ++request_count;
@@ -1079,6 +1114,9 @@ namespace wavex::server {
                     }
 
                     auto match = router.resolve(req.method_type(), req.path());
+                    if constexpr (std::is_same_v<CustomCodec, protos::http::http3codec>) {
+                        wavex::log::info("[H3] stream_id={} router match={}", stream.stream_id(), match ? "found" : "not found");
+                    }
 
                     CustRes res;
                     if constexpr (requires { res.stream_id(req.stream_id()); }) {
@@ -1150,8 +1188,14 @@ namespace wavex::server {
                                 co_await router.not_found_handler()(req, res);
                             }
                         } else if (match->middlewares.empty()) [[likely]] {
+                            if constexpr (std::is_same_v<CustomCodec, protos::http::http3codec>) {
+                                wavex::log::info("[H3] stream_id={} invoking handler for path='{}'", stream.stream_id(), req.path());
+                            }
                             co_await match->handler(req, res);
                         } else {
+                            if constexpr (std::is_same_v<CustomCodec, protos::http::http3codec>) {
+                                wavex::log::info("[H3] stream_id={} running middleware chain for path='{}'", stream.stream_id(), req.path());
+                            }
                             co_await run_chain(req, res, match->middlewares, match->handler);
                         }
                     } catch (const std::exception &ex) {
@@ -1196,8 +1240,16 @@ namespace wavex::server {
                     // Server writes serialized response if headers were not already flushed by streaming
                     if (!res.is_headers_sent()) [[likely]] {
                         std::string wire_resp = res.serialize();
+                        if constexpr (std::is_same_v<CustomCodec, protos::http::http3codec>) {
+                            wavex::log::info("[H3] stream_id={} writing response ({} bytes, status={})",
+                                             stream.stream_id(), wire_resp.size(), res.status_code());
+                        }
                         co_await asio::async_write(stream, asio::buffer(wire_resp),
                                                    asio::use_awaitable);
+                        if constexpr (std::is_same_v<CustomCodec, protos::http::http3codec>) {
+                            wavex::log::info("[H3] stream_id={} async_write finished ({} bytes)",
+                                             stream.stream_id(), wire_resp.size());
+                        }
                     }
 
                     stream_buf_consumed += req.consumed_bytes();
@@ -1213,6 +1265,10 @@ namespace wavex::server {
                     if (stream_buf.capacity() > 64 * 1024 && stream_buf.empty()) [[unlikely]] {
                         stream_buf.shrink_to_fit();
                         stream_buf.reserve(8192); // restore working reservation
+                    }
+
+                    if constexpr (std::is_same_v<CustomCodec, protos::http::http3codec>) {
+                        wavex::log::info("[H3] stream_id={} request completed, effective_keep={}", stream.stream_id(), effective_keep);
                     }
 
                     if (!effective_keep) break;
@@ -1254,6 +1310,8 @@ namespace wavex::server {
          * @brief Spawns HTTP/3 QUIC stream processing coroutine on the server's thread pool.
          */
         void spawn_http3_stream(std::shared_ptr<network::quic::QuicStream> stream_ptr) {
+            wavex::log::info("[Server] spawn_http3_stream: stream_id={}, workers={}",
+                             stream_ptr ? stream_ptr->stream_id() : 999999, pool_.worker_count());
             if (pool_.worker_count() == 0) {
                 pool_.start_pool();
             }

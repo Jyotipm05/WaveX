@@ -13,7 +13,7 @@ trigger: always_on
 - `status_text_` must synchronize with RFC reason phrases via `Codec::status_text_for(code)`.
 
 ## 3. Protocol Traits & 3-Seam Decoupling
-- `Server<Codec, Router>` must remain protocol-agnostic (never branch on `is_http2` in Server):
+- `Server<Codec, Router>` must remain protocol-agnostic (never branch on `is_http2` or `is_http3` in Server):
   - **Transport**: `handle_connection<Stream>` generic over `AsyncStream` (TCP, TLS, QUIC).
   - **Codec**: `parse_stream`, `serialize`, `result`.
   - **Policy**: `wavex::protos::protocol_traits<Codec>` for prefaces, keep-alive, headers, and ALPN.
@@ -45,10 +45,19 @@ trigger: always_on
 - When `Content-Length` is present, `buffer.size() - cursor < content_length` must yield `result::incomplete`.
 - Status `1xx`, `204`, and `304` have no body; finalize immediately with `body = ""`.
 
-## 9. Test Integrity
+## 9. HTTP/3 & QUIC Protocol Invariants
+- **Stream Demuxing (RFC 9000 §2.1 & RFC 9114 §6.2)**:
+  - `(sid & 0x03) == 0x00`: Client-initiated bidirectional stream -> Dispatched to `Server` / `HttpRouter` as HTTP/3 request stream.
+  - `(sid & 0x03) == 0x02`: Client-initiated unidirectional stream -> Drained/handled in background as peer Control or QPACK streams. **NEVER** treated as request streams and **NEVER** written to.
+  - `(sid & 0x03) == 0x03`: Server-initiated unidirectional stream -> Streams 3 (Control), 7 (QPACK encoder), 11 (QPACK decoder).
+- **Server Control & QPACK Streams**: Immediately upon TLS 1.3 handshake completion (`SSL_do_handshake == 1`) after emitting `HANDSHAKE_DONE`, server emits unidirectional Stream 3 (Type `0x00` VarInt followed by `SETTINGS` frame `0x04`), Stream 7 (`0x02` QPACK encoder), and Stream 11 (`0x03` QPACK decoder).
+- **Transport Parameter Lifetime**: `SSL_set_quic_tls_transport_params` does not copy its buffer. The backing `std::string` must remain alive across the entire connection lifecycle (`local_transport_params_` in `QuicConnection`).
+- **QPACK Prefix & Framing**: Outgoing HTTP/3 responses begin with a 2-byte QPACK prefix (`0x00 0x00`) followed by indexed static entries, wrapped in RFC 9000 VarInt frames (`HEADERS 0x01` + `DATA 0x00`), and terminated by QUIC stream FIN.
+
+## 10. Test Integrity
 - NEVER modify test assertions, expected output, or fixtures when debugging test failures without explicit user consent. Root causes must be fixed in framework implementations.
 
-## 10. Associated Rules
+## 11. Associated Rules
 - [toolchain-and-build.md](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/rules/toolchain-and-build.md) (Compilers, Winsock, CMake)
 - [class-struct-layout.md](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/rules/class-struct-layout.md) (Member packing & layout)
 - [asio-socket-lifecycle.md](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/rules/asio-socket-lifecycle.md) (Sockets, coroutines, buffers)

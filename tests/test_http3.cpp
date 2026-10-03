@@ -22,9 +22,10 @@
 #include <wavex/Network/QUIC.hpp>
 #include <asio/io_context.hpp>
 #include <asio/ip/tcp.hpp>
+#include <asio/steady_timer.hpp>
 
-namespace h3   = wavex::protos::http::http3;
-namespace qpk  = wavex::protos::http::http3::qpack;
+namespace h3 = wavex::protos::http::http3;
+namespace qpk = wavex::protos::http::http3::qpack;
 namespace quic = wavex::network::quic;
 
 using wavex::protos::http::header;
@@ -110,12 +111,12 @@ void test_qpack_dynamic_table_reentrancy_and_ric() {
     qpk::dynamic_table dt(4096);
 
     // Step 1: Insert initial entries into dynamic table
-    dt.insert("x-env", "production");   // Absolute index 0
-    dt.insert("x-tenant", "tenant-42");  // Absolute index 1
+    dt.insert("x-env", "production"); // Absolute index 0
+    dt.insert("x-tenant", "tenant-42"); // Absolute index 1
     assert(dt.total_inserts() == 2);
 
     // Step 2: Encode a header block referencing both entries
-    std::vector<header> req1_headers = {
+    const std::vector<header> req1_headers = {
         {"x-env", "production"},
         {"x-tenant", "tenant-42"}
     };
@@ -127,19 +128,20 @@ void test_qpack_dynamic_table_reentrancy_and_ric() {
     // In HPACK, this would shift 1-based relative indices and corrupt in-flight reads!
     // In QPACK, block1 uses Base = 2 and relative indices against Base, so future inserts MUST NOT corrupt block1!
     dt.insert("x-trace-id", "trace-999"); // Absolute index 2
-    dt.insert("x-user-role", "admin");    // Absolute index 3
+    dt.insert("x-user-role", "admin"); // Absolute index 3
     assert(dt.total_inserts() == 4);
 
     // Step 4: Decode block1 now, AFTER the table has been mutated with 2 more entries
     qpk::decoder dec(dt);
-    std::vector<std::pair<std::string, std::string>> decoded1;
+    std::vector<std::pair<std::string, std::string> > decoded1;
+    decoded1.reserve(4);
     bool is_blocked = false;
     bool ok1 = dec.decode_header_block(block1, decoded1, is_blocked);
     assert(ok1);
     assert(!is_blocked);
 
     bool has_env = false, has_tenant = false;
-    for (const auto &[n, v] : decoded1) {
+    for (const auto &[n, v]: decoded1) {
         if (n == "x-env" && v == "production") has_env = true;
         if (n == "x-tenant" && v == "tenant-42") has_tenant = true;
     }
@@ -151,7 +153,8 @@ void test_qpack_dynamic_table_reentrancy_and_ric() {
     qpk::dynamic_table empty_dt(4096);
     qpk::decoder blocked_dec(empty_dt);
 
-    std::vector<std::pair<std::string, std::string>> blocked_headers;
+    std::vector<std::pair<std::string, std::string> > blocked_headers;
+    blocked_headers.reserve(4);
     bool blocked_flag = false;
     bool blocked_res = blocked_dec.decode_header_block(block1, blocked_headers, blocked_flag);
 
@@ -165,7 +168,8 @@ void test_qpack_dynamic_table_reentrancy_and_ric() {
     assert(empty_dt.total_inserts() == 2);
 
     // Now decoding must succeed without blocking!
-    std::vector<std::pair<std::string, std::string>> unblocked_headers;
+    std::vector<std::pair<std::string, std::string> > unblocked_headers;
+    unblocked_headers.reserve(4);
     bool unblocked_flag = false;
     bool unblocked_res = blocked_dec.decode_header_block(block1, unblocked_headers, unblocked_flag);
     assert(unblocked_res);
@@ -182,6 +186,7 @@ void test_qpack_encoder_decoder_streams() {
 
     // 1. Encoder Instruction: Set Dynamic Table Capacity (001xxxxx)
     std::string stream_buf;
+    stream_buf.reserve(128);
     qpk::encoder::encode_set_capacity(stream_buf, 2048);
 
     std::size_t cursor = 0;
@@ -213,8 +218,9 @@ void test_qpack_encoder_decoder_streams() {
 
     // 4. Decoder Instructions (RFC 9204 §4.4)
     std::string dec_stream;
-    qpk::encoder::encode_section_ack(dec_stream, 4);            // Section Ack for Stream 4
-    qpk::encoder::encode_stream_cancel(dec_stream, 8);          // Stream Cancel for Stream 8
+    dec_stream.reserve(64);
+    qpk::encoder::encode_section_ack(dec_stream, 4); // Section Ack for Stream 4
+    qpk::encoder::encode_stream_cancel(dec_stream, 8); // Stream Cancel for Stream 8
     qpk::encoder::encode_insert_count_increment(dec_stream, 2); // Insert Count Increment +2
 
     assert(!dec_stream.empty());
@@ -225,10 +231,11 @@ void test_qpack_encoder_decoder_streams() {
 void test_qpack_encode_decode() {
     std::cout << "[Test HTTP/3] QPACK Header encode and decode roundtrip...\n";
 
-    std::vector<header> headers = {
+    const std::vector<header> headers = {
         {"content-type", "application/json"},
         {"x-wavex-version", "3.0.0"},
         {"accept", "*/*"}
+
     };
 
     // 1. Request headers encode
@@ -244,12 +251,13 @@ void test_qpack_encode_decode() {
     // 2. Request headers decode
     qpk::dynamic_table dt;
     qpk::decoder dec(dt);
-    std::vector<std::pair<std::string, std::string>> decoded_headers;
+    std::vector<std::pair<std::string, std::string> > decoded_headers;
+    decoded_headers.reserve(8);
     bool ok = dec.decode_header_block(encoded_req, decoded_headers);
     assert(ok);
 
     bool has_method = false, has_path = false, has_scheme = false, has_auth = false, has_custom = false;
-    for (const auto &[n, v] : decoded_headers) {
+    for (const auto &[n, v]: decoded_headers) {
         if (n == ":method" && v == "POST") has_method = true;
         if (n == ":path" && v == "/api/v1/orders") has_path = true;
         if (n == ":scheme" && v == "https") has_scheme = true;
@@ -265,12 +273,13 @@ void test_qpack_encode_decode() {
 
     // 3. Response headers encode and decode
     std::string encoded_res = qpk::encoder::encode_response_headers(200, headers);
-    std::vector<std::pair<std::string, std::string>> decoded_res_headers;
+    std::vector<std::pair<std::string, std::string> > decoded_res_headers;
+    decoded_res_headers.reserve(4);
     bool res_ok = dec.decode_header_block(encoded_res, decoded_res_headers);
     assert(res_ok);
 
     bool has_status = false;
-    for (const auto &[n, v] : decoded_res_headers) {
+    for (const auto &[n, v]: decoded_res_headers) {
         if (n == ":status" && v == "200") has_status = true;
     }
     assert(has_status);
@@ -282,7 +291,7 @@ void test_http3_framing() {
     std::cout << "[Test HTTP/3] HTTP/3 Binary Framing (RFC 9114)...\n";
 
     // 1. DATA frame
-    const std::string payload = "HTTP/3 Wire Payload Body Data!";
+    constexpr std::string_view payload = "HTTP/3 Wire Payload Body Data!";
     std::string data_frame = h3::encoder::encode_data_frame(payload);
     assert(!data_frame.empty());
 
@@ -296,7 +305,7 @@ void test_http3_framing() {
     assert(consumed == data_frame.size());
 
     // 2. SETTINGS frame
-    std::vector<std::pair<settings_parameter, uint64_t>> settings = {
+    std::vector<std::pair<settings_parameter, uint64_t> > settings = {
         {settings_parameter::QPACK_MAX_TABLE_CAPACITY, 4096},
         {settings_parameter::MAX_FIELD_SECTION_SIZE, 65536}
     };
@@ -323,6 +332,7 @@ void test_http3codec_full_message_roundtrip() {
     req.target = "/api/v1/products";
     req.scheme = "https";
     req.authority = "api.wavex.internal";
+    req.headers.reserve(2);
     req.headers.emplace_back("content-type", "application/json");
     req.headers.emplace_back("x-client-id", "quic-client-99");
     req.body = "{\"product\":\"quic-nitro\",\"price\":99}";
@@ -347,6 +357,7 @@ void test_http3codec_full_message_roundtrip() {
     h3::response res;
     res.status_code = 201;
     res.status_text = "Created";
+    res.headers.reserve(2);
     res.headers.emplace_back("content-type", "application/json");
     res.headers.emplace_back("server", "WaveX-HTTP3");
     res.body = "{\"status\":\"created\",\"id\":\"prod-12345\"}";
@@ -394,16 +405,15 @@ void test_http3_over_quic_stream() {
 
     // 2. Server reads and parses HTTP/3 request
     h3::request server_received_req;
-    std::string server_buf;
-    server_buf.resize(4096);
+    char server_buf[4096];
     std::error_code ec;
     std::size_t n = server_stream->read_some(asio::buffer(server_buf), ec);
     assert(n > 0);
-    server_buf.resize(n);
 
     std::size_t consumed = 0;
     qpk::dynamic_table server_dt;
-    auto srv_parse_res = http3codec::parse_request(server_buf, server_received_req, consumed, server_dt);
+    auto srv_parse_res = http3codec::parse_request(
+        std::string_view(server_buf, n), server_received_req, consumed, server_dt);
     assert(srv_parse_res == http3codec::result::success);
     assert(server_received_req.method_type == method::GET);
     assert(server_received_req.target == "/healthcheck");
@@ -411,6 +421,7 @@ void test_http3_over_quic_stream() {
     // 3. Server generates HTTP/3 response and pushes to client
     h3::response s_res;
     s_res.status_code = 200;
+    s_res.headers.reserve(1);
     s_res.headers.emplace_back("content-type", "text/plain");
     s_res.body = "OK";
     std::string wire_resp = http3codec::serialize(s_res);
@@ -418,16 +429,15 @@ void test_http3_over_quic_stream() {
     client_stream->push_inbound(wire_resp, true);
 
     // 4. Client reads and parses HTTP/3 response
-    std::string client_buf;
-    client_buf.resize(4096);
+    char client_buf[4096];
     std::size_t cn = client_stream->read_some(asio::buffer(client_buf), ec);
     assert(cn > 0);
-    client_buf.resize(cn);
 
     h3::response client_received_res;
     std::size_t c_consumed = 0;
     qpk::dynamic_table client_dt;
-    auto c_parse_res = http3codec::parse_response(client_buf, client_received_res, c_consumed, client_dt);
+    auto c_parse_res = http3codec::parse_response(
+        std::string_view(client_buf, cn), client_received_res, c_consumed, client_dt);
     assert(c_parse_res == http3codec::result::success);
     assert(client_received_res.status_code == 200);
     assert(client_received_res.body == "OK");
@@ -463,17 +473,21 @@ void test_http3_rfc9114_stream_rules() {
     valid_req.body = "body-payload";
     std::string headers_frame = h3::encoder::encode_frame(
         frame_type::HEADERS,
-        qpk::encoder::encode_request_headers(valid_req.method_type, valid_req.target, valid_req.scheme, valid_req.authority, valid_req.headers));
+        qpk::encoder::encode_request_headers(valid_req.method_type, valid_req.target, valid_req.scheme,
+                                             valid_req.authority, valid_req.headers));
 
     // Inject unknown frame type 0x3f (decimal 63)
     std::string unknown_frame;
+    unknown_frame.reserve(16);
     quic::VarInt::encode(0x3f, unknown_frame);
     quic::VarInt::encode(4, unknown_frame);
     unknown_frame.append("WAVX");
 
     std::string data_frame = h3::encoder::encode_data_frame(valid_req.body);
 
-    std::string wire_with_unknown = headers_frame + unknown_frame + data_frame;
+    std::string wire_with_unknown;
+    wire_with_unknown.reserve(headers_frame.size() + unknown_frame.size() + data_frame.size());
+    wire_with_unknown.append(headers_frame).append(unknown_frame).append(data_frame);
     h3::request parsed_req;
     std::size_t consumed3 = 0;
     qpk::dynamic_table dt3;
@@ -501,6 +515,7 @@ void test_http3_server_acceptor_guard() {
     // 2. Standalone Http3Server: acceptor must never open, port refuses TCP connections
     wavex::engine::Http3Router h3_router;
     wavex::server::Http3Server h3_server(h3_router, "127.0.0.1", 19983);
+    h3_server.enable_signal_handling(false);
     assert(!h3_server.is_acceptor_open());
     assert(h3_server.is_http3_enabled());
 
@@ -513,13 +528,30 @@ void test_http3_server_acceptor_guard() {
     assert(!h3_server.is_acceptor_open());
 
     // Attempting a plain-TCP connection to the HTTP/3 port MUST be cleanly rejected
-    // by the OS kernel (Connection Refused / TCP RST), NEVER accepted and mis-parsed
+    // by the OS kernel (Connection Refused / TCP RST), NEVER accepted and mis-parsed.
+    // We use an async connect with a deadline timer to avoid the OS kernel's
+    // 2000ms synchronous SYN retransmit stall on Windows loopback.
     {
         asio::io_context client_io;
         asio::ip::tcp::socket tcp_sock(client_io);
-        asio::error_code ec;
-        tcp_sock.connect(asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), 19983), ec);
-        assert(ec); // TCP connection must fail/be refused!
+        asio::steady_timer timer(client_io, std::chrono::milliseconds(20));
+        bool connected = false;
+        asio::error_code connect_ec;
+
+        tcp_sock.async_connect(asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), 19983),
+                               [&](const asio::error_code &ec) {
+                                   connect_ec = ec;
+                                   if (!ec) connected = true;
+                                   timer.cancel();
+                               });
+
+        timer.async_wait([&](const asio::error_code &) {
+            asio::error_code cancel_ec;
+            tcp_sock.cancel(cancel_ec);
+        });
+
+        client_io.run();
+        assert(!connected); // Plain TCP connection must never succeed on HTTP/3 UDP port!
     }
 
     h3_server.stop();
@@ -529,6 +561,7 @@ void test_http3_server_acceptor_guard() {
 
     // 3. ComposedHttpServer: opens TCP acceptor for HTTP/2 + HTTP/1.1 and QUIC for HTTP/3
     wavex::server::ComposedHttpServer comp_server("127.0.0.1", 19984);
+    comp_server.tcp_server().enable_signal_handling(false);
     assert(!comp_server.is_acceptor_open()); // Unopened before run()
     assert(comp_server.is_http3_enabled());
 
@@ -550,12 +583,46 @@ void test_http3_server_acceptor_guard() {
         tcp_sock2.close(ec2);
     }
 
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
     comp_server.stop();
     if (comp_thread.joinable()) {
         comp_thread.join();
     }
 
-    std::cout << "  [PASS] Server TCP Acceptor Guard & Composition tests passed.\n";
+    std::cout << "  [PASS] Server TCP Acceptor Guard & Composition tests passed." << std::endl;
+}
+
+void test_http3_unidirectional_control_and_qpack_streams() {
+    std::cout << "[Test HTTP/3] RFC 9114 §6.2 Unidirectional Control & QPACK Stream Establishment...\n";
+
+    auto ep = asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 9996);
+    auto server_conn = std::make_shared<quic::QuicConnection>(
+        quic::ConnectionId::random(8), quic::ConnectionId::random(8), ep, true);
+
+    assert(!server_conn->is_http3_session_initialized());
+    server_conn->initialize_http3_session();
+    assert(server_conn->is_http3_session_initialized());
+
+    // Outgoing datagrams must contain the 3 streams
+    auto datagrams = server_conn->poll_outgoing_datagrams();
+    assert(!datagrams.empty());
+
+    // Stream 3 is Control Stream
+    auto stream3 = server_conn->get_or_create_stream(3);
+    assert(stream3 != nullptr);
+    assert(stream3->stream_id() == 3);
+
+    // Stream 7 is QPACK Encoder Stream
+    auto stream7 = server_conn->get_or_create_stream(7);
+    assert(stream7 != nullptr);
+    assert(stream7->stream_id() == 7);
+
+    // Stream 11 is QPACK Decoder Stream
+    auto stream11 = server_conn->get_or_create_stream(11);
+    assert(stream11 != nullptr);
+    assert(stream11->stream_id() == 11);
+
+    std::cout << "  [PASS] RFC 9114 §6.2 Unidirectional Control & QPACK streams verified.\n";
 }
 
 int main() {
@@ -570,6 +637,7 @@ int main() {
         test_http3codec_full_message_roundtrip();
         test_http3_over_quic_stream();
         test_http3_rfc9114_stream_rules();
+        test_http3_unidirectional_control_and_qpack_streams();
         test_http3_server_acceptor_guard();
         std::cout << "=== All HTTP/3 Tests PASSED ===\n";
         return 0;

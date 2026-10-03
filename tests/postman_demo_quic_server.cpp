@@ -76,12 +76,26 @@ asio::awaitable<void> handle_quic_stream(std::shared_ptr<quic::basic_quic_socket
                 break;
             }
 
-            const std::string_view req(buffer.data(), n);
-            std::cout << "[QUIC-STREAM] Received " << n << " bytes: " << req.substr(0, std::min(n, std::size_t{80})) << std::endl;
+            const std::string_view req_data(buffer.data(), n);
+            std::cout << "[QUIC-STREAM] Received " << n << " bytes on stream" << std::endl;
 
-            // Send back greeting / echo response
-            const std::string resp = "HTTP/3 200 OK\r\nserver: WaveX-QUIC\r\ncontent-type: text/plain\r\ncontent-length: 33\r\n\r\nHello from WaveX QUIC Transport! 🚀";
-            auto [write_ec, written] = co_await asio::async_write(*sock, asio::buffer(resp), asio::as_tuple(asio::use_awaitable));
+            // Parse incoming HTTP/3 request if valid
+            wavex::protos::http::http3::request req;
+            std::size_t consumed = 0;
+            const auto p_res = wavex::protos::http::http3codec::parse_request(req_data, req, consumed);
+            if (p_res == wavex::protos::http::http3codec::result::success) {
+                std::cout << "[QUIC-STREAM] HTTP/3 Request: " << to_string(req.method_type) << " " << req.target << std::endl;
+            }
+
+            // Formulate RFC 9114 & RFC 9204 compliant HTTP/3 response
+            wavex::protos::http::http3::response resp;
+            resp.status_code = 200;
+            resp.headers.emplace_back("content-type", "text/plain; charset=utf-8");
+            resp.headers.emplace_back("server", "WaveX-QUIC");
+            resp.body = "Hello from WaveX QUIC Transport! 🚀";
+
+            const std::string wire_resp = wavex::protos::http::http3codec::serialize(resp);
+            auto [write_ec, written] = co_await asio::async_write(*sock, asio::buffer(wire_resp), asio::as_tuple(asio::use_awaitable));
             if (write_ec) {
                 std::cout << "[QUIC-STREAM] Write error: " << write_ec.message() << std::endl;
                 break;

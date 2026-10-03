@@ -15,7 +15,8 @@ WaveX draws inspiration from **Rust's Actix Web** (hybrid radix-tree routing), *
 
 - **⚡ Coroutine-Native Engine** — Async server handlers and client requests written with asio C++23 coroutines (`co_await`, `asio::awaitable<void>`), zero callback boilerplate.
 - **⚡ Native HTTP/2 (RFC 7540) & HPACK (RFC 7541)** — Full binary framing engine (`http2codec`), connection preface validation (`PRI * HTTP/2.0...`), client/server `SETTINGS` negotiation & ACK handshake, server-side ALPN selection (`h2` over TLS 1.3), stream multiplexing, and HPACK static/dynamic table compression.
-- **⚡ 3-Seam Decoupled Server Architecture** — Completely protocol-agnostic `Server<Codec, Router>` template decoupled across three distinct seams: Transport Seam (`AsyncStream` over Plain TCP, TLS 1.3, or future QUIC), Codec Seam (`parse_stream`/`serialize`), and Policy Seam (`wavex::protos::protocol_traits<Codec>`) governing prefaces, keep-alive, response preparation, and ALPN negotiation.
+- **⚡ Native HTTP/3 (RFC 9114, RFC 9204) & QUIC (RFC 9000, RFC 9001)** — Full binary framing engine (`http3codec`) with QPACK header compression (RFC 9204), native UDP QUIC transport engine (`wavex::network::quic`), BoringSSL/OpenSSL TLS 1.3 QUIC method integration, server-initiated unidirectional Control (Stream 3 with `SETTINGS` frame `0x04`) and QPACK encoder/decoder streams (Streams 7 and 11), stream demuxing, VarInt frame serialization, and zero-overhead `AsyncStream` concept integration.
+- **⚡ 3-Seam Decoupled Server Architecture** — Completely protocol-agnostic `Server<Codec, Router>` template decoupled across three distinct seams: Transport Seam (`AsyncStream` over Plain TCP, TLS 1.3, or native QUIC UDP), Codec Seam (`parse_stream`/`serialize`), and Policy Seam (`wavex::protos::protocol_traits<Codec>`) governing prefaces, keep-alive, response preparation, and ALPN negotiation.
 - **⚡ C++23 "Deducing This" Static Pipelines** — Zero-overhead static dispatch mixin (`wavex::Chainable`) enabling compile-time tuple pipelines (`wavex::StaticChain`), `make_chain` factory, and semi-static runtime toggles (`ConditionalChainable`), eliminating vtable and dynamic `std::function` heap allocation overhead.
 - **⚡ CRTP Zero-Vtable Architecture** — Static compile-time polymorphism (`Request<Derived>`, `Response<Derived>`) eliminating virtual function pointers (`vptr`), saving memory and enabling zero-overhead direct dispatch.
 - **🚀 Express.js-Style Linear Pipeline** — Iterative, non-recursive `run_chain()` middleware runner with immediate response dispatch (`res.send()` / `res.json()`), type-erased write sinks for transport-agnostic streaming (`start_chunked()`, `send_file()`), and short-circuit commitment tracking.
@@ -28,7 +29,7 @@ WaveX draws inspiration from **Rust's Actix Web** (hybrid radix-tree routing), *
 - **🛡️ Request Body Size Limits & 413 Protection** — Configurable payload ceilings on `Server` (`max_request_size`, `max_memory_buffer`) and dedicated middleware (`wavex::base::body_limit`) immediately returning HTTP 413 Payload Too Large on oversized bodies.
 - **🗂 MIME Type Detection Engine** — Fast, built-in file extension to MIME content-type resolver (`MimeTypes.hpp`) supporting over 50+ common web media types.
 - **🛠 Modern CLI Engine** — High-performance CLI argument parser (`wavex::cli::CliParser`) supporting flags (`--verbose`, `-v`), key-value options (`--host`, `-p`), positional arguments, typed getters (`get_int`, `get_bool`), and automatic `--help` generation.
-- **🔒 TLS 1.3 OpenSSL Encryption Engine** — Strict, native TLS 1.3 server encryption (`enable_tls()`, `wavex::server::TlsConfig`) supporting custom PEM certificate chains (`cert_file`), private key passphrases (`key_password`), DH parameters (`dh_file`), ALPN protocol negotiation (`http/1.1`, `h2`), and strict legacy SSL/TLS protocol disabling (`force_tls13`).
+- **🔒 TLS 1.3 OpenSSL Encryption Engine** — Strict, native TLS 1.3 server encryption (`enable_tls()`, `wavex::server::TlsConfig`) supporting custom PEM certificate chains (`cert_file`), private key passphrases (`key_password`), DH parameters (`dh_file`), ALPN protocol negotiation (`http/1.1`, `h2`, `h3`), and strict legacy SSL/TLS protocol disabling (`force_tls13`).
 - **🔄 HTTP Stay-Active & Inactivity Timeout (RFC 7230 / RFC 9112)** — Full persistent connection support over Plain TCP and TLS 1.3 streams. Handles HTTP pipelining without socket re-establishment, manages inactivity timeouts (`set_keep_alive_timeout`) via asio steady timers, enforces maximum request thresholds (`set_max_keep_alive_requests`), and includes zero-cost compile-time policies (`KeepAlivePolicy`) and middlewares (`keep_alive`, `sse_stay_active`).
 - **🚫 Configurable 404 Not Found Engine** — Default `"Not Found"` string response with full customization support across Router and Server: custom text, HTML/JSON bodies with automatic MIME types, static error pages loaded from disk (`not_found_page`), or custom coroutine handlers.
 - **🧵 Tokio-Style Work-Stealing Dual-Queue Runtime** —
@@ -41,7 +42,7 @@ WaveX draws inspiration from **Rust's Actix Web** (hybrid radix-tree routing), *
 - **🛡 Pipeline Short-Circuiting** — Middleware rejection (e.g. `401 Unauthorized`) immediately sends the response while skipping downstream middlewares and route handlers.
 - **⚡ Zero-Fragmentation Memory & Contiguous Containers** — Contiguous `FlatMap<K, V, 16>` stores `req.params`, `req.query`, and `res.headers_` directly inside cache-line-aligned inline arrays with zero heap allocations on the hot request path. Memory management is complemented by a three-tier bump allocator (`RequestArena`) backed by a 4KB inline buffer and thread-local slab pools. Socket acceptance configures `TCP_NODELAY` immediately to prevent delayed-ACK penalties, and connection handling utilizes an offset cursor (`stream_buf_consumed`) to amortize buffer compaction.
 - **🛑 Production Graceful Shutdown & Generic Pub-Sub Event System** — Clean connection draining with deadline timeouts (`server.exit()`, `server.shutdown()`), automatic `SIGINT`/`SIGTERM` interception, OS signal handler restoration (`SIG_DFL`), proactive keep-alive cancellation, automatic `Connection: close` stamping, worker-thread deadlock immunity, complete server restartability (`server.run()` unblocks without `std::exit`), and a zero-overhead generic C++23 pub-sub event bus (`wavex::base::Event`, `EventBus`, `ShutdownEvent`).
-- **🧪 Interactive Postman Dev Servers** — Pre-configured CLI-driven testing servers for HTTP/1.1 ([tests/postman_demo_http1_server.cpp](tests/postman_demo_http1_server.cpp)), HTTP/2 ([tests/postman_demo_http2_server.cpp](tests/postman_demo_http2_server.cpp)), and HTTP/3 ([tests/postman_demo_http3_server.cpp](tests/postman_demo_http3_server.cpp)) supporting plain and TLS 1.3 modes via WaveX's built-in CLI parser.
+- **🧪 Interactive Postman Dev Servers** — Pre-configured CLI-driven testing servers for HTTP/1.1 ([tests/postman_demo_http1_server.cpp](tests/postman_demo_http1_server.cpp)), HTTP/2 ([tests/postman_demo_http2_server.cpp](tests/postman_demo_http2_server.cpp)), HTTP/3 ([tests/postman_demo_http3_server.cpp](tests/postman_demo_http3_server.cpp)), and RFC 9000 QUIC ([tests/postman_demo_quic_server.cpp](tests/postman_demo_quic_server.cpp)) supporting plain, TLS 1.3, and LAN modes via WaveX's built-in CLI parser.
 
 ---
 
@@ -140,7 +141,39 @@ int main() {
 }
 ```
 
-### 4. Full HTTP Server & Coroutine Middleware
+### 4. HTTP/3 Server over QUIC (RFC 9114 / RFC 9000)
+
+WaveX delivers native HTTP/3 server support via `Http3Server` and `Http3Router`, running over UDP-based QUIC with TLS 1.3 encryption and QPACK header compression:
+
+```c++
+#include <wavex/wavex.hpp>
+#include <wavex/protos/http/http3codec.hpp>
+
+int main() {
+    auto &router = wavex::engine::Http3Router::instance();
+
+    // Stream-aware HTTP/3 JSON endpoint
+    router.get("/api/h3", [](auto &req, auto &res) -> asio::awaitable<void> {
+        res.status(200).json({
+            {"protocol", "HTTP/3"},
+            {"transport", "QUIC (RFC 9000)"},
+            {"framework", "WaveX"}
+        });
+        co_return;
+    });
+
+    // Run HTTP/3 over QUIC on UDP port 8445 with TLS 1.3
+    wavex::server::Http3Server server(router, "127.0.0.1", 8445);
+    server.enable_tls("ssl/test.crt", "ssl/test.key");
+
+    wavex::log::info("WaveX HTTP/3 server running on https://127.0.0.1:8445");
+    server.run();
+
+    return 0;
+}
+```
+
+### 5. Full HTTP Server & Coroutine Middleware
 
 ```c++
 #include <iostream>
@@ -193,7 +226,7 @@ int main() {
 }
 ```
 
-### 5. Modern Logging with Source Location & ANSI Colors
+### 6. Modern Logging with Source Location & ANSI Colors
 
 Zero-macro, high-performance logging with automatic `std::source_location` call-site capture and ANSI terminal colors:
 
@@ -221,7 +254,7 @@ int main() {
 }
 ```
 
-### 6. C++23 "Deducing This" Static Pipelines (`class Chainable`)
+### 7. C++23 "Deducing This" Static Pipelines (`class Chainable`)
 
 Build compile-time static dispatch pipelines without vtables or dynamic heap allocations using `StaticChain` and `make_chain`:
 
@@ -267,7 +300,7 @@ int main() {
 }
 ```
 
-### 7. Dual-Protocol Coroutine HTTP Client (HTTP/1.1 & HTTP/2)
+### 8. Dual-Protocol Coroutine HTTP Client (HTTP/1.1 & HTTP/2)
 
 WaveX provides a protocol-agnostic, coroutine-native HTTP client (`HttpClient`) supporting ALPN auto-negotiation, cleartext `h2c`, TLS 1.3 `h2`, domainless IPv4/IPv6 endpoints, query parameter builders, and multi-payload posting:
 
@@ -307,7 +340,7 @@ asio::awaitable<void> run_client_examples() {
 }
 ```
 
-### 8. Command-Line Interface (CLI) Engine
+### 9. Command-Line Interface (CLI) Engine
 
 ```c++
 #include <wavex/Cli/Cli.hpp>
@@ -339,7 +372,7 @@ int main(int argc, char* argv[]) {
 }
 ```
 
-### 9. TLS 1.3 Server Encryption (`TlsConfig`)
+### 10. TLS 1.3 Server Encryption (`TlsConfig`)
 
 Enable strict TLS 1.3 HTTPS server encryption using `server.enable_tls()` with custom certificate/key paths or a `wavex::server::TlsConfig` struct:
 
@@ -376,7 +409,7 @@ int main() {
 }
 ```
 
-### 10. HTTP Stay-Active (Keep-Alive) & Inactivity Timeout
+### 11. HTTP Stay-Active (Keep-Alive) & Inactivity Timeout
 
 WaveX natively supports RFC 7230 / RFC 9112 persistent connections (`Keep-Alive`) and HTTP pipelining for both Plain TCP and TLS 1.3 servers.
 
@@ -431,7 +464,7 @@ router.get("/api/data", {wavex::base::keep_alive(10, 500)}, DataHandler);
 router.get("/events", {wavex::base::sse_stay_active()}, SseHandler);
 ```
 
-### 11. Configurable 404 Not Found Handling
+### 12. Configurable 404 Not Found Handling
 
 By default, any unmatched route automatically responds with HTTP status 404 and the plain text `"Not Found"`. Developers can easily customize 404 handling across both `HttpRouter` and `Server`:
 
@@ -469,7 +502,7 @@ router.not_found([](auto &req, auto &res) -> asio::awaitable<void> {
 });
 ```
 
-### 12. C++23 Modules Quick Start
+### 13. C++23 Modules Quick Start
 
 WaveX fully supports C++23 module imports for ultra-fast compilation:
 
@@ -483,7 +516,7 @@ int main() {
 }
 ```
 
-### 13. Fluent HTTP Redirections
+### 14. Fluent HTTP Redirections
 
 Express- and Fastify-compatible redirections with zero boilerplate:
 
@@ -523,7 +556,7 @@ int main() {
 }
 ```
 
-### 14. Multipart/Form-Data & File Upload Handling (RFC 7578)
+### 15. Multipart/Form-Data & File Upload Handling (RFC 7578)
 
 Parse uploaded files and form fields with transparent in-memory and disk spooling thresholds:
 
@@ -573,7 +606,7 @@ int main() {
 }
 ```
 
-### 15. Client File Uploads & Payload Compression
+### 16. Client File Uploads & Payload Compression
 
 Compose multipart files, compress client payloads, and save binary responses to disk:
 
@@ -606,7 +639,7 @@ asio::awaitable<void> upload_file() {
 }
 ```
 
-### 16. Heavy Request Offloading & Async File I/O (`spawn_blocking` & `wavex::fs`)
+### 17. Heavy Request Offloading & Async File I/O (`spawn_blocking` & `wavex::fs`)
 
 To keep low-latency network I/O threads from starving when handling CPU-intensive operations (cryptography, image manipulation, heavy math) or blocking legacy libraries (synchronous SQLite, `<fstream>`), WaveX provides Tokio-equivalent asynchronous offloading:
 
@@ -637,7 +670,7 @@ router.get("/api/file", [](auto &, auto &res) -> asio::awaitable<void> {
 });
 ```
 
-### 17. Safe Structured Queries (`QUERY` Method) & Postman Dev Servers
+### 18. Safe Structured Queries (`QUERY` Method) & Postman Dev Servers
 
 WaveX natively supports the RFC 9110 HTTP `QUERY` method (safe structured queries carrying a request payload), in addition to standard `GET`, `POST`, `PUT`, `DELETE`, and `PATCH`.
 
@@ -739,7 +772,7 @@ curl -k --http2 -X POST https://127.0.0.1:8444/api/query \
      -d '{"domain": "google.com"}'
 ```
 
-### 18. Zero-Fragmentation Memory Architecture (Arena, FlatMap & string_view Safety Contract)
+### 19. Zero-Fragmentation Memory Architecture (Arena, FlatMap & string_view Safety Contract)
 
 WaveX delivers zero-allocation request handling in the hot path using a three-tier memory architecture and contiguous data structures:
 
@@ -793,7 +826,7 @@ router.get("/users/:id", [](auto &req, auto &res) -> asio::awaitable<void> {
 });
 ```
 
-### 19. Production Graceful Shutdown & Generic Event System
+### 20. Production Graceful Shutdown & Generic Event System
 
 WaveX provides enterprise-grade graceful termination that ensures zero dropped in-flight requests during server updates, container lifecycle events (Kubernetes `SIGTERM`), or developer-triggered remote maintenance.
 
@@ -884,105 +917,143 @@ server.run();  // Cycle 2: re-opens acceptor and thread pool cleanly
 ## Architecture
 
 ```mermaid
-graph LR
-    subgraph "Base (protocol-agnostic)"
-        Logger["Logger<br/><small>TRACE..FATAL</small>"]
-        Uri["Uri / Url<br/><small>RFC 3986</small>"]
-        Mime["MimeTypes<br/><small>file ext -> Content-Type</small>"]
-        Chainable["Chainable / StaticChain<br/><small>C++23 static dispatch</small>"]
-        FlatMap["FlatMap<br/><small>inline array KV, case-insensitive</small>"]
-        Memory["RequestArena<br/><small>4KB inline bump allocator</small>"]
-        Req["Request<br/><small>abstract (FlatMap params/query)</small>"]
-        Res["Response<br/><small>fluent API (FlatMap headers)</small>"]
-        MW["Middleware<br/><small>linear chain + next()</small>"]
+flowchart TB
+
+%% -------------------------------------------------------------
+%% TIER 1: Foundations & Utilities
+%% -------------------------------------------------------------
+  subgraph CLI ["CLI"]
+    CLIApp["Cli::CliParser<br/><small>options, flags & positionals</small>"]
+  end
+
+  subgraph Base ["Base (protocol-agnostic)"]
+    direction TB
+    subgraph BaseTypes ["Primitives & Memory"]
+      direction TB
+      Logger["Logger<br/><small>TRACE..FATAL</small>"]
+      Uri["Uri / Url<br/><small>RFC 3986</small>"]
+      Mime["MimeTypes<br/><small>file ext -> Content-Type</small>"]
+      FlatMap["FlatMap<br/><small>inline array KV, case-insensitive</small>"]
+      Memory["RequestArena<br/><small>4KB inline bump allocator</small>"]
     end
 
-    subgraph "Engine"
-        Router["Router&lt;Proto&gt;<br/><small>radix tree + RE2</small>"]
-        Http1Router["Http1Router<br/><small>HTTP/1.1 routes</small>"]
-        Http2Router["Http2Router<br/><small>HTTP/2 routes</small>"]
-        Router --> Http1Router
-        Router --> Http2Router
+    subgraph BasePipeline ["Contracts & Pipeline"]
+      direction TB
+      Req["Request<br/><small>abstract (FlatMap params/query)</small>"]
+      Res["Response<br/><small>fluent API (FlatMap headers)</small>"]
+      Chainable["Chainable / StaticChain<br/><small>C++23 static dispatch</small>"]
+      MW["Middleware<br/><small>linear chain + next()</small>"]
+    end
+  end
+
+  subgraph Utils ["Utils"]
+    direction TB
+    TempFile["TempFileGuard<br/><small>RAII temp file</small>"]
+    Multipart["MultipartFormData<br/><small>RFC 7578 + disk spooler</small>"]
+    Compression["Compressor<br/><small>Gzip / Deflate</small>"]
+    AsyncFs["AsyncFs (wavex::fs)<br/><small>read_file / write_file</small>"]
+  end
+
+%% Force Tier 1 to align horizontally instead of stretching down
+  CLI ~~~ Base ~~~ Utils
+
+%% -------------------------------------------------------------
+%% TIER 2: Routing, Networking & Async Execution
+%% -------------------------------------------------------------
+  subgraph Engine ["Engine"]
+    Router["Router&lt;Proto&gt;<br/><small>radix tree + RE2</small>"]
+    Http1Router["Http1Router<br/><small>HTTP/1.1 routes</small>"]
+    Http2Router["Http2Router<br/><small>HTTP/2 routes</small>"]
+    Http3Router["Http3Router<br/><small>HTTP/3 routes</small>"]
+    Router --> Http1Router & Http2Router & Http3Router
+  end
+
+  subgraph Protos ["Protos & Networking"]
+    direction TB
+    subgraph Codecs ["Codecs & Transport"]
+      direction TB
+      H1Codec["http1codec<br/><small>chunked + zero-copy</small>"]
+      H2Codec["http2codec<br/><small>RFC 7540 + HPACK RFC 7541</small>"]
+      H3Codec["http3codec<br/><small>RFC 9114 + QPACK RFC 9204</small>"]
+      Quic["QuicStream / QUIC<br/><small>RFC 9000 & 9001 UDP engine</small>"]
     end
 
-    subgraph "Tokio Dual-Queue Runtime"
-        LocalQ["LocalQueue<br/><small>256-slot lock-free ring</small>"]
-        InjQ["InjectorQueue<br/><small>global MPMC overflow</small>"]
-        Pool["ThreadPool<br/><small>hysteresis scaling</small>"]
-        Server["Server&lt;Codec, Router&gt;<br/><small>Http1Server / Http2Server</small>"]
-        LocalQ --> Pool
-        InjQ --> Pool
-        Pool --> Server
+    subgraph ProtoIO ["Messages & Client"]
+      direction TB
+      HReq["HttpRequest<br/><small>Http1Request / Http2Request / Http3Request</small>"]
+      HRes["HttpResponse<br/><small>Http1Response / Http2Response / Http3Response</small>"]
+      Client["HttpClient<br/><small>async coroutine client</small>"]
     end
+  end
 
-    subgraph "Async & Blocking Offloading"
-        BlockingPool["BlockingThreadPool<br/><small>elastic 2..128 ring queue</small>"]
-        SpawnBlocking["wavex::spawn_blocking<br/><small>C++23 coroutine awaitable</small>"]
-        SpawnBlocking --> BlockingPool
-    end
+  subgraph Offload ["Async & Blocking Offloading"]
+    SpawnBlocking["wavex::spawn_blocking<br/><small>C++23 coroutine awaitable</small>"]
+    BlockingPool["BlockingThreadPool<br/><small>elastic 2..128 ring queue</small>"]
+    SpawnBlocking --> BlockingPool
+  end
 
-    subgraph "Protos & Networking"
-        H1Codec["http1codec<br/><small>chunked + zero-copy</small>"]
-        H2Codec["http2codec<br/><small>RFC 7540 + HPACK RFC 7541</small>"]
-        HReq["HttpRequest<br/><small>Http1Request / Http2Request</small>"]
-        HRes["HttpResponse<br/><small>Http1Response / Http2Response</small>"]
-        Client["HttpClient<br/><small>async coroutine client</small>"]
-        HReq --> Server
-        HRes --> Server
-    end
+%% Force Tier 2 to align horizontally instead of stretching down
+  Engine ~~~ Protos ~~~ Offload
 
-    subgraph "Utils"
-        Multipart["MultipartFormData<br/><small>RFC 7578 + disk spooler</small>"]
-        Compression["Compressor<br/><small>Gzip / Deflate</small>"]
-        TempFile["TempFileGuard<br/><small>RAII temp file</small>"]
-        AsyncFs["AsyncFs (wavex::fs)<br/><small>read_file / write_file</small>"]
-        AsyncFs --> SpawnBlocking
-    end
+%% Prevent Tier 1 and Tier 2 from breaking outward
+  Base ~~~ Engine
 
-    subgraph "CLI"
-        CLIApp["Cli::CliParser<br/><small>options, flags & positionals</small>"]
-    end
+%% -------------------------------------------------------------
+%% TIER 3: Runtime & Server Core
+%% -------------------------------------------------------------
+  subgraph Runtime ["Tokio Dual-Queue Runtime"]
+    LocalQ["LocalQueue<br/><small>256-slot lock-free ring</small>"]
+    InjQ["InjectorQueue<br/><small>global MPMC overflow</small>"]
+    Pool["ThreadPool<br/><small>hysteresis scaling</small>"]
+    Server["Server&lt;Codec, Router&gt;<br/><small>Http1Server / Http2Server / Http3Server</small>"]
+    LocalQ & InjQ --> Pool
+    Pool --> Server
+  end
 
-    Req --> HReq
-    Res --> HRes
-    Multipart --> HReq
-    Multipart --> Client
-    Compression --> HReq
-    Compression --> Client
-    Chainable --> Http1Router
-    Chainable --> Http2Router
-    Http1Router --> Server
-    Http2Router --> Server
-    MW --> Server
-    H1Codec --> Server
-    H2Codec --> Server
-    H1Codec --> Client
+%% -------------------------------------------------------------
+%% Inter-tier Connections
+%% -------------------------------------------------------------
+  Req -.-> HReq
+  Res -.-> HRes
+  Chainable -.-> Http1Router & Http2Router & Http3Router
+  MW --> Server
 
-    style Logger fill:#2d6a4f,color:#fff
-    style Uri fill:#2d6a4f,color:#fff
-    style Mime fill:#2d6a4f,color:#fff
-    style Chainable fill:#2d6a4f,color:#fff
-    style FlatMap fill:#2d6a4f,color:#fff
-    style Memory fill:#2d6a4f,color:#fff
-    style Req fill:#2d6a4f,color:#fff
-    style Res fill:#2d6a4f,color:#fff
-    style MW fill:#2d6a4f,color:#fff
-    style Router fill:#1b4332,color:#fff
-    style Http1Router fill:#1b4332,color:#fff
-    style Http2Router fill:#1b4332,color:#fff
-    style H1Codec fill:#40916c,color:#fff
-    style H2Codec fill:#40916c,color:#fff
-    style HReq fill:#40916c,color:#fff
-    style HRes fill:#40916c,color:#fff
-    style Client fill:#40916c,color:#fff
-    style CLIApp fill:#2d6a4f,color:#fff
-    style Server fill:#52b788,color:#000
-    style LocalQ fill:#1b4332,color:#fff
-    style InjQ fill:#1b4332,color:#fff
-    style Pool fill:#52b788,color:#000
-    style BlockingPool fill:#2d6a4f,color:#fff
-    style SpawnBlocking fill:#40916c,color:#fff
-    style AsyncFs fill:#2d6a4f,color:#fff
+  AsyncFs --> SpawnBlocking
+  Multipart & Compression -.-> HReq & Client
+
+  H1Codec --> Client
+
+  Http1Router & Http2Router & Http3Router --> Server
+  H1Codec & H2Codec & H3Codec & Quic --> Server
+  HReq & HRes --> Server
+
+%% -------------------------------------------------------------
+%% Classes & Theming
+%% -------------------------------------------------------------
+  classDef base fill:#2d6a4f,color:#fff,stroke:#1b4332;
+  classDef engine fill:#1b4332,color:#fff,stroke:#081c15;
+  classDef proto fill:#40916c,color:#fff,stroke:#2d6a4f;
+  classDef runtime fill:#52b788,color:#000,stroke:#1b4332;
+
+  class Logger,Uri,Mime,Chainable,FlatMap,Memory,Req,Res,MW,BlockingPool,AsyncFs,Multipart,Compression,TempFile,CLIApp base;
+  class Router,Http1Router,Http2Router,Http3Router,LocalQ,InjQ engine;
+  class H1Codec,H2Codec,H3Codec,Quic,HReq,HRes,Client,SpawnBlocking proto;
+  class Server,Pool runtime;
+
+%% -------------------------------------------------------------
+%% Link Styles (Line Colors)
+%% -------------------------------------------------------------
+%% Abstract mappings (Req -> HReq, Res -> HRes) colored in bright green
+  linkStyle 10 stroke:#52b788,stroke-width:2px;
+  linkStyle 11 stroke:#52b788,stroke-width:2px;
+
+%% Final routes and codecs merging into Server colored in solid blue
+  linkStyle 16 stroke:#2563eb,stroke-width:2px;
+  linkStyle 17 stroke:#2563eb,stroke-width:2px;
+  linkStyle 18 stroke:#2563eb,stroke-width:2px;
+  linkStyle 19 stroke:#2563eb,stroke-width:2px;
+  linkStyle 20 stroke:#2563eb,stroke-width:2px;
+
 ```
 
 ### Request Lifecycle (UML Activity Diagram)
@@ -990,92 +1061,131 @@ graph LR
 The following UML activity diagram illustrates the end-to-end lifecycle of an HTTP connection in WaveX — from initial TCP/TLS acceptance, asio coroutine scheduling, and zero-copy `http1codec` parsing, through radix-tree route resolution, middleware chain execution, short-circuit dispatch, configurable 404 fallback, and persistent Keep-Alive evaluation:
 
 ```mermaid
-flowchart TD
-    %% UML Activity Diagram - Request Lifecycle
-    Start([&#9679 Connection Accepted]) --> InitSession[Initialize Connection Session & Arm Inactivity Timer]
-    
-    InitSession --> AwaitData[Wait for Incoming Data / async_read_some]
-    
-    AwaitData --> ReadCheck{"Data Received or Inactivity Timeout?"}
-    ReadCheck -- "Inactivity Timeout / Client EOF" --> CloseSocket[Gracefully Close Socket]
-    CloseSocket --> Terminate([&#9679 End Session])
-    
-    ReadCheck -- "Data Received" --> ParseCodec[Parse HTTP Request via http1codec]
-    ParseCodec --> SyntaxCheck{"Valid HTTP Framing?"}
-    SyntaxCheck -- "Malformed Request" --> Send400[Send 400 Bad Request]
-    Send400 --> CloseSocket
-    
-    SyntaxCheck -- "Valid Request" --> ResetTimer[Refresh Inactivity Timer]
-    ResetTimer --> RouteLookup[Radix-Tree Route Lookup in HttpRouter]
-    
-    RouteLookup --> RouteCheck{"Route Matched?"}
-    
-    %% Unmatched route -> Configurable 404
-    RouteCheck -- "No (Unmatched)" --> Exec404[Execute Configured 404 Handler<br/>Custom Coroutine / Static File / Default Text]
-    Exec404 --> SendResponse[Serialize & Dispatch HTTP Response]
-    
-    %% Matched route -> Middleware & Handler
-    RouteCheck -- "Yes" --> ExtractParams[Extract Dynamic Params :id & Wildcards]
-    ExtractParams --> ExecMW[Execute Middleware Chain / StaticChain]
-    
-    ExecMW --> ShortCircuitCheck{"Middleware Short-Circuited?<br/>(e.g., Auth Guard, Rate Limit, Cache)"}
-    ShortCircuitCheck -- "Yes (Response Already Sent)" --> SendResponse
-    ShortCircuitCheck -- "No (next() Called)" --> ExecHandler[Execute Target Route Handler]
-    ExecHandler --> SendResponse
-    
-    SendResponse --> CheckPersistence{"Evaluate Persistence Policy:<br/>- HTTP/1.1 Keep-Alive requested<br/>- requests_served < max_requests<br/>- Inactivity timeout active<br/>- Connection != 'close'"}
-    
-    CheckPersistence -- "Keep-Alive Active" --> IncRequests[Increment Requests Served Count]
-    IncRequests --> AwaitData
-    
-    CheckPersistence -- "Close / Quota Exceeded" --> CheckTLS{"Is TLS 1.3 Active?"}
-    CheckTLS -- "Yes" --> TLSShutdown[Perform TLS Stream Shutdown]
-    CheckTLS -- "No" --> CloseSocket
-    TLSShutdown --> CloseSocket
+%%{ init: { 'theme': 'base', 'themeVariables': { 'actorTextColor': '#000000', 'noteTextColor': '#000000', 'loopTextColor': '#000000', 'altTextColor': '#000000', 'sectionTextColor': '#000000' } } }%%
+sequenceDiagram
+  autonumber
+  actor Client
+  participant Session as Connection Session
+  participant Timer as Inactivity Timer
+  participant Codec as http1codec
+  participant Router as HttpRouter (Radix Tree)
+  participant MW as Middleware (StaticChain)
+  participant Handler as Route / 404 Handler
+  participant TLS as TLS Engine
 
-    %% Styling
-    classDef action fill:#2d6a4f,stroke:#1b4332,stroke-width:2px,color:#fff;
-    classDef decision fill:#1b4332,stroke:#40916c,stroke-width:2px,color:#fff;
-    classDef terminal fill:#081c15,stroke:#52b788,stroke-width:3px,color:#fff;
-    
-    class InitSession,AwaitData,ParseCodec,Send400,ResetTimer,RouteLookup,Exec404,ExtractParams,ExecMW,ExecHandler,SendResponse,IncRequests,TLSShutdown,CloseSocket action;
-    class ReadCheck,SyntaxCheck,RouteCheck,ShortCircuitCheck,CheckPersistence,CheckTLS decision;
-    class Start,Terminate terminal;
+  Note over Client, Session: Connection Accepted
+  Session ->> Timer: Arm Inactivity Timer
+
+  rect rgb(255, 251, 204)
+    loop Request Lifecycle (Keep-Alive Loop)
+      Session ->> Client: Wait for Incoming Data (async_read_some)
+
+      rect rgb(224, 235, 255)
+        alt Inactivity Timeout / Client EOF
+          Timer -->> Session: Inactivity Timeout (or EOF received)
+          Note over Session: Trigger session teardown
+        else Data Received
+          Client -->> Session: Raw Byte Buffer
+          Session ->> Codec: Parse HTTP Request
+
+          rect rgb(255, 224, 224)
+            alt Malformed Request Framing
+              Codec -->> Session: Parse Error (Invalid HTTP Framing)
+              Session ->> Client: Send 400 Bad Request
+              Note over Session: Trigger session teardown
+            else Valid Request Framing
+              Codec -->> Session: Valid HttpRequest Object
+              Session ->> Timer: Refresh Inactivity Timer
+              Session ->> Router: Lookup Path in Radix Tree
+
+              rect rgb(220, 252, 227)
+                alt Route Unmatched
+                  Router -->> Session: Route Miss
+                  Session ->> Handler: Execute Configured 404 Handler
+                  Handler -->> Session: 404 Response Payload
+                else Route Matched
+                  Router -->> Session: Route Match + Dynamic Params (:id, *)
+                  Session ->> MW: Execute Middleware Chain
+
+                  rect rgb(243, 232, 255)
+                    alt Middleware Short-Circuited (e.g. Auth Guard, Rate Limit, Cache)
+                      MW -->> Session: Early Short-Circuit Response
+                    else Next Handler Permitted
+                      MW ->> Handler: Forward via next()
+                      Handler -->> Session: Route Handler Response Payload
+                    end
+                  end
+                end
+              end
+
+              Session ->> Client: Serialize & Dispatch HTTP Response
+
+              Note over Session: Evaluate Persistence Policy:<br/>- HTTP/1.1 Keep-Alive requested<br/>- requests_served < max_requests<br/>- Inactivity timeout active<br/>- Connection != 'close'
+
+              rect rgb(255, 237, 213)
+                alt Keep-Alive Active
+                  Session ->> Session: Increment requests_served
+                  Note over Session: Loop back to await next request
+                else Close / Quota Exceeded
+                  Note over Session: Break loop and begin connection teardown
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+%% Connection Teardown Phase
+  rect rgb(228, 228, 231)
+    alt TLS 1.3 Active
+      Session ->> TLS: Perform TLS Stream Shutdown
+      TLS ->> Client: Send TLS close_notify
+    end
+  end
+
+  Session ->> Client: Gracefully Close TCP Socket
+  Session ->> Timer: Disarm Timer
+  Note over Session, Client: Session Terminated
+
 ```
 
 ---
 
 ## Component Status
 
-| Component                  | Status     | Description                                                                                                                      |
-|:---------------------------|:-----------|:---------------------------------------------------------------------------------------------------------------------------------|
-| `Base/Logger`              | ✅ Complete | Levelled logger (TRACE, DEBUG, INFO, WARN, ERROR, FATAL)                                                                         |
-| `Base/Uri` / `Base/Url`    | ✅ Complete | RFC 3986 URI encode/decode & URL query string parser                                                                             |
-| `Base/MimeTypes`           | ✅ Complete | Fast file extension to MIME type mappings (`mime_type_from_ext`)                                                                 |
-| `Base/Chainable`           | ✅ Complete | C++23 "Deducing `this`" static pipeline dispatch (`StaticChain`, `make_chain`, `KeepAlivePolicy`, `ConditionalChainable`)        |
-| `Base/FlatMap`             | ✅ Complete | Cache-line contiguous KV container (`InlineCap=16`) with case-insensitive search (`find_ci`)                                     |
-| `Base/Memory`              | ✅ Complete | Per-request monotonic arena bump allocator (`RequestArena`) with 4KB inline buffer & thread-local slab pool                      |
-| `Base/Request`             | ✅ Complete | Protocol-agnostic CRTP request base (`Request<Derived>`, zero-vtable, multipart & query accessors)                               |
-| `Base/Response`            | ✅ Complete | Protocol-agnostic CRTP response builder (`Response<Derived>`, zero-vtable, fluent API & `redirect` helpers)                      |
-| `Base/MiddleWare`          | ✅ Complete | Coroutine-aware middleware template (`GenericMiddlewareFn`), linear pipeline, `keep_alive`, `sse_stay_active` & `body_limit`     |
-| `Engine/Router`            | ✅ Complete | Protocol-agnostic radix tree with RE2 regex, wildcard matching & configurable 404 handler                                        |
-| `Engine/HttpRouter`        | ✅ Complete | HTTP/1.1 (`Http1Router`) & HTTP/2 (`Http2Router`) method convenience routing (`get`, `post`, etc.) & 404 customization           |
-| `Server/LocalQueue`        | ✅ Complete | Per-worker 256-slot ring buffer for ultra-fast task stealing                                                                     |
-| `Server/InjectorQueue`     | ✅ Complete | Global unbounded MPMC task overflow queue with atomic size tracking                                                              |
-| `Server/ThreadPool`        | ✅ Complete | Adaptive Tokio-style work-stealing thread pool with load hysteresis                                                              |
-| `Server/Server`            | ✅ Complete | Coroutine TCP & TLS 1.3 server with master acceptor, worker pool, ALPN, Keep-Alive, 404, payload limit & memory spooling         |
-| `Server/TlsConfig`         | ✅ Complete | TLS 1.3 server encryption config (`cert_file`, `key_file`, `key_password`, `dh_file`, `force_tls13`)                             |
-| `protos/ProtocolTraits`    | ✅ Complete | Protocol session traits (`protocol_traits<Codec>`) for prefaces, keep-alive, response prep & ALPN                                |
-| `protos/http/http1codec`   | ✅ Complete | Zero-copy HTTP/1.x parser, encoder, response decoder, chunked framing, status text & stream pipelining                           |
-| `protos/http/http2codec`   | ✅ Complete | Full RFC 7540 binary framing, RFC 7541 HPACK encoder/decoder, stream multiplexing & SETTINGS negotiation                         |
-| `protos/http/HttpRequest`  | ✅ Complete | HTTP/1.1 & HTTP/2 with zero-copy stream parsing, keep-alive, multipart form parsing, decompressed body & file save               |
-| `protos/http/HttpResponse` | ✅ Complete | HTTP/1.1 & HTTP/2 with injected write sink for streaming, commitment & fluent builder API                                        |
-| `Client/HttpClient`        | ✅ Complete | Coroutine HTTP/1.1 & HTTP/2 client with plain/TLS 1.3, multipart form upload, payload compression, and file saving               |
-| `Utils/TempFile`           | ✅ Complete | RAII temporary file management (`TempFileGuard`) with atomic move/cleanup and custom directory support                           |
-| `Utils/Compression`        | ✅ Complete | Zero-overhead Gzip & Deflate compression/decompression (`Compressor`, `CompressionFormat`) via CMake-controlled zlib integration |
-| `Utils/Multipart`          | ✅ Complete | RFC 7578 multipart/form-data parser, builder, in-memory buffering & disk spooling thresholds (`MultipartFormData`)               |
-| `Utils/Utils`              | ✅ Complete | Umbrella utilities module (`wavex:utils`) and header (`Utils.hpp`) bundling TempFile, Compression, and Multipart                 |
-| `Cli/Cli`                  | ✅ Complete | Type-safe CLI argument parser (`wavex::cli::CliParser`), flag validator, and option engine                                       |
+| Component                  | Status     | Description                                                                                                                                              |
+|:---------------------------|:-----------|:---------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `Base/Logger`              | ✅ Complete | Levelled logger (TRACE, DEBUG, INFO, WARN, ERROR, FATAL)                                                                                                 |
+| `Base/Uri` / `Base/Url`    | ✅ Complete | RFC 3986 URI encode/decode & URL query string parser                                                                                                     |
+| `Base/MimeTypes`           | ✅ Complete | Fast file extension to MIME type mappings (`mime_type_from_ext`)                                                                                         |
+| `Base/Chainable`           | ✅ Complete | C++23 "Deducing `this`" static pipeline dispatch (`StaticChain`, `make_chain`, `KeepAlivePolicy`, `ConditionalChainable`)                                |
+| `Base/FlatMap`             | ✅ Complete | Cache-line contiguous KV container (`InlineCap=16`) with case-insensitive search (`find_ci`)                                                             |
+| `Base/Memory`              | ✅ Complete | Per-request monotonic arena bump allocator (`RequestArena`) with 4KB inline buffer & thread-local slab pool                                              |
+| `Base/Request`             | ✅ Complete | Protocol-agnostic CRTP request base (`Request<Derived>`, zero-vtable, multipart & query accessors)                                                       |
+| `Base/Response`            | ✅ Complete | Protocol-agnostic CRTP response builder (`Response<Derived>`, zero-vtable, fluent API & `redirect` helpers)                                              |
+| `Base/MiddleWare`          | ✅ Complete | Coroutine-aware middleware template (`GenericMiddlewareFn`), linear pipeline, `keep_alive`, `sse_stay_active` & `body_limit`                             |
+| `Engine/Router`            | ✅ Complete | Protocol-agnostic radix tree with RE2 regex, wildcard matching & configurable 404 handler                                                                |
+| `Engine/HttpRouter`        | ✅ Complete | HTTP/1.1 (`Http1Router`), HTTP/2 (`Http2Router`) & HTTP/3 (`Http3Router`) method convenience routing (`get`, `post`, etc.) & 404 customization           |
+| `Server/LocalQueue`        | ✅ Complete | Per-worker 256-slot ring buffer for ultra-fast task stealing                                                                                             |
+| `Server/InjectorQueue`     | ✅ Complete | Global unbounded MPMC task overflow queue with atomic size tracking                                                                                      |
+| `Server/ThreadPool`        | ✅ Complete | Adaptive Tokio-style work-stealing thread pool with load hysteresis                                                                                      |
+| `Server/Server`            | ✅ Complete | Coroutine TCP, TLS 1.3 & QUIC UDP server (`Http1Server`, `Http2Server`, `Http3Server`) with worker pool, ALPN, Keep-Alive, 404, limits & memory spooling |
+| `Server/TlsConfig`         | ✅ Complete | TLS 1.3 server encryption config (`cert_file`, `key_file`, `key_password`, `dh_file`, `force_tls13`)                                                     |
+| `protos/ProtocolTraits`    | ✅ Complete | Protocol session traits (`protocol_traits<Codec>`) for prefaces, keep-alive, response prep & ALPN                                                        |
+| `protos/http/http1codec`   | ✅ Complete | Zero-copy HTTP/1.x parser, encoder, response decoder, chunked framing, status text & stream pipelining                                                   |
+| `protos/http/http2codec`   | ✅ Complete | Full RFC 7540 binary framing, RFC 7541 HPACK encoder/decoder, stream multiplexing & SETTINGS negotiation                                                 |
+| `protos/http/http3codec`   | ✅ Complete | Full RFC 9114 HTTP/3 binary framing, RFC 9204 QPACK encoder/decoder, VarInt streams & SETTINGS                                                           |
+| `protos/http/HttpRequest`  | ✅ Complete | HTTP/1.1, HTTP/2 & HTTP/3 with zero-copy stream parsing, keep-alive, multipart form parsing, decompressed body & file save                               |
+| `protos/http/HttpResponse` | ✅ Complete | HTTP/1.1, HTTP/2 & HTTP/3 with injected write sink for streaming, commitment & fluent builder API                                                        |
+| `Network/QUIC`             | ✅ Complete | Native RFC 9000 & 9001 QUIC UDP transport engine, packet framing, connection ID routing, TLS 1.3 QUIC method & `QuicStream`                              |
+| `Client/HttpClient`        | ✅ Complete | Coroutine HTTP/1.1 & HTTP/2 client with plain/TLS 1.3, multipart form upload, payload compression, and file saving                                       |
+| `Utils/TempFile`           | ✅ Complete | RAII temporary file management (`TempFileGuard`) with atomic move/cleanup and custom directory support                                                   |
+| `Utils/Compression`        | ✅ Complete | Zero-overhead Gzip & Deflate compression/decompression (`Compressor`, `CompressionFormat`) via CMake-controlled zlib integration                         |
+| `Utils/Multipart`          | ✅ Complete | RFC 7578 multipart/form-data parser, builder, in-memory buffering & disk spooling thresholds (`MultipartFormData`)                                       |
+| `Utils/Utils`              | ✅ Complete | Umbrella utilities module (`wavex:utils`) and header (`Utils.hpp`) bundling TempFile, Compression, and Multipart                                         |
+| `Cli/Cli`                  | ✅ Complete | Type-safe CLI argument parser (`wavex::cli::CliParser`), flag validator, and option engine                                                               |
 
 ---
 
@@ -1140,15 +1250,16 @@ ctest --preset tsan
 
 ### Manual Testing with Postman & cURL
 
-WaveX includes three pre-configured, CLI-driven interactive dev servers for manual validation via Postman, cURL, or browsers:
+WaveX includes four pre-configured, CLI-driven interactive dev servers for manual validation via Postman, cURL, or browsers:
 
 #### Dev Server Executables
 
-| Executable                   | Protocol Modes                           | Default Ports                               | Source                                                                     |
-|:-----------------------------|:-----------------------------------------|:--------------------------------------------|:---------------------------------------------------------------------------|
-| `wavex_postman_http1_server` | Plain HTTP / HTTPS (TLS 1.3)             | `8080` (plain), `8443` (`--tls`)            | [tests/postman_demo_http1_server.cpp](tests/postman_demo_http1_server.cpp) |
-| `wavex_postman_http2_server` | Cleartext h2c / HTTP/2 over TLS 1.3 (h2) | `8082` (cleartext), `8444` (`--tls`)        | [tests/postman_demo_http2_server.cpp](tests/postman_demo_http2_server.cpp) |
-| `wavex_postman_http3_server` | HTTP/3 over TLS 1.3 (h3) / Cleartext Dev | `8445` (TLS default), `8083` (`--no-tls`)   | [tests/postman_demo_http3_server.cpp](tests/postman_demo_http3_server.cpp) |
+| Executable                   | Protocol Modes                           | Default Ports                             | Source                                                                     |
+|:-----------------------------|:-----------------------------------------|:------------------------------------------|:---------------------------------------------------------------------------|
+| `wavex_postman_http1_server` | Plain HTTP / HTTPS (TLS 1.3)             | `8080` (plain), `8443` (`--tls`)          | [tests/postman_demo_http1_server.cpp](tests/postman_demo_http1_server.cpp) |
+| `wavex_postman_http2_server` | Cleartext h2c / HTTP/2 over TLS 1.3 (h2) | `8082` (cleartext), `8444` (`--tls`)      | [tests/postman_demo_http2_server.cpp](tests/postman_demo_http2_server.cpp) |
+| `wavex_postman_http3_server` | HTTP/3 over TLS 1.3 (h3) / Cleartext Dev | `8445` (TLS default), `8083` (`--no-tls`) | [tests/postman_demo_http3_server.cpp](tests/postman_demo_http3_server.cpp) |
+| `wavex_postman_quic_server`  | RFC 9000 & 9001 QUIC Transport Dev Mode  | `8443` (UDP TLS 1.3)                      | [tests/postman_demo_quic_server.cpp](tests/postman_demo_quic_server.cpp)   |
 
 #### Command-Line Options (Built-in CLI)
 
@@ -1185,6 +1296,11 @@ The servers support the following command-line flags:
 ./build/test-profile/wavex_postman_http3_server.exe --lan               # Host on LAN using current machine IP
 ./build/test-profile/wavex_postman_http3_server.exe -p 9445             # Custom port with TLS
 ./build/test-profile/wavex_postman_http3_server.exe --no-tls            # Cleartext HTTP/3 dev mode on http://127.0.0.1:8083
+
+# 4. QUIC Transport Dev Server (RFC 9000 / RFC 9001)
+./build/test-profile/wavex_postman_quic_server.exe                      # QUIC server on udp://127.0.0.1:8443
+./build/test-profile/wavex_postman_quic_server.exe --lan                # Host on LAN using current machine IP
+./build/test-profile/wavex_postman_quic_server.exe -p 9443              # Custom UDP port
 ```
 
 #### cURL Verification Commands
@@ -1343,13 +1459,15 @@ include/wavex/
 │   └── SpawnBlocking.hpp    ← Tokio-equivalent coroutine awaitable for offloading blocking tasks
 ├── Engine/
 │   ├── Router.hpp           ← Protocol-agnostic radix tree + RE2
-│   └── HttpRouter.hpp       ← HTTP route shortcuts (Http1Router & Http2Router)
+│   └── HttpRouter.hpp       ← HTTP route shortcuts (Http1Router, Http2Router, Http3Router)
 ├── Server/
 │   ├── WorkStealingQueue.hpp← LocalQueue (lock-free ring) & InjectorQueue (global MPMC)
 │   ├── ThreadPool.hpp       ← Tokio-style adaptive worker pool
 │   ├── BlockingPool.hpp     ← Elastic blocking thread pool with dynamic circular ring queue
-│   ├── Server.hpp           ← Coroutine TCP & TLS 1.3 server (Http1Server & Http2Server)
+│   ├── Server.hpp           ← Coroutine TCP, TLS 1.3 & QUIC UDP server (Http1Server, Http2Server, Http3Server)
 │   └── TlsConfig.hpp        ← TLS 1.3 encryption configuration
+├── Network/
+│   └── QUIC.hpp             ← Native RFC 9000 & 9001 QUIC UDP transport engine & QuicStream
 ├── Client/
 │   └── HttpClient.hpp       ← Async coroutine HTTP client with multipart & compression
 ├── Utils/
@@ -1367,17 +1485,18 @@ include/wavex/
         ├── Methods.hpp      ← HTTP method enum (GET, POST, PUT, DELETE, QUERY, etc.)
         ├── http1codec.hpp   ← Zero-copy HTTP/1.x parser + chunked encoder/decoder
         ├── http2codec.hpp   ← RFC 7540 binary frame parser & RFC 7541 HPACK codec
-        ├── HttpRequest.hpp  ← Concrete HTTP request (Http1Request & Http2Request)
-        └── HttpResponse.hpp ← Concrete HTTP response with injected write sink (Http1Response & Http2Response)
+        ├── http3codec.hpp   ← RFC 9114 HTTP/3 binary frame parser & RFC 9204 QPACK codec
+        ├── HttpRequest.hpp  ← Concrete HTTP request (Http1Request, Http2Request, Http3Request)
+        └── HttpResponse.hpp ← Concrete HTTP response with injected write sink (Http1Response, Http2Response, Http3Response)
 
-src/                         ← Implementation + C++20 module partitions (.ixx)
-tests/                       ← Automated unit tests & interactive postman dev servers (HTTP/1.1 & HTTP/2)
+src/                         ← Implementation (QUIC.cpp, Utils, Client) + C++20 module partitions (.ixx)
+tests/                       ← Automated unit tests & interactive postman dev servers (HTTP/1.1, HTTP/2, HTTP/3, QUIC)
 cmake/                       ← CMake installation config
 ```
 
 ## Roadmap & Optional Future Features
 
-- 🔮 **Future Protocols (GraphQL, HTTP/3 QUIC, WebSockets)** — High-performance GraphQL query execution engine, native UDP-based HTTP/3 with QPACK and QUIC connection management, and RFC 6455 WebSocket upgrades cleanly layered onto the 3-Seam architecture.
+- 🔮 **Future Protocols (GraphQL, WebSockets)** — High-performance GraphQL query execution engine and RFC 6455 WebSocket upgrades cleanly layered onto the 3-Seam architecture. (Native HTTP/3 over QUIC is fully implemented and verified).
 - 🛡 **DDoS Protection & OOM Backpressure Safeguard** — Optional network-level queue capacity watermarks (`max_injector_capacity`) that reject overload traffic with immediate HTTP `503 Service Unavailable` responses (`Retry-After: 5`) before allocation.
 - 🗜 **Zlib File Compression** — Optional Gzip / Brotli response compression choices in `send_file()`.
 - 🌐 **Compile-Time File Routing** — Build-time CMake directory scanner generating static route headers for static files (`StaticMount`) and C++ handler modules (`FolderMode`).

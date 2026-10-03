@@ -53,6 +53,8 @@
 #include <asio/post.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
+#include <asio/as_tuple.hpp>
+#include <asio/redirect_error.hpp>
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
 #include <openssl/ssl.h>
@@ -784,6 +786,7 @@ namespace wavex::network::quic {
         asio::any_io_executor executor_{};
         std::string tls_cert_file_{};
         std::string tls_key_file_{};
+        std::string local_transport_params_{};
         ProtectionKeys initial_keys_peer_{};
         ProtectionKeys initial_keys_local_{};
         ProtectionKeys handshake_keys_peer_{};
@@ -818,6 +821,7 @@ namespace wavex::network::quic {
         bool has_received_handshake_{false};
         bool settings_received_{false};
         bool draining_buffered_packets_{false};
+        bool http3_session_initialized_{false};
 
     public:
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
@@ -878,6 +882,13 @@ namespace wavex::network::quic {
 
         // Send stream payload
         void queue_stream_data(uint64_t stream_id, std::string_view data, bool fin);
+
+        // RFC 9114 HTTP/3 Control & QPACK Stream Helpers
+        uint64_t open_unidirectional_stream();
+        void write_stream(uint64_t stream_id, std::string_view data, bool fin = false);
+        void write_stream(uint64_t stream_id, const std::vector<uint8_t> &data, bool fin = false);
+        void initialize_http3_session();
+        [[nodiscard]] bool is_http3_session_initialized() const noexcept { return http3_session_initialized_; }
 
         // Drain outbound UDP datagrams
         std::vector<std::string> poll_outgoing_datagrams();

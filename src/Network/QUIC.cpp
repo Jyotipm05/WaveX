@@ -14,6 +14,8 @@
 
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
+#include <asio/as_tuple.hpp>
+#include <asio/redirect_error.hpp>
 #include <future>
 
 #include <algorithm>
@@ -294,8 +296,11 @@ namespace wavex::network::quic {
 
         std::size_t cursor = 0;
         while (cursor < payload.size()) {
+            const std::size_t frame_start_cursor = cursor;
             uint64_t raw_type = 0;
             if (!VarInt::decode(payload, cursor, raw_type)) PARSE_FAIL("decode raw_type");
+            wavex::log::info("[QUIC] parse_frames: decoded frame type=0x{:02x} at offset {} (payload_size={})",
+                              raw_type, frame_start_cursor, payload.size());
 
             if (raw_type == 0x00) {
                 // PADDING
@@ -1451,11 +1456,11 @@ namespace wavex::network::quic {
             return false;
         }
 
-        const std::string transport_params = build_quic_transport_params();
+        local_transport_params_ = build_quic_transport_params();
         if (SSL_set_quic_tls_transport_params(
                 tls_->ssl,
-                reinterpret_cast<const unsigned char *>(transport_params.data()),
-                transport_params.size()) != 1) {
+                reinterpret_cast<const unsigned char *>(local_transport_params_.data()),
+                local_transport_params_.size()) != 1) {
             wavex::log::error("[QUIC] init_tls_handshake_engine: SSL_set_quic_tls_transport_params failed");
             return false;
         }
@@ -1732,6 +1737,10 @@ namespace wavex::network::quic {
             std::string one_rtt_packet;
             if (CryptoSuite::protect_packet(keys, one_rtt_hdr, one_rtt_payload, one_rtt_packet)) {
                 pending_outbound_datagrams_.push_back(std::move(one_rtt_packet));
+            }
+
+            if (!http3_session_initialized_) {
+                initialize_http3_session();
             }
         }
 
@@ -2063,6 +2072,11 @@ namespace wavex::network::quic {
                         it->second->close();
                     }
                 } else if constexpr (std::is_same_v<T, ConnectionCloseFrame>) {
+                    wavex::log::error(
+                        "[QUIC] Received CONNECTION_CLOSE from peer: is_application={} error_code=0x{:x} ({}) frame_type=0x{:x} reason=\"{}\" (pkt_type={} pn={})",
+                        frame.is_application, frame.error_code, frame.error_code,
+                        frame.frame_type, frame.reason_phrase,
+                        static_cast<int>(pkt_type), pn);
                     state_ = ConnectionState::Closed;
                 }
             }, f);
@@ -2213,6 +2227,68 @@ namespace wavex::network::quic {
             cb = on_outbound_;
         }
         if (cb) cb();
+    }
+
+    uint64_t QuicConnection::open_unidirectional_stream() {
+        auto stream = create_stream(false);
+        return stream->stream_id();
+    }
+
+    void QuicConnection::write_stream(const uint64_t stream_id, const std::string_view data, const bool fin) {
+        queue_stream_data(stream_id, data, fin);
+    }
+
+    void QuicConnection::write_stream(const uint64_t stream_id, const std::vector<uint8_t> &data, const bool fin) {
+        queue_stream_data(stream_id, std::string_view(reinterpret_cast<const char *>(data.data()), data.size()), fin);
+    }
+
+    void QuicConnection::initialize_http3_session() {
+        if (!is_server_) return;
+        http3_session_initialized_ = true;
+
+        // 1. Establish HTTP/3 Control Stream (Stream Type 0x00)
+        const uint64_t control_stream_id = open_unidirectional_stream();
+        std::string control_stream_data;
+
+        // Prepend Unidirectional Stream Type (0x00)
+        VarInt::encode(0x00, control_stream_data);
+
+        // Construct SETTINGS Frame (Type 0x04)
+        std::string settings_payload;
+
+        // SETTINGS_MAX_FIELD_SECTION_SIZE (Identifier 0x06) = 65,536 bytes
+        VarInt::encode(0x06, settings_payload);
+        VarInt::encode(65536, settings_payload);
+
+        // SETTINGS_QPACK_MAX_TABLE_CAPACITY (Identifier 0x01) = 0 (Static table only)
+        VarInt::encode(0x01, settings_payload);
+        VarInt::encode(0, settings_payload);
+
+        // SETTINGS_QPACK_BLOCKED_STREAMS (Identifier 0x07) = 0
+        VarInt::encode(0x07, settings_payload);
+        VarInt::encode(0, settings_payload);
+
+        // Frame Header: Frame Type (0x04) followed by Payload Length
+        VarInt::encode(0x04, control_stream_data);
+        VarInt::encode(settings_payload.size(), control_stream_data);
+        control_stream_data.append(settings_payload);
+
+        write_stream(control_stream_id, control_stream_data, false);
+
+        // 2. Establish QPACK Encoder Stream (Stream Type 0x02)
+        const uint64_t qpack_enc_id = open_unidirectional_stream();
+        std::string enc_init_data;
+        VarInt::encode(0x02, enc_init_data);
+        write_stream(qpack_enc_id, enc_init_data, false);
+
+        // 3. Establish QPACK Decoder Stream (Stream Type 0x03)
+        const uint64_t qpack_dec_id = open_unidirectional_stream();
+        std::string dec_init_data;
+        VarInt::encode(0x03, dec_init_data);
+        write_stream(qpack_dec_id, dec_init_data, false);
+
+        wavex::log::info("[QUIC] HTTP/3 session initialized: control_stream={}, qpack_enc={}, qpack_dec={}",
+                         control_stream_id, qpack_enc_id, qpack_dec_id);
     }
 
     std::vector<std::string> QuicConnection::poll_outgoing_datagrams() {
@@ -2382,7 +2458,23 @@ namespace wavex::network::quic {
 
                             if (stream_handler_) {
                                 conn->set_stream_created_callback([this](std::shared_ptr<QuicStream> stream) {
-                                    if (stream_handler_) {
+                                    if (!stream) return;
+                                    const uint64_t sid = stream->stream_id();
+                                    // Client-initiated unidirectional stream (sid & 0x03 == 2) per RFC 9114 §6.2
+                                    if ((sid & 0x03) == 0x02) {
+                                        asio::co_spawn(io_, [stream]() -> asio::awaitable<void> {
+                                            char buf[1024];
+                                            while (stream->is_open()) {
+                                                auto [ec, n] = co_await stream->async_read_some(
+                                                    asio::buffer(buf), asio::as_tuple(asio::use_awaitable));
+                                                if (ec || n == 0) break;
+                                            }
+                                            co_return;
+                                        }, asio::detached);
+                                        return;
+                                    }
+                                    // Only client-initiated bidirectional streams (sid & 0x03 == 0) carry HTTP requests
+                                    if ((sid & 0x03) == 0x00 && stream_handler_) {
                                         asio::co_spawn(io_, stream_handler_(stream), asio::detached);
                                     }
                                 });
@@ -2695,6 +2787,12 @@ namespace wavex::network::quic {
         if (stream_) {
             stream_->close(ec);
             stream_.reset();
+        }
+        if (outbound_driver_ && conn_) {
+            auto pkts = conn_->poll_outgoing_datagrams();
+            for (auto &pkt: pkts) {
+                outbound_driver_->send_datagram(std::move(pkt), remote_endpoint_);
+            }
         }
         outbound_driver_.reset();
         conn_.reset();
@@ -3204,7 +3302,25 @@ namespace wavex::network::quic {
 
                             conn->set_stream_created_callback(
                                 [this, conn, sender_ep = sender_endpoint_](std::shared_ptr<QuicStream> stream) {
-                                    on_stream_ready(std::move(stream), conn, sender_ep);
+                                    if (!stream) return;
+                                    const uint64_t sid = stream->stream_id();
+                                    // Client-initiated unidirectional stream (sid & 0x03 == 2)
+                                    if ((sid & 0x03) == 0x02) {
+                                        asio::co_spawn(executor_, [stream]() -> asio::awaitable<void> {
+                                            char buf[1024];
+                                            while (stream->is_open()) {
+                                                auto [ec, n] = co_await stream->async_read_some(
+                                                    asio::buffer(buf), asio::as_tuple(asio::use_awaitable));
+                                                if (ec || n == 0) break;
+                                            }
+                                            co_return;
+                                        }, asio::detached);
+                                        return;
+                                    }
+                                    // Client-initiated bidirectional stream (sid & 0x03 == 0)
+                                    if ((sid & 0x03) == 0x00) {
+                                        on_stream_ready(std::move(stream), conn, sender_ep);
+                                    }
                                 });
                         }
                     }
@@ -3212,10 +3328,6 @@ namespace wavex::network::quic {
                     if (conn) {
                         conn->handle_datagram(datagram);
                         flush_outbound(conn);
-                        if (is_new) {
-                            auto stream0 = conn->get_or_create_stream(0);
-                            on_stream_ready(stream0, conn, sender_endpoint_);
-                        }
                     } else {
                         wavex::log::warn("[QUIC] [acceptor] No connection found for DCID={} (type={})",
                                          hdr.dcid.to_string(), static_cast<int>(hdr.type));

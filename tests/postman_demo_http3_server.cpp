@@ -29,15 +29,11 @@
 #include <algorithm>
 #include <nlohmann/json.hpp>
 #include <wavex/wavex.hpp>
-#include <wavex/protos/http/http3codec.hpp>
 #include <asio/ip/tcp.hpp>
 #include <asio/ip/udp.hpp>
 #include <asio/ip/host_name.hpp>
 
 using namespace wavex;
-using HttpRequest = protos::http::Http3Request;
-using HttpResponse = protos::http::Http3Response;
-using HttpRouter = engine::Http3Router;
 
 // Helper to detect LAN IP address of current machine
 inline std::string get_lan_ip() {
@@ -115,8 +111,10 @@ int main(int argc, char *argv[]) {
           .add_flag("lan", 'l', "Host server on local area network (LAN) using current machine IP")
           .add_option("port", 'p', "Port number to listen on (default: 8445 with TLS, 8083 with --no-tls)")
           .add_option("host", 'H', "Host IP address to bind to", "127.0.0.1")
-          .add_option("cert", 'c', "Path to TLS certificate file", "ssl/test.crt")
-          .add_option("key", 'k', "Path to TLS private key file", "ssl/test.key");
+          // .add_option("cert", 'c', "Path to TLS certificate file", "ssl/test.crt")
+          .add_option("cert", 'c', "Path to TLS certificate file", "ssl/127.0.0.1.pem")
+          // .add_option("key", 'k', "Path to TLS private key file", "ssl/test.key");
+          .add_option("key", 'k', "Path to TLS private key file", "ssl/127.0.0.1-key.pem");
 
     const auto parse_res = parser.parse(argc, argv);
     if (!parse_res.ok()) {
@@ -210,9 +208,9 @@ int main(int argc, char *argv[]) {
     engine::Http2Router h2_router;
     engine::Http3Router h3_router;
 
-    auto configure_routes = [&](auto &r, const std::string &proto) {
-        using Req = std::decay_t<decltype(r)>::RequestType;
-        using Res = std::decay_t<decltype(r)>::ResponseType;
+    auto configure_routes = [&]<typename T0>(T0 &r, const std::string &proto) {
+        using Req = std::decay_t<T0>::RequestType;
+        using Res = std::decay_t<T0>::ResponseType;
 
         // Attach global logger middleware
         r.use(logger_middleware<Req, Res>);
@@ -220,6 +218,7 @@ int main(int argc, char *argv[]) {
         // 1. Root Welcome endpoint
         r.get("/", [proto](const Req &, Res &res) -> asio::awaitable<void> {
             res.status(200).send("Welcome to WaveX Composed " + proto + " (RFC 9114 / RFC 9204 / RFC 9000) Dev Server!");
+            std::cout.flush();
             co_return;
         });
 
@@ -337,7 +336,7 @@ int main(int argc, char *argv[]) {
                 if (primary_ip.empty()) {
                     primary_ip = ip;
                 }
-                if (std::find(all_ips.begin(), all_ips.end(), ip) == all_ips.end()) {
+                if (std::ranges::find(all_ips, ip) == all_ips.end()) {
                     all_ips.push_back(ip);
                 }
             }
