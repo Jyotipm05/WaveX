@@ -911,7 +911,7 @@ namespace wavex::network::quic {
 
     QuicStream::QuicStream(const std::shared_ptr<QuicConnection> &conn, const uint64_t stream_id,
                            asio::any_io_executor executor) noexcept
-        : conn_(conn), executor_(std::move(executor)), stream_id_(stream_id) {
+        : stream_id_(stream_id), conn_(conn), executor_(std::move(executor)) {
     }
 
     QuicStream::~QuicStream() {
@@ -1032,35 +1032,137 @@ namespace wavex::network::quic {
     }
 
     void QuicStream::push_inbound(const std::string_view data, const bool fin) {
+        push_inbound(recv_offset_, data, fin);
+    }
+
+    void QuicStream::push_inbound(uint64_t offset, std::string_view data, const bool fin) {
         ReadCallback cb;
         std::size_t bytes_transferred = 0;
-        std::error_code ec; {
+        std::error_code ec;
+
+        {
             std::lock_guard lock(mtx_);
-            if (fin) fin_received_ = true;
 
-            if (pending_read_ && pending_buf_ && pending_buf_size_ > 0) {
-                // Fulfill pending read immediately
-                const std::size_t to_copy = std::min(data.size(), pending_buf_size_);
-                std::memcpy(pending_buf_, data.data(), to_copy);
-                bytes_transferred = to_copy;
-
-                // Any leftover bytes go into in_buffer_
-                for (std::size_t i = to_copy; i < data.size(); ++i) {
-                    in_buffer_.push_back(static_cast<uint8_t>(data[i]));
+            // 1. RFC 9000 §4.5 Final Size Validation
+            if (fin) {
+                const uint64_t expected_final = offset + data.size();
+                if (final_size_.has_value()) {
+                    if (*final_size_ != expected_final) {
+                        final_size_error_ = true;
+                        return;
+                    }
+                } else {
+                    if (expected_final < recv_offset_) {
+                        final_size_error_ = true;
+                        return;
+                    }
+                    final_size_ = expected_final;
                 }
+            } else if (final_size_.has_value()) {
+                if (offset + data.size() > *final_size_) {
+                    final_size_error_ = true;
+                    return;
+                }
+            }
 
-                cb = std::move(*pending_read_);
-                pending_read_.reset();
-                pending_buf_ = nullptr;
-                pending_buf_size_ = 0;
+            // 2. Check for duplicate or partially overlapping data against recv_offset_
+            if (offset + data.size() <= recv_offset_) {
+                // Entire chunk is behind recv_offset_
+                if (final_size_.has_value() && recv_offset_ >= *final_size_) {
+                    fin_received_ = true;
+                    if (pending_read_ && in_buffer_.empty()) {
+                        cb = std::move(*pending_read_);
+                        pending_read_.reset();
+                        pending_buf_ = nullptr;
+                        pending_buf_size_ = 0;
+                        ec = asio::error::eof;
+                    }
+                }
             } else {
-                for (const char c: data) {
-                    in_buffer_.push_back(static_cast<uint8_t>(c));
+                if (offset < recv_offset_) {
+                    // Trim duplicate prefix
+                    const std::size_t trim = static_cast<std::size_t>(recv_offset_ - offset);
+                    data.remove_prefix(trim);
+                    offset = recv_offset_;
                 }
-                if (fin && pending_read_) {
-                    cb = std::move(*pending_read_);
-                    pending_read_.reset();
-                    ec = asio::error::eof;
+
+                auto append_bytes = [&](std::string_view chunk) {
+                    if (chunk.empty()) return;
+                    if (pending_read_ && pending_buf_ && pending_buf_size_ > 0 && in_buffer_.empty()) {
+                        const std::size_t to_copy = std::min(chunk.size(), pending_buf_size_);
+                        std::memcpy(pending_buf_, chunk.data(), to_copy);
+                        bytes_transferred += to_copy;
+                        pending_buf_ = static_cast<uint8_t *>(pending_buf_) + to_copy;
+                        pending_buf_size_ -= to_copy;
+
+                        for (std::size_t i = to_copy; i < chunk.size(); ++i) {
+                            in_buffer_.push_back(static_cast<uint8_t>(chunk[i]));
+                        }
+                    } else {
+                        for (const char c : chunk) {
+                            in_buffer_.push_back(static_cast<uint8_t>(c));
+                        }
+                    }
+                    recv_offset_ += chunk.size();
+                };
+
+                if (offset == recv_offset_) {
+                    append_bytes(data);
+
+                    // Drain contiguous chunks from pending_inbound_
+                    while (!pending_inbound_.empty()) {
+                        auto &front = pending_inbound_.front();
+                        if (front.offset > recv_offset_) {
+                            break; // Gap encountered
+                        }
+                        if (front.offset + front.data.size() > recv_offset_) {
+                            const std::size_t trim = static_cast<std::size_t>(recv_offset_ - front.offset);
+                            std::string_view remaining = std::string_view(front.data).substr(trim);
+                            append_bytes(remaining);
+                        }
+                        pending_inbound_.erase(pending_inbound_.begin());
+                    }
+
+                    if (final_size_.has_value() && recv_offset_ >= *final_size_) {
+                        fin_received_ = true;
+                    }
+
+                    if (bytes_transferred > 0 && pending_read_) {
+                        cb = std::move(*pending_read_);
+                        pending_read_.reset();
+                        pending_buf_ = nullptr;
+                        pending_buf_size_ = 0;
+                    } else if (fin_received_ && pending_read_ && in_buffer_.empty()) {
+                        cb = std::move(*pending_read_);
+                        pending_read_.reset();
+                        pending_buf_ = nullptr;
+                        pending_buf_size_ = 0;
+                        ec = asio::error::eof;
+                    }
+                } else {
+                    // offset > recv_offset_: Out-of-order gap!
+                    std::size_t current_pending = 0;
+                    for (const auto &c : pending_inbound_) current_pending += c.data.size();
+                    if (current_pending + data.size() <= 16 * 1024 * 1024) {
+                        auto it = std::lower_bound(
+                            pending_inbound_.begin(), pending_inbound_.end(), offset,
+                            [](const StreamChunk &c, uint64_t off) {
+                                return c.offset < off;
+                            }
+                        );
+                        bool insert = true;
+                        if (it != pending_inbound_.end() && it->offset == offset) {
+                            if (it->data.size() >= data.size()) {
+                                insert = false;
+                            } else {
+                                it->data = std::string(data);
+                                insert = false;
+                            }
+                        }
+                        if (insert) {
+                            pending_inbound_.insert(it, StreamChunk(offset, std::string(data)));
+                        }
+                    }
                 }
             }
         }
@@ -1292,7 +1394,12 @@ namespace wavex::network::quic {
         }
     }
 
-    QuicConnection::~QuicConnection() = default;
+    QuicConnection::~QuicConnection() {
+        if (loss_detection_timer_) {
+            asio::error_code ec;
+            loss_detection_timer_->cancel(ec);
+        }
+    }
 
     QuicConnection::QuicConnection(
         ConnectionId local_cid,
@@ -1684,6 +1791,7 @@ namespace wavex::network::quic {
             } else {
                 wavex::log::info("[QUIC] queue_crypto_frame: successfully protected packet ({} bytes, type={:02x}, pn={}), enqueuing to pending_outbound_datagrams_ (total={})",
                                  packet.size(), static_cast<uint8_t>(hdr.type), hdr.packet_number, pending_outbound_datagrams_.size() + 1);
+                track_sent_packet(hdr.type, hdr.packet_number, packet.size(), {cf});
                 pending_outbound_datagrams_.push_back(std::move(packet));
             }
 
@@ -1736,6 +1844,7 @@ namespace wavex::network::quic {
             const auto &keys = one_rtt_keys_local_.valid ? one_rtt_keys_local_ : initial_keys_local_;
             std::string one_rtt_packet;
             if (CryptoSuite::protect_packet(keys, one_rtt_hdr, one_rtt_payload, one_rtt_packet)) {
+                track_sent_packet(PacketType::OneRTT, one_rtt_hdr.packet_number, one_rtt_packet.size(), {hdf});
                 pending_outbound_datagrams_.push_back(std::move(one_rtt_packet));
             }
 
@@ -1801,6 +1910,289 @@ namespace wavex::network::quic {
         const std::size_t s = space_index(type);
         ack_trackers_[s].add_packet(pn, true);
         send_ack_for_space(type);
+    }
+
+    void QuicConnection::track_sent_packet(const PacketType type, const uint64_t pn, const std::size_t bytes, std::vector<Frame> frames) {
+        const std::size_t s = space_index(type);
+        const bool ack_eliciting = !frames.empty();
+        sent_packets_[s].emplace_back(pn, bytes, type, std::move(frames), std::chrono::steady_clock::now());
+        congestion_controller_.on_packet_sent(bytes, true);
+        if (ack_eliciting) {
+            arm_loss_detection_timer();
+        }
+    }
+
+    void QuicConnection::on_ack_received(const PacketType pkt_type, const AckFrame &ack) {
+        const std::size_t s = space_index(pkt_type);
+        auto &pkts = sent_packets_[s];
+        if (pkts.empty()) return;
+
+        // Decode all acknowledged ranges
+        std::vector<std::pair<uint64_t, uint64_t>> acked_ranges;
+        uint64_t largest = ack.largest_acknowledged;
+        uint64_t first_range_len = ack.ranges.empty() ? 0 : ack.ranges[0].ack_range_len;
+        uint64_t smallest = (largest >= first_range_len) ? (largest - first_range_len) : 0;
+        acked_ranges.emplace_back(smallest, largest);
+
+        for (std::size_t i = 1; i < ack.ranges.size(); ++i) {
+            if (smallest < ack.ranges[i].gap + 2) break;
+            largest = smallest - ack.ranges[i].gap - 2;
+            uint64_t len = ack.ranges[i].ack_range_len;
+            smallest = (largest >= len) ? (largest - len) : 0;
+            acked_ranges.emplace_back(smallest, largest);
+        }
+
+        auto is_acked = [&](const uint64_t pn) noexcept {
+            for (const auto &[min_pn, max_pn] : acked_ranges) {
+                if (pn >= min_pn && pn <= max_pn) return true;
+            }
+            return false;
+        };
+
+        bool newly_acked_any = false;
+        const auto now = std::chrono::steady_clock::now();
+        std::vector<SentPacket> remaining;
+        remaining.reserve(pkts.size());
+
+        for (auto &pkt : pkts) {
+            if (is_acked(pkt.packet_number)) {
+                newly_acked_any = true;
+                congestion_controller_.on_packet_acked(pkt.bytes_sent);
+                if (pkt.packet_number == ack.largest_acknowledged) {
+                    const auto rtt_sample = std::chrono::duration_cast<std::chrono::microseconds>(now - pkt.time_sent);
+                    congestion_controller_.update_rtt(rtt_sample, std::chrono::microseconds(ack.ack_delay * 1000));
+                }
+            } else {
+                remaining.push_back(std::move(pkt));
+            }
+        }
+
+        pkts = std::move(remaining);
+
+        if (newly_acked_any) {
+            pto_count_ = 0;
+            if (!has_largest_acked_[s] || ack.largest_acknowledged > largest_acked_packet_[s]) {
+                largest_acked_packet_[s] = ack.largest_acknowledged;
+                has_largest_acked_[s] = true;
+            }
+            detect_lost_packets(s, ack.largest_acknowledged);
+            arm_loss_detection_timer();
+        }
+    }
+
+    void QuicConnection::detect_lost_packets(const std::size_t space, const uint64_t largest_acked) {
+        if (space >= sent_packets_.size()) return;
+        auto &pkts = sent_packets_[space];
+        if (pkts.empty()) return;
+
+        const auto &rtt_stats = congestion_controller_.rtt_stats();
+        const auto now = std::chrono::steady_clock::now();
+        const auto max_rtt = std::max(rtt_stats.smoothed_rtt, rtt_stats.latest_rtt);
+        const auto time_threshold = (max_rtt * 9) / 8;
+
+        std::vector<SentPacket> remaining;
+        remaining.reserve(pkts.size());
+
+        for (auto &pkt : pkts) {
+            if (pkt.packet_number > largest_acked) {
+                remaining.push_back(std::move(pkt));
+                continue;
+            }
+
+            const bool packet_loss = (largest_acked >= pkt.packet_number + CongestionController::kPacketThreshold);
+            const bool time_loss = (now >= pkt.time_sent + time_threshold);
+
+            if (packet_loss || time_loss) {
+                wavex::log::info("[QUIC] Declaring packet lost: space={}, pn={}, bytes={}, packet_loss={}, time_loss={}",
+                                 space, pkt.packet_number, pkt.bytes_sent, packet_loss, time_loss);
+                congestion_controller_.on_congestion_event(pkt.time_sent, now);
+                for (const auto &f : pkt.retransmittable_frames) {
+                    retransmit_frame(f, pkt.packet_type);
+                }
+            } else {
+                remaining.push_back(std::move(pkt));
+            }
+        }
+
+        pkts = std::move(remaining);
+    }
+
+    void QuicConnection::arm_loss_detection_timer() {
+        if (!executor_) return;
+        if (state_ == ConnectionState::Closed) return;
+
+        bool has_in_flight = false;
+        auto earliest_sent = std::chrono::steady_clock::time_point::max();
+
+        for (std::size_t s = 0; s < 3; ++s) {
+            for (const auto &pkt : sent_packets_[s]) {
+                if (pkt.ack_eliciting && !pkt.retransmittable_frames.empty()) {
+                    has_in_flight = true;
+                    if (pkt.time_sent < earliest_sent) {
+                        earliest_sent = pkt.time_sent;
+                    }
+                }
+            }
+        }
+
+        if (!has_in_flight) {
+            if (loss_detection_timer_) {
+                asio::error_code ec;
+                loss_detection_timer_->cancel(ec);
+            }
+            return;
+        }
+
+        if (!loss_detection_timer_) {
+            loss_detection_timer_ = std::make_unique<asio::steady_timer>(executor_);
+        }
+
+        const auto &rtt_stats = congestion_controller_.rtt_stats();
+        const auto rttvar_4 = std::max(rtt_stats.rttvar * 4, std::chrono::microseconds(1000));
+        const auto pto_base = rtt_stats.smoothed_rtt + rttvar_4;
+        const uint32_t shift = std::min(pto_count_, 10u);
+        const auto pto_duration = pto_base * (1ULL << shift);
+
+        auto timeout_point = earliest_sent + pto_duration;
+        const auto now = std::chrono::steady_clock::now();
+        if (timeout_point < now) {
+            timeout_point = now;
+        }
+
+        asio::error_code ec;
+        loss_detection_timer_->expires_at(timeout_point, ec);
+        auto weak_self = weak_from_this();
+        loss_detection_timer_->async_wait([weak_self](const asio::error_code &timer_ec) {
+            if (timer_ec) return;
+            if (auto self = weak_self.lock()) {
+                self->on_loss_detection_timeout();
+            }
+        });
+    }
+
+    void QuicConnection::on_loss_detection_timeout() {
+        std::lock_guard lock(mtx_);
+        if (state_ == ConnectionState::Closed) return;
+
+        bool retransmitted = false;
+        for (std::size_t s = 0; s < 3; ++s) {
+            auto &pkts = sent_packets_[s];
+            if (pkts.empty()) continue;
+
+            for (auto &pkt : pkts) {
+                if (!pkt.retransmittable_frames.empty()) {
+                    wavex::log::info("[QUIC] PTO timeout fired (pto_count={}): retransmitting {} frames from space={}, pn={}",
+                                     pto_count_, pkt.retransmittable_frames.size(), s, pkt.packet_number);
+                    for (const auto &f : pkt.retransmittable_frames) {
+                        retransmit_frame(f, pkt.packet_type);
+                    }
+                    pkt.retransmittable_frames.clear();
+                    retransmitted = true;
+                    break;
+                }
+            }
+            if (retransmitted) break;
+        }
+
+        pto_count_++;
+        arm_loss_detection_timer();
+
+        if (on_outbound_) on_outbound_();
+    }
+
+    void QuicConnection::retransmit_frame(const Frame &frame, const PacketType pkt_type) {
+        std::visit([this, pkt_type]<typename T0>(const T0 &f) {
+            using T = std::decay_t<T0>;
+            if constexpr (std::is_same_v<T, CryptoFrame>) {
+                CryptoFrame cf = f;
+                std::string payload;
+                serialize_frame(cf, payload);
+
+                PacketHeader hdr;
+                const ProtectionKeys *keys = nullptr;
+                if (pkt_type == PacketType::Initial) {
+                    hdr.is_long = true;
+                    hdr.type = PacketType::Initial;
+                    hdr.version = version_;
+                    hdr.dcid = peer_cid_;
+                    hdr.scid = local_cid_;
+                    hdr.packet_number = allocate_next_pn(PacketType::Initial);
+                    keys = &initial_keys_local_;
+                    const std::size_t est_overhead = 1 + 4 + (1 + hdr.dcid.length()) + (1 + hdr.scid.length()) + 1 + 2 + 4 + 16;
+                    if (payload.size() + est_overhead < 1200) {
+                        payload.resize(1200 - est_overhead, '\0');
+                    }
+                } else if (pkt_type == PacketType::Handshake) {
+                    hdr.is_long = true;
+                    hdr.type = PacketType::Handshake;
+                    hdr.version = version_;
+                    hdr.dcid = peer_cid_;
+                    hdr.scid = local_cid_;
+                    hdr.packet_number = allocate_next_pn(PacketType::Handshake);
+                    keys = handshake_keys_local_.valid ? &handshake_keys_local_ : nullptr;
+                } else {
+                    hdr.is_long = false;
+                    hdr.type = PacketType::OneRTT;
+                    hdr.dcid = peer_cid_;
+                    hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
+                    keys = one_rtt_keys_local_.valid ? &one_rtt_keys_local_ : &initial_keys_local_;
+                }
+
+                if (keys && keys->valid) {
+                    std::string packet;
+                    if (CryptoSuite::protect_packet(*keys, hdr, payload, packet)) {
+                        wavex::log::info("[QUIC] retransmit_frame: resending CRYPTO frame (space={}, new_pn={}, bytes={})",
+                                         space_index(hdr.type), hdr.packet_number, packet.size());
+                        track_sent_packet(hdr.type, hdr.packet_number, packet.size(), {cf});
+                        pending_outbound_datagrams_.push_back(std::move(packet));
+                    }
+                }
+            } else if constexpr (std::is_same_v<T, StreamFrame>) {
+                StreamFrame sf = f;
+                auto it = streams_.find(sf.stream_id);
+                if (it == streams_.end() || !it->second->is_open()) {
+                    return;
+                }
+
+                std::string payload;
+                serialize_frame(sf, payload);
+
+                PacketHeader hdr;
+                hdr.is_long = false;
+                hdr.type = PacketType::OneRTT;
+                hdr.dcid = peer_cid_;
+                hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
+
+                std::string packet;
+                const auto &keys = (one_rtt_keys_local_.valid)
+                                       ? one_rtt_keys_local_
+                                       : (one_rtt_keys_.valid ? one_rtt_keys_ : initial_keys_local_);
+                if (CryptoSuite::protect_packet(keys, hdr, payload, packet)) {
+                    wavex::log::info("[QUIC] retransmit_frame: resending STREAM frame (sid={}, offset={}, size={}, new_pn={})",
+                                     sf.stream_id, sf.offset, sf.data.size(), hdr.packet_number);
+                    track_sent_packet(PacketType::OneRTT, hdr.packet_number, packet.size(), {sf});
+                    pending_outbound_datagrams_.push_back(std::move(packet));
+                }
+            } else if constexpr (std::is_same_v<T, HandshakeDoneFrame>) {
+                PacketHeader hdr;
+                hdr.is_long = false;
+                hdr.type = PacketType::OneRTT;
+                hdr.dcid = peer_cid_;
+                hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
+
+                HandshakeDoneFrame hdf = f;
+                std::string payload;
+                serialize_frame(hdf, payload);
+
+                const auto &keys = one_rtt_keys_local_.valid ? one_rtt_keys_local_ : initial_keys_local_;
+                std::string packet;
+                if (CryptoSuite::protect_packet(keys, hdr, payload, packet)) {
+                    wavex::log::info("[QUIC] retransmit_frame: resending HANDSHAKE_DONE frame (new_pn={})", hdr.packet_number);
+                    track_sent_packet(PacketType::OneRTT, hdr.packet_number, packet.size(), {hdf});
+                    pending_outbound_datagrams_.push_back(std::move(packet));
+                }
+            }
+        }, frame);
     }
 
     void QuicConnection::drain_buffered_packets() {
@@ -2029,14 +2421,7 @@ namespace wavex::network::quic {
                 if constexpr (std::is_same_v<T, PingFrame>) {
                     // PING frames are ack-eliciting; coalesced ACK is handled at packet/datagram level
                 } else if constexpr (std::is_same_v<T, AckFrame>) {
-                    // RFC 9002 §7 Congestion Control ACK processing
-                    congestion_controller_.on_packet_acked(CongestionController::kMaxDatagramSize);
-                    if (frame.ack_delay > 0) {
-                        congestion_controller_.update_rtt(
-                            std::chrono::microseconds(frame.ack_delay * 1000),
-                            std::chrono::microseconds(frame.ack_delay * 1000)
-                        );
-                    }
+                    on_ack_received(pkt_type, frame);
                 } else if constexpr (std::is_same_v<T, StreamFrame>) {
                     // STREAM frames are ack-eliciting; coalesced ACK is handled at packet/datagram level
                     auto it = streams_.find(frame.stream_id);
@@ -2052,7 +2437,10 @@ namespace wavex::network::quic {
                         new_streams.push_back(stream);
                         it = streams_.find(frame.stream_id);
                     }
-                    it->second->push_inbound(frame.data, frame.fin);
+                    it->second->push_inbound(frame.offset, frame.data, frame.fin);
+                    if (it->second->has_final_size_error()) {
+                        wavex::log::error("[QUIC] Stream {} FINAL_SIZE_ERROR: final size mismatch with peer", frame.stream_id);
+                    }
                 } else if constexpr (std::is_same_v<T, MaxDataFrame>) {
                     if (frame.max_data > max_data_) {
                         max_data_ = frame.max_data;
@@ -2121,6 +2509,7 @@ namespace wavex::network::quic {
                                        : (one_rtt_keys_.valid ? one_rtt_keys_ : initial_keys_local_);
         std::string one_rtt_packet;
         if (CryptoSuite::protect_packet(one_rtt_keys, one_rtt_hdr, one_rtt_payload, one_rtt_packet)) {
+            track_sent_packet(PacketType::OneRTT, one_rtt_hdr.packet_number, one_rtt_packet.size(), {hdf});
             pending_outbound_datagrams_.push_back(std::move(one_rtt_packet));
         }
     }
@@ -2221,7 +2610,7 @@ namespace wavex::network::quic {
                                    ? one_rtt_keys_local_
                                    : (one_rtt_keys_.valid ? one_rtt_keys_ : initial_keys_local_);
             if (CryptoSuite::protect_packet(keys, hdr, payload, packet)) {
-                congestion_controller_.on_packet_sent(packet.size(), true);
+                track_sent_packet(PacketType::OneRTT, hdr.packet_number, packet.size(), {sf});
                 pending_outbound_datagrams_.push_back(std::move(packet));
             }
             cb = on_outbound_;

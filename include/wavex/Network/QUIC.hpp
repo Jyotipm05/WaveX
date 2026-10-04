@@ -362,6 +362,17 @@ namespace wavex::network::quic {
 
     class QuicConnection;
 
+    struct StreamChunk {
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        uint64_t offset{0};
+        std::string data{};
+
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        StreamChunk() = default;
+        StreamChunk(uint64_t off, std::string d)
+            : offset(off), data(std::move(d)) {}
+    };
+
     /**
      * @class QuicStream
      * @brief Multiplexed, full-duplex virtual stream over a QUIC connection.
@@ -379,19 +390,22 @@ namespace wavex::network::quic {
 
     private:
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
-        std::weak_ptr<QuicConnection> conn_{};
-        asio::any_io_executor executor_{};
-        mutable std::mutex mtx_{};
-        std::deque<uint8_t> in_buffer_{};
-        std::optional<ReadCallback> pending_read_{};
         void* pending_buf_{nullptr};
         std::size_t pending_buf_size_{0};
         uint64_t stream_id_{0};
         uint64_t send_offset_{0};
         uint64_t recv_offset_{0};
+        std::weak_ptr<QuicConnection> conn_{};
+        asio::any_io_executor executor_{};
+        mutable std::mutex mtx_{};
+        std::deque<uint8_t> in_buffer_{};
+        std::vector<StreamChunk> pending_inbound_{};
+        std::optional<ReadCallback> pending_read_{};
+        std::optional<uint64_t> final_size_{std::nullopt};
         bool is_open_{true};
         bool fin_received_{false};
         bool fin_sent_{false};
+        bool final_size_error_{false};
 
     public:
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
@@ -529,8 +543,22 @@ namespace wavex::network::quic {
         }
 
         // Internal plumbing
+        void push_inbound(uint64_t offset, std::string_view data, bool fin);
         void push_inbound(std::string_view data, bool fin);
         std::error_code write_outbound(std::string_view data, bool fin);
+
+        [[nodiscard]] bool has_final_size_error() const noexcept {
+            std::lock_guard lock(mtx_);
+            return final_size_error_;
+        }
+        [[nodiscard]] std::optional<uint64_t> final_size() const noexcept {
+            std::lock_guard lock(mtx_);
+            return final_size_;
+        }
+        [[nodiscard]] uint64_t recv_offset() const noexcept {
+            std::lock_guard lock(mtx_);
+            return recv_offset_;
+        }
     };
 
     // ─── 7. RFC 9002 Loss Detection & Congestion Control ───────────────────────
@@ -585,14 +613,25 @@ namespace wavex::network::quic {
         std::chrono::steady_clock::time_point time_sent{};
         uint64_t packet_number{0};
         std::size_t bytes_sent{0};
+        std::vector<Frame> retransmittable_frames{};
         PacketType packet_type{PacketType::Initial};
         bool ack_eliciting{true};
         bool in_flight{true};
 
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         SentPacket() = default;
-        SentPacket(uint64_t pn, std::size_t bytes, PacketType pt, std::chrono::steady_clock::time_point ts = std::chrono::steady_clock::now())
-            : time_sent(ts), packet_number(pn), bytes_sent(bytes), packet_type(pt), ack_eliciting(true), in_flight(true) {}
+        SentPacket(uint64_t pn, std::size_t bytes, PacketType pt,
+                   std::chrono::steady_clock::time_point ts = std::chrono::steady_clock::now())
+            : time_sent(ts), packet_number(pn), bytes_sent(bytes),
+              packet_type(pt), ack_eliciting(true), in_flight(true) {}
+        SentPacket(uint64_t pn, std::size_t bytes, PacketType pt,
+                   std::vector<Frame> frames,
+                   std::chrono::steady_clock::time_point ts = std::chrono::steady_clock::now())
+            : time_sent(ts), packet_number(pn), bytes_sent(bytes),
+              retransmittable_frames(std::move(frames)),
+              packet_type(pt),
+              ack_eliciting(!retransmittable_frames.empty()),
+              in_flight(true) {}
     };
 
     /**
@@ -772,6 +811,7 @@ namespace wavex::network::quic {
     private:
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
         std::unique_ptr<TlsCtx> tls_{};
+        std::unique_ptr<asio::steady_timer> loss_detection_timer_{};
         mutable std::recursive_mutex mtx_{};
         asio::ip::udp::endpoint peer_endpoint_{};
         std::unordered_map<uint64_t, std::shared_ptr<QuicStream>> streams_{};
@@ -797,7 +837,10 @@ namespace wavex::network::quic {
         CongestionController congestion_controller_{};
         std::array<CryptoStreamReassembler, 4> crypto_reassemblers_{};
         std::array<ReceivedPacketTracker, 3> ack_trackers_{};
+        std::array<std::vector<SentPacket>, 3> sent_packets_{};
         std::array<uint64_t, 3> next_packet_number_{0, 0, 0};
+        std::array<uint64_t, 3> largest_acked_packet_{0, 0, 0};
+        std::chrono::steady_clock::time_point loss_time_{};
         uint64_t max_data_{1024 * 1024}; // 1 MB
         uint64_t max_stream_data_{256 * 1024}; // 256 KB
         uint64_t data_sent_{0};
@@ -811,10 +854,12 @@ namespace wavex::network::quic {
         uint32_t current_write_level_{0};
         uint32_t current_read_level_{0};
         uint32_t last_read_crypto_level_{0};
+        uint32_t pto_count_{0};
         ConnectionId local_cid_{};
         ConnectionId peer_cid_{};
         ConnectionId original_dcid_{};
         ConnectionState state_{ConnectionState::Initial};
+        std::array<bool, 3> has_largest_acked_{false, false, false};
         bool is_server_{true};
         bool handshake_done_{false};
         bool has_received_initial_{false};
@@ -924,9 +969,20 @@ namespace wavex::network::quic {
             return next_packet_number_[space_index(type)]++;
         }
 
+        [[nodiscard]] const std::vector<SentPacket> &sent_packets(std::size_t space) const noexcept {
+            return sent_packets_[space];
+        }
+        [[nodiscard]] uint32_t pto_count() const noexcept { return pto_count_; }
+
     private:
         void send_ack(uint64_t pn, PacketType type);
         void send_ack_for_space(PacketType type);
+        void track_sent_packet(PacketType type, uint64_t pn, std::size_t bytes, std::vector<Frame> frames);
+        void on_ack_received(PacketType pkt_type, const AckFrame &ack);
+        void detect_lost_packets(std::size_t space, uint64_t largest_acked);
+        void arm_loss_detection_timer();
+        void on_loss_detection_timeout();
+        void retransmit_frame(const Frame &frame, PacketType pkt_type);
         void process_frames(const std::vector<Frame> &frames, uint64_t pn, PacketType pkt_type, std::vector<std::shared_ptr<QuicStream>> &new_streams);
         void send_initial_handshake_response();
         void run_tls_engine();
