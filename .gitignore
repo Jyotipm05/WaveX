@@ -17,6 +17,9 @@ build/
 
 ssl/test.crt
 ssl/test.key
+ssl/*.pem
+logs/*.json
+logs/*.pcapng
 
 # CLion
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can

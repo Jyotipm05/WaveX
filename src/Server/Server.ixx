@@ -30,6 +30,7 @@ export namespace wavex::server {
     using server::BlockingTask;
     using server::BlockingThreadPool;
     using server::ConnectionTracker;
+    using server::ServerState;
     using server::Server;
     using server::Http1Server;
     using server::http1server;

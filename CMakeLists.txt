@@ -254,6 +254,9 @@ add_library(wavex
         src/Utils/TempFile.cpp
         src/Utils/Multipart.cpp
         src/Network/QUIC.cpp
+        src/Server/ConnectionTracker.cpp
+        src/Server/ComposedHttpServer.cpp
+        src/Server/Server.cpp
 )
 
 target_include_directories(wavex PUBLIC
@@ -335,6 +338,16 @@ target_sources(wavex
         include/wavex/Server/ThreadPool.hpp
         include/wavex/Server/BlockingPool.hpp
         include/wavex/Server/TlsConfig.hpp
+        include/wavex/Server/ServerState.hpp
+        include/wavex/Server/ConnectionTracker.hpp
+        include/wavex/Server/ServerCore.hpp
+        include/wavex/Server/ServerLifecycle.ipp
+        include/wavex/Server/ServerConnection.ipp
+        include/wavex/Server/ServerConfig.ipp
+        include/wavex/Server/ServerTls.ipp
+        include/wavex/Server/ServerQuic.ipp
+        include/wavex/Server/ServerAliases.hpp
+        include/wavex/Server/ComposedHttpServer.hpp
         include/wavex/Server/Server.hpp
         include/wavex/Client/HttpClient.hpp
         include/wavex/CLI/CLI.hpp
