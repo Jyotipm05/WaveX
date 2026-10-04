@@ -51,6 +51,14 @@
 
 namespace wavex::server {
 
+    template<typename C>
+    inline constexpr bool is_http3_codec_v =
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+        std::is_same_v<C, protos::http::http3codec>;
+#else
+        false;
+#endif
+
     /**
      * @class Server
      * @brief Completely protocol-agnostic coroutine TCP/TLS/QUIC server.
@@ -92,9 +100,9 @@ namespace wavex::server {
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
         std::unique_ptr<asio::ssl::context> ssl_ctx_;         // 8 bytes (pointer)
-#endif
         std::unique_ptr<network::quic::QuicServer> quic_server_; // 8 bytes (pointer)
         engine::Http3Router *h3_router_{nullptr};             // 8 bytes (pointer)
+#endif
 
         std::chrono::milliseconds shutdown_timeout_{10000};   // 8 bytes
         std::chrono::seconds keep_alive_timeout_{5};           // 8 bytes
@@ -140,6 +148,7 @@ namespace wavex::server {
                        std::string key_file = "ssl/test.key");
         [[nodiscard]] bool is_tls_enabled() const noexcept;
 
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
         // HTTP/3 & QUIC (ServerQuic.ipp)
         [[nodiscard]] bool is_http3_enabled() const noexcept;
         void enable_http3(engine::Http3Router &h3_router) noexcept;
@@ -157,6 +166,13 @@ namespace wavex::server {
         void spawn_connection(std::shared_ptr<Stream> stream_ptr);
 
         void spawn_http3_stream(std::shared_ptr<network::quic::QuicStream> stream_ptr);
+#else
+        template<typename Stream>
+        asio::awaitable<void> handle_connection(std::shared_ptr<Stream> stream_ptr);
+
+        template<typename Stream>
+        void spawn_connection(std::shared_ptr<Stream> stream_ptr);
+#endif
 
         // Configuration (ServerConfig.ipp)
         void enable_signal_handling(bool enable = true) noexcept;

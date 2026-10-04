@@ -139,10 +139,12 @@ namespace wavex::protos::http {
     using http2response = Http2Response;
 
     // ─── HTTP/3 Type Aliases ──────────────────────────────────────────────────────
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
     using Http3Request = HttpRequest<wavex::protos::http::http3codec>;
     using http3request = Http3Request;
     using Http3Response = HttpResponse<wavex::protos::http::http3codec>;
     using http3response = Http3Response;
+#endif
 } // namespace wavex::protos::http
 
 

@@ -14,6 +14,7 @@ module;
 
 export module wavex:protos_http_http3codec;
 
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
 export namespace wavex::protos::http {
     using http::http3codec;
 
@@ -37,3 +38,4 @@ export namespace wavex::protos::http {
         }
     }
 }
+#endif

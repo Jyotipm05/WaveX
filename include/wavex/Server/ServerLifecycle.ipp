@@ -32,10 +32,12 @@ namespace wavex::server {
           acceptor_(master_io_),
           pool_(),
           port_(port) {
-        if constexpr (std::is_same_v<Codec, protos::http::http3codec>) {
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+        if constexpr (is_http3_codec_v<Codec>) {
             h3_router_ = reinterpret_cast<engine::Http3Router *>(&router_);
             http3_enabled_ = true;
         }
+#endif
     }
 
     template<typename Codec, typename RouterType>
@@ -96,6 +98,7 @@ namespace wavex::server {
             });
         }
 
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
         // Conditionally start the QUIC/UDP listener on the same port
         if (has_quic_transport || http3_enabled_) {
             if (!tls_enabled_ && !allow_insecure_quic_) {
@@ -145,6 +148,7 @@ namespace wavex::server {
             quic_server_->start();
             wavex::log::info("[WaveX] QUIC/UDP listener active on {}:{}", address_, port_);
         }
+#endif
 
         if constexpr (has_tcp_transport) {
             asio::co_spawn(master_io_, accept_loop(), asio::detached);
@@ -196,10 +200,12 @@ namespace wavex::server {
         state_.store(ServerState::Stopped, std::memory_order_release);
         asio::error_code ec;
         std::ignore = acceptor_.close(ec);
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
         if (quic_server_) {
             quic_server_->stop();
             quic_server_.reset();
         }
+#endif
         conn_tracker_.force_close_all();
         if (shutdown_timer_) {
             shutdown_timer_->cancel(ec);
@@ -247,10 +253,12 @@ namespace wavex::server {
         if (shutdown_timer_) {
             shutdown_timer_->cancel(ec);
         }
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
         if (quic_server_) {
             quic_server_->stop();
             quic_server_.reset();
         }
+#endif
         if (signals_) {
             std::ignore = signals_->cancel(ec);
             signals_.reset();

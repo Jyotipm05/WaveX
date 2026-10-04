@@ -10,6 +10,8 @@
  */
 
 #include <wavex/Server/ComposedHttpServer.hpp>
+
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
 #include <wavex/Server/Server.hpp>
 
 namespace wavex::server {
@@ -17,3 +19,4 @@ namespace wavex::server {
     // Anchor translation unit for ComposedHttpServer
 
 } // namespace wavex::server
+#endif // WAVEX_HAS_SSL

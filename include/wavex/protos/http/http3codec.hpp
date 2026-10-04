@@ -17,6 +17,8 @@
 
 #pragma once
 
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+
 #if defined(NO_ERROR)
 #undef NO_ERROR
 #endif
@@ -251,6 +253,11 @@ namespace wavex::protos::http {
                     entry() = default;
                     entry(std::string n, std::string v, const uint64_t abs_idx)
                         : name(std::move(n)), value(std::move(v)), absolute_index(abs_idx) {}
+                    ~entry() = default;
+                    entry(const entry &) = default;
+                    entry &operator=(const entry &) = default;
+                    entry(entry &&) noexcept = default;
+                    entry &operator=(entry &&) noexcept = default;
 
                     // ─── 4. Member Functions (LAST) ────────────────────────────────
                     [[nodiscard]] std::size_t size() const noexcept {
@@ -260,7 +267,7 @@ namespace wavex::protos::http {
 
             private:
                 // ─── 2. Member Variables (SECOND - Minimal Padding) ────────────────
-                std::deque<entry> entries_{};
+                std::vector<entry> entries_{};
                 uint64_t total_inserts_{0};
                 std::size_t current_size_{0};
                 std::size_t max_capacity_{4096};
@@ -366,7 +373,7 @@ namespace wavex::protos::http {
                 void evict() noexcept {
                     while (current_size_ > max_capacity_ && !entries_.empty()) {
                         current_size_ -= entries_.front().size();
-                        entries_.pop_front();
+                        entries_.erase(entries_.begin());
                     }
                 }
             };
@@ -1444,3 +1451,5 @@ namespace wavex::protos::http {
     };
 
 } // namespace wavex::protos::http
+
+#endif // WAVEX_HAS_SSL

@@ -246,6 +246,7 @@ namespace wavex::protos {
 } // namespace wavex::protos
 
 // ─── HTTP/3 Specialization ───────────────────────────────────────────────────
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
 #include <wavex/protos/http/http3codec.hpp>
 
 namespace wavex::protos {
@@ -291,7 +292,6 @@ namespace wavex::protos {
             // RFC 9114 forbids Connection and Keep-Alive headers in native HTTP/3
         }
 
-#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
         static void configure_alpn(SSL_CTX *ctx) {
             SSL_CTX_set_alpn_select_cb(
                 ctx,
@@ -333,8 +333,8 @@ namespace wavex::protos {
                 },
                 nullptr);
         }
-#endif
     };
 
 } // namespace wavex::protos
+#endif // WAVEX_HAS_SSL
 

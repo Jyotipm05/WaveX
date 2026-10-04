@@ -79,23 +79,29 @@ export namespace wavex::protos::http {
     using http::http1request;
     using http::Http2Request;
     using http::http2request;
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
     using http::Http3Request;
     using http::http3request;
+#endif
     using http::HttpResponse;
     using http::Http1Response;
     using http::http1response;
     using http::Http2Response;
     using http::http2response;
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
     using http::Http3Response;
     using http::http3response;
+#endif
 }
 
 export namespace wavex::engine {
     using engine::Router;
     using engine::HttpRouter;
     using engine::http_router;
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
     using engine::Http3Router;
     using engine::http3router;
+#endif
 }
 
 export namespace wavex::server {
@@ -114,20 +120,30 @@ export namespace wavex::server {
     using server::http1server;
     using server::Http2Server;
     using server::http2server;
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
     using server::Http3Server;
     using server::http3server;
     using server::ComposedHttpServer;
     using server::composed_http_server;
+#endif
     using server::HttpServer;
     using server::httpserver;
 }
 
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
 export namespace wavex::network::quic {
     using quic::PacketType;
     using quic::TransportError;
     using quic::FrameType;
     using quic::VarInt;
     using quic::ConnectionId;
+    using quic::Frame;
+    using quic::PacketHeader;
+    using quic::ProtectionKeys;
+    using quic::CryptoSuite;
+    using quic::RttStats;
+    using quic::SentPacket;
+    using quic::CongestionController;
     using quic::QuicStream;
     using quic::QuicConnection;
     using quic::QuicServer;
@@ -147,6 +163,8 @@ export namespace wavex::network::quic {
 export namespace wavex::quic {
     using namespace wavex::network::quic;
 }
+#endif
+
 
 
 export namespace wavex::client {

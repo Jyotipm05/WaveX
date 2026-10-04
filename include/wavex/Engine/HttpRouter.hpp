@@ -347,8 +347,10 @@ namespace wavex::engine {
     using Http2Router = HttpRouter<protos::http::http2codec>;
     using http2router = Http2Router;
 
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
     /// Concrete HTTP/3 router type aliases
     using Http3Router = HttpRouter<protos::http::http3codec>;
     using http3router = Http3Router;
+#endif
 } // namespace wavex::engine
 

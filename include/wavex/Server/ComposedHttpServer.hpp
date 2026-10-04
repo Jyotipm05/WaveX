@@ -11,6 +11,8 @@
 
 #pragma once
 
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+
 #include <chrono>
 #include <string>
 #include <string_view>
@@ -249,3 +251,5 @@ namespace wavex::server {
     using composed_http_server = ComposedHttpServer;
 
 } // namespace wavex::server
+
+#endif // WAVEX_HAS_SSL

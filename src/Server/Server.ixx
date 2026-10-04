@@ -36,10 +36,12 @@ export namespace wavex::server {
     using server::http1server;
     using server::Http2Server;
     using server::http2server;
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
     using server::Http3Server;
     using server::http3server;
     using server::ComposedHttpServer;
     using server::composed_http_server;
+#endif
     using server::HttpServer;
     using server::httpserver;
 }

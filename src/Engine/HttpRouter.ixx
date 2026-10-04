@@ -30,6 +30,8 @@ export namespace wavex::engine {
     using engine::http1router;
     using engine::Http2Router;
     using engine::http2router;
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
     using engine::Http3Router;
     using engine::http3router;
+#endif
 }

@@ -13,6 +13,8 @@
 
 #pragma once
 
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+
 namespace wavex::server {
 
     template<typename Codec, typename RouterType>
@@ -37,3 +39,6 @@ namespace wavex::server {
     }
 
 } // namespace wavex::server
+
+#endif // WAVEX_HAS_SSL
+

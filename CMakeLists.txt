@@ -253,7 +253,16 @@ add_library(wavex
         src/Utils/BinaryFile.cpp
         src/Utils/TempFile.cpp
         src/Utils/Multipart.cpp
-        src/Network/QUIC.cpp
+        src/Network/QUIC/VarInt.cpp
+        src/Network/QUIC/ConnectionId.cpp
+        src/Network/QUIC/QuicFrames.cpp
+        src/Network/QUIC/QuicPacket.cpp
+        src/Network/QUIC/QuicCrypto.cpp
+        src/Network/QUIC/QuicStream.cpp
+        src/Network/QUIC/QuicConnection.cpp
+        src/Network/QUIC/QuicServer.cpp
+        src/Network/QUIC/QuicClient.cpp
+        src/Network/QUIC/QuicSocket.cpp
         src/Server/ConnectionTracker.cpp
         src/Server/ComposedHttpServer.cpp
         src/Server/Server.cpp
@@ -334,6 +343,19 @@ target_sources(wavex
         include/wavex/protos/http/HttpRequest.hpp
         include/wavex/protos/http/HttpResponse.hpp
         include/wavex/Network/QUIC.hpp
+        include/wavex/Network/QUIC/QUIC.hpp
+        include/wavex/Network/QUIC/QuicConstants.hpp
+        include/wavex/Network/QUIC/VarInt.hpp
+        include/wavex/Network/QUIC/ConnectionId.hpp
+        include/wavex/Network/QUIC/QuicFrames.hpp
+        include/wavex/Network/QUIC/QuicPacket.hpp
+        include/wavex/Network/QUIC/QuicCrypto.hpp
+        include/wavex/Network/QUIC/CongestionControl.hpp
+        include/wavex/Network/QUIC/QuicStream.hpp
+        include/wavex/Network/QUIC/QuicConnection.hpp
+        include/wavex/Network/QUIC/QuicServer.hpp
+        include/wavex/Network/QUIC/QuicClient.hpp
+        include/wavex/Network/QUIC/QuicSocket.hpp
         include/wavex/Server/WorkStealingQueue.hpp
         include/wavex/Server/ThreadPool.hpp
         include/wavex/Server/BlockingPool.hpp
@@ -541,8 +563,10 @@ if (WAVEX_TEST)
     wavex_add_test(wavex_async_fs_tests        tests/test_async_fs.cpp)
     wavex_add_test(wavex_flat_map_tests        tests/test_flat_map.cpp)
     wavex_add_test(wavex_request_arena_tests   tests/test_request_arena.cpp)
-    wavex_add_test(wavex_quic_tests            tests/test_quic.cpp)
-    wavex_add_test(wavex_http3_tests           tests/test_http3.cpp)
+    if (WAVEX_HAS_SSL)
+        wavex_add_test(wavex_quic_tests            tests/test_quic.cpp)
+        wavex_add_test(wavex_http3_tests           tests/test_http3.cpp)
+    endif ()
 
     # Unified CLI-driven Postman Dev Servers (HTTP/1.1 and HTTP/2)
     add_executable(wavex_postman_http1_server tests/postman_demo_http1_server.cpp)
@@ -553,11 +577,13 @@ if (WAVEX_TEST)
     target_link_libraries(wavex_postman_http2_server PRIVATE wavex)
     target_compile_definitions(wavex_postman_http2_server PRIVATE PROJECT_DIR="${CMAKE_SOURCE_DIR}")
 
-    add_executable(wavex_postman_quic_server tests/postman_demo_quic_server.cpp)
-    target_link_libraries(wavex_postman_quic_server PRIVATE wavex)
-    target_compile_definitions(wavex_postman_quic_server PRIVATE PROJECT_DIR="${CMAKE_SOURCE_DIR}")
+    if (WAVEX_HAS_SSL)
+        add_executable(wavex_postman_quic_server tests/postman_demo_quic_server.cpp)
+        target_link_libraries(wavex_postman_quic_server PRIVATE wavex)
+        target_compile_definitions(wavex_postman_quic_server PRIVATE PROJECT_DIR="${CMAKE_SOURCE_DIR}")
 
-    add_executable(wavex_postman_http3_server tests/postman_demo_http3_server.cpp)
-    target_link_libraries(wavex_postman_http3_server PRIVATE wavex)
-    target_compile_definitions(wavex_postman_http3_server PRIVATE PROJECT_DIR="${CMAKE_SOURCE_DIR}")
+        add_executable(wavex_postman_http3_server tests/postman_demo_http3_server.cpp)
+        target_link_libraries(wavex_postman_http3_server PRIVATE wavex)
+        target_compile_definitions(wavex_postman_http3_server PRIVATE PROJECT_DIR="${CMAKE_SOURCE_DIR}")
+    endif ()
 endif ()
