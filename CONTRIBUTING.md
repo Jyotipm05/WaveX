@@ -29,9 +29,9 @@ We aim to foster an open, welcoming, and inclusive community. Please maintain re
 
 When contributing code to WaveX, please strictly adhere to the framework's core design rules:
 
-### 1. CRTP Zero-VTable Architecture
+### 1. C++23 "Deducing This" Zero-VTable Architecture
 
-- Base abstractions in `wavex::base` (`Request`, `Response`) use the **Curiously Recurring Template Pattern (CRTP)** (`Request<Derived>`, `Response<Derived>`) to achieve compile-time static polymorphism.
+- Base abstractions in `wavex::base` (`Request`, `Response`) use C++23 explicit object parameters (`this Self&& self`) instead of template inheritance or CRTP to achieve compile-time static polymorphism.
 - **Do not introduce virtual functions or v-tables** in request/response base classes. Keep objects lightweight without 64-bit `vptr` pointer overhead.
 
 ### 2. Base Class Layer Independence Rule
@@ -174,7 +174,7 @@ Test endpoints against `http://127.0.0.1:8080`.
    - [ ] Project compiles cleanly without warnings or errors. (Asio platform-specific warnings may arise and can be ignored, but mention them in the PR beforehand.)
    - [ ] Automated tests pass (`ctest --preset run-tests`).
    - [ ] Sanitizers (ASan/TSan) run clean without leaks or race conditions.
-   - [ ] Code adheres to CRTP zero-vtable and base-class layer independence rules.
+   - [ ] Code adheres to C++23 deducing this zero-vtable and base-class layer independence rules.
    - [ ] Documentation (`README.md`, docstrings) updated where appropriate.
 4. **Submit PR**: Open a Pull Request targeting the **`dev`** branch with a summary of changes and testing performed.
 

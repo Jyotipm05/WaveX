@@ -50,12 +50,21 @@ WaveX server architecture is built around three strictly decoupled seams:
 ### Seam 3: Protocol Traits Seam (`protocol_traits<Codec>`)
 - Governs protocol-level connection policies:
   - `has_connection_preface`: whether the protocol requires opening handshake frames (HTTP/2 preface, HTTP/3 SETTINGS, WebSocket upgrade).
-  - `has_quic_transport`: activates UDP/QUIC listener on `Server`.
+  - `has_quic_transport`: activates UDP/QUIC listener on standalone `Server`.
   - `has_tcp_transport`: controls TCP listener activation.
   - `on_connection_start(stream, buffer)`: async coroutine for exchanging connection prefaces/settings.
   - `keep_alive(req, request_count, max_keep_alive)`: evaluates connection persistence (`false` for HTTP/3 request streams, which are one-request-per-stream).
-  - `prepare_response(res, req, keep_alive, timeout, remaining_requests)`: attaches protocol-specific headers (`Connection`, `Keep-Alive`, pseudo-headers).
+  - `prepare_response(req, res, keep_alive, timeout, remaining_requests, alt_svc_port)`: attaches protocol-specific headers (`Connection`, `Keep-Alive`, `Alt-Svc`, pseudo-headers).
   - `configure_alpn(SSL_CTX*)`: configures server-side ALPN negotiation callbacks (`h3`, `h3-29`, `h2`, `http/1.1`).
+
+### Seam 4: Multi-Protocol Composition (`ComposedHttpServer`)
+- `Server<Codec, Router>` represents a single-protocol engine (e.g. `Http1Server`, `Http2Server`, `Http3Server`).
+- Multi-protocol concurrency (running HTTP/1.1 + HTTP/2 on TCP alongside HTTP/3 on UDP on the same port) is strictly decoupled into `ComposedHttpServer`:
+  - Holds `Http2Server server_` (handles TCP listener and HTTP/1.1 / HTTP/2 routing).
+  - Holds `std::unique_ptr<QuicServer> quic_server_` (handles UDP listener and TLS 1.3 QUIC transport).
+  - Sets `server_.set_alt_svc_port(port)` so TCP responses automatically advertise HTTP/3 support via `protocol_traits<http1codec>` and `protocol_traits<http2codec>`.
+  - Dispatches incoming QUIC client request streams directly into `h3_router_` using `server_.pool()`.
+  - Unifies lifecycle management and graceful shutdown across both TCP and UDP transports.
 
 ---
 
@@ -123,11 +132,19 @@ WaveX server architecture is built around three strictly decoupled seams:
 ---
 
 ## 4. Invariants for Future Agents
-1. **Never add protocol-specific branching to `Server.hpp`**:
-   Do not introduce `if constexpr (is_http2)` or `if constexpr (is_http3)`. All protocol-specific logic belongs in `protocol_traits<Codec>`.
-2. **Never execute synchronous socket writes in `HttpResponse::send_impl()`**:
-   `send_impl()` must only set response state (`body_`, `is_sent_ = true`). All wire transmission is performed either by `Server` via `res.serialize()` or through the injected `write_sink_`.
-3. **Preserve Client Subsystem (`include/wavex/Client`)**:
-   Refactoring the server must never break client-side request construction, response parsing, or test coverage.
-4. **Never run CMake configure commands**:
-   Only run `cmake --build --preset fast-dev` and `ctest --preset run-tests`. Never run `cmake --preset ...` or `cmake -B ...`.
+1. **Strict 3-Seam Decoupling & Zero Protocol Leakage**:
+   - `Server<Codec, Router>` must remain strictly protocol-agnostic.
+   - NEVER add protocol router pointers (`h3_router_`), protocol enable flags (`http3_enabled_`), or protocol dispatchers (`handle_http3_connection`, `spawn_http3_stream`) to `Server<Codec, Router>`.
+   - Generic connection loops (`ServerConnection.ipp`) must NEVER contain codec-specific debug logging (`if constexpr (is_http3_codec_v)`).
+2. **Multi-Protocol Composition Belongs in `ComposedHttpServer`**:
+   - When serving multiple protocols concurrently (HTTP/1.1, HTTP/2, and HTTP/3 on the same port), use `ComposedHttpServer`.
+   - `ComposedHttpServer` owns both the TCP `Http2Server` and the UDP `QuicServer`, coordinates thread pool spawning, and synchronizes graceful shutdown.
+3. **Protocol-Driven Header Injection (`prepare_response`)**:
+   - All protocol advertisements (e.g. RFC 9114 `Alt-Svc: h3=":4433"; ma=86400`) must be injected through `protocol_traits<Codec>::prepare_response(req, res, keep_alive, timeout, remaining, alt_svc_port)`.
+   - Never format or inject protocol headers directly inside `ServerConnection.ipp`.
+4. **Never execute synchronous socket writes in `HttpResponse::send_impl()`**:
+   - `send_impl()` must only set response state (`body_`, `is_sent_ = true`). All wire transmission is performed either by `Server` via `res.serialize()` or through the injected `write_sink_`.
+5. **Preserve Client Subsystem (`include/wavex/Client`)**:
+   - Refactoring the server must never break client-side request construction, response parsing, or test coverage.
+6. **Never run CMake configure commands**:
+   - Only run `cmake --build --preset fast-dev` and `ctest --preset run-tests`. Never run `cmake --preset ...` or `cmake -B ...`.

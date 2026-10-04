@@ -14,11 +14,17 @@
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
 
 #include <chrono>
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
 #include <utility>
 
+#include <wavex/Base/Logger.hpp>
+#include <wavex/Utils/FsUtils.hpp>
+#include <wavex/Network/QUIC.hpp>
+#include <wavex/protos/http/http3codec.hpp>
 #include <wavex/Engine/HttpRouter.hpp>
 #include <wavex/Server/ServerAliases.hpp>
 #include <wavex/Server/TlsConfig.hpp>
@@ -39,9 +45,15 @@ namespace wavex::server {
         // ─── 2. Member Variables (Arranged for minimum padding) ──────────────
         Http2Router owned_h2_router_{};
         Http3Router owned_h3_router_{};
-        Http2Router *h2_router_{nullptr};
-        Http3Router *h3_router_{nullptr};
-        Http2Server server_;
+        Http2Router *h2_router_{nullptr};                     // 8 bytes
+        Http3Router *h3_router_{nullptr};                     // 8 bytes
+        std::unique_ptr<network::quic::QuicServer> quic_server_{nullptr}; // 8 bytes
+        std::string address_{"0.0.0.0"};                      // complex (32 bytes)
+        TlsConfig tls_config_{};                              // complex
+        Http2Server server_;                                  // complex
+        unsigned short port_{0};                              // 2 bytes
+        bool tls_enabled_{false};                             // 1 byte
+        bool allow_insecure_{false};                          // 1 byte
 
     public:
         // ─── 3. Constructors & Destructor ────────────────────────────────────
@@ -50,8 +62,14 @@ namespace wavex::server {
               owned_h3_router_(),
               h2_router_(&owned_h2_router_),
               h3_router_(&owned_h3_router_),
-              server_(*h2_router_, std::move(address), port) {
-            server_.enable_http3(*h3_router_);
+              quic_server_(nullptr),
+              address_(address),
+              tls_config_(),
+              server_(*h2_router_, std::move(address), port),
+              port_(port),
+              tls_enabled_(false),
+              allow_insecure_(false) {
+            server_.set_alt_svc_port(port_);
         }
 
         ComposedHttpServer(Http2Router &h2_router, Http3Router &h3_router,
@@ -60,8 +78,14 @@ namespace wavex::server {
               owned_h3_router_(),
               h2_router_(&h2_router),
               h3_router_(&h3_router),
-              server_(*h2_router_, std::move(address), port) {
-            server_.enable_http3(*h3_router_);
+              quic_server_(nullptr),
+              address_(address),
+              tls_config_(),
+              server_(*h2_router_, std::move(address), port),
+              port_(port),
+              tls_enabled_(false),
+              allow_insecure_(false) {
+            server_.set_alt_svc_port(port_);
         }
 
         ~ComposedHttpServer() = default;
@@ -81,35 +105,111 @@ namespace wavex::server {
 
         void enable_tls(std::string cert_file = "ssl/test.crt",
                        std::string key_file = "ssl/test.key") {
-            server_.enable_tls(std::move(cert_file), std::move(key_file));
+            tls_config_.cert_file = std::move(cert_file);
+            tls_config_.key_file = std::move(key_file);
+            tls_enabled_ = true;
+            server_.enable_tls(tls_config_);
         }
 
         void enable_tls(TlsConfig config) {
-            server_.enable_tls(std::move(config));
+            tls_config_ = std::move(config);
+            tls_enabled_ = true;
+            server_.enable_tls(tls_config_);
         }
 
-        [[nodiscard]] bool is_tls_enabled() const noexcept { return server_.is_tls_enabled(); }
+        [[nodiscard]] bool is_tls_enabled() const noexcept { return tls_enabled_ || server_.is_tls_enabled(); }
         [[nodiscard]] bool is_acceptor_open() const noexcept { return server_.is_acceptor_open(); }
-        [[nodiscard]] bool is_http3_enabled() const noexcept { return server_.is_http3_enabled(); }
+        [[nodiscard]] bool is_http3_enabled() const noexcept { return true; }
 
         void allow_insecure(bool allow = true) noexcept {
+            allow_insecure_ = allow;
             server_.allow_insecure(allow);
         }
 
         void run() {
+            h2_router_->freeze();
+            h3_router_->freeze();
+
+            if (!tls_enabled_ && !allow_insecure_) {
+                throw std::runtime_error(
+                    "QUIC transport requires TLS 1.3. "
+                    "Call server.enable_tls(cert, key) before server.run().");
+            }
+
+            quic_server_ = std::make_unique<network::quic::QuicServer>(
+                server_.io_context(), address_, port_);
+
+            if (tls_enabled_) {
+                std::string cert_path = tls_config_.cert_file;
+                std::string key_path = tls_config_.key_file;
+                std::error_code ec;
+                if (!wavex::utils::fs_utils::exists(cert_path, ec)) {
+#ifdef PROJECT_DIR
+                    std::string alt = std::string(PROJECT_DIR) + "/" + cert_path;
+                    if (wavex::utils::fs_utils::exists(alt, ec)) cert_path = alt;
+#endif
+                    if (!wavex::utils::fs_utils::exists(cert_path, ec) &&
+                        wavex::utils::fs_utils::exists("../" + tls_config_.cert_file, ec)) {
+                        cert_path = "../" + tls_config_.cert_file;
+                    }
+                }
+                if (!wavex::utils::fs_utils::exists(key_path, ec)) {
+#ifdef PROJECT_DIR
+                    std::string alt = std::string(PROJECT_DIR) + "/" + key_path;
+                    if (wavex::utils::fs_utils::exists(alt, ec)) key_path = alt;
+#endif
+                    if (!wavex::utils::fs_utils::exists(key_path, ec) &&
+                        wavex::utils::fs_utils::exists("../" + tls_config_.key_file, ec)) {
+                        key_path = "../" + tls_config_.key_file;
+                    }
+                }
+                quic_server_->set_tls_credentials(std::move(cert_path), std::move(key_path));
+            }
+
+            quic_server_->set_stream_handler(
+                [this](std::shared_ptr<network::quic::QuicStream> stream)
+                    -> asio::awaitable<void> {
+                    if (!stream) co_return;
+                    if ((stream->stream_id() & 0x03) == 0x00) {
+                        if (server_.pool().worker_count() == 0) {
+                            server_.pool().start_pool();
+                        }
+                        server_.pool().spawn_coroutine(
+                            server_.handle_connection_impl<protos::http::http3codec, engine::Http3Router>(
+                                std::move(stream), *h3_router_));
+                    }
+                    co_return;
+                });
+
+            quic_server_->start();
+            wavex::log::info("[WaveX] ComposedHttpServer QUIC/UDP listener active on {}:{}", address_, port_);
+
             server_.run();
+
+            if (quic_server_) {
+                quic_server_->stop();
+                quic_server_.reset();
+            }
         }
 
         void stop() {
+            if (quic_server_) {
+                quic_server_->stop();
+                quic_server_.reset();
+            }
             server_.stop();
         }
 
         void exit(std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+            if (quic_server_) {
+                quic_server_->stop();
+                quic_server_.reset();
+            }
             server_.exit(timeout);
         }
 
         void shutdown(std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
-            server_.shutdown(timeout);
+            exit(timeout);
         }
 
         [[nodiscard]] asio::io_context &io_context() noexcept { return server_.io_context(); }

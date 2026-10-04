@@ -8,15 +8,24 @@ trigger: always_on
 - All public types, functions, and aliases in `include/wavex/` must be exported in `src/*.ixx` partitions via `export namespace wavex::... { using ...; }`.
 
 ## 2. Zero-VTable Architecture
-- No `virtual` methods in `Request` or `Response`. Use CRTP and C++23 explicit object parameter (`this Self&& self`).
+- No `virtual` methods in `Request` or `Response`. Use C++23 explicit object parameter ("deducing this", `this Self&& self`).
 - Responses must support in-place mutation and zero-copy `std::string_view` referencing owned buffers.
 - `status_text_` must synchronize with RFC reason phrases via `Codec::status_text_for(code)`.
 
 ## 3. Protocol Traits & 3-Seam Decoupling
-- `Server<Codec, Router>` must remain protocol-agnostic (never branch on `is_http2` or `is_http3` in Server):
-  - **Transport**: `handle_connection<Stream>` generic over `AsyncStream` (TCP, TLS, QUIC).
-  - **Codec**: `parse_stream`, `serialize`, `result`.
-  - **Policy**: `wavex::protos::protocol_traits<Codec>` for prefaces, keep-alive, headers, and ALPN.
+- `Server<Codec, Router>` must remain strictly protocol-agnostic (never branch on `is_http2` or `is_http3` in generic server code):
+  - **Transport Seam**: `handle_connection<Stream>` generic over `AsyncStream` (TCP, TLS, QUIC).
+  - **Codec Seam**: `parse_stream`, `serialize`, `result`.
+  - **Policy Seam**: `wavex::protos::protocol_traits<Codec>` for prefaces, keep-alive, headers, and ALPN.
+- **Zero Protocol Leakage**:
+  - `Server<Codec, Router>` must NEVER hold references/pointers to secondary routers (e.g. `h3_router_`), protocol enable flags (`http3_enabled_`), or protocol-specific stream handlers (`handle_http3_connection`, `spawn_http3_stream`).
+  - Generic connection loops (`ServerConnection.ipp`) must NEVER contain codec-specific debug logging (`if constexpr (is_http3_codec_v)`).
+- **Multi-Protocol Composition (`ComposedHttpServer`)**:
+  - Concurrent multi-protocol servers (e.g., running HTTP/1.1 & HTTP/2 over TCP alongside HTTP/3 over QUIC on the same port) must be managed by `ComposedHttpServer`.
+  - `ComposedHttpServer` owns `Http2Server server_` (TCP listener) and `QuicServer quic_server_` (UDP listener), dispatching QUIC streams via `server_.pool()` and synchronizing graceful shutdown.
+- **Policy-Driven Header Advertisement (`Alt-Svc`)**:
+  - Protocol advertisement headers (e.g. RFC 9114 `Alt-Svc: h3=":4433"; ma=86400`) must be injected exclusively via `protocol_traits<Codec>::prepare_response(req, res, keep_alive, timeout, remaining, alt_svc_port)`.
+  - Generic `Server` only stores a scalar `alt_svc_port_` configured by higher-level composition layers.
 
 ## 4. Response Lifecycle & Streaming Sinks
 - `res.send(...)` only commits the response payload in memory; never write directly to sockets in `send_impl()`.
@@ -64,3 +73,4 @@ trigger: always_on
 - [optional-dependency-guards.md](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/rules/optional-dependency-guards.md) (Dependency header guards)
 - [never-config-cmake.md](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/rules/never-config-cmake.md) (CMake configure safety)
 - [future-protocols-architecture.md](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/rules/future-protocols-architecture.md) (Protocol extensions)
+- [quic-transport-invariants.md](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/rules/quic-transport-invariants.md) (QUIC transport & crypto)

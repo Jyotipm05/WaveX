@@ -401,7 +401,7 @@ namespace wavex::protos::http {
             }
         }
 
-        // ── Accessors (CRTP Implementations) ────────────────────────────────
+        // ── Accessors (Deducing-This Implementations) ──────────────────────────
 
         [[nodiscard]] http::method method_type() const { return parsed_.method_type; }
 

@@ -31,14 +31,7 @@ namespace wavex::server {
           master_io_(),
           acceptor_(master_io_),
           pool_(),
-          port_(port) {
-#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
-        if constexpr (is_http3_codec_v<Codec>) {
-            h3_router_ = reinterpret_cast<engine::Http3Router *>(&router_);
-            http3_enabled_ = true;
-        }
-#endif
-    }
+          port_(port) {}
 
     template<typename Codec, typename RouterType>
     Server<Codec, RouterType>::~Server() {
@@ -80,9 +73,6 @@ namespace wavex::server {
 
         // Pre-compile all middleware chains for zero-allocation resolve() hot path
         router_.freeze();
-        if (h3_router_) {
-            h3_router_->freeze();
-        }
 
         if (enable_signals_) {
             signals_.emplace(master_io_, SIGINT, SIGTERM);
@@ -100,7 +90,7 @@ namespace wavex::server {
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
         // Conditionally start the QUIC/UDP listener on the same port
-        if (has_quic_transport || http3_enabled_) {
+        if constexpr (has_quic_transport) {
             if (!tls_enabled_ && !allow_insecure_quic_) {
                 throw std::runtime_error(
                     "QUIC transport requires TLS 1.3. "
@@ -138,10 +128,8 @@ namespace wavex::server {
                 [this](std::shared_ptr<network::quic::QuicStream> stream)
                     -> asio::awaitable<void> {
                     if (!stream) co_return;
-                    wavex::log::info("[Server] quic_server_ stream_handler invoked for stream_id={}",
-                                     stream->stream_id());
                     if ((stream->stream_id() & 0x03) == 0x00) {
-                        spawn_http3_stream(std::move(stream));
+                        spawn_connection(std::move(stream));
                     }
                     co_return;
                 });

@@ -19,18 +19,7 @@ namespace wavex::server {
 
     template<typename Codec, typename RouterType>
     bool Server<Codec, RouterType>::is_http3_enabled() const noexcept {
-        return has_quic_transport || http3_enabled_;
-    }
-
-    template<typename Codec, typename RouterType>
-    void Server<Codec, RouterType>::enable_http3(engine::Http3Router &h3_router) noexcept {
-        h3_router_ = &h3_router;
-        http3_enabled_ = true;
-    }
-
-    template<typename Codec, typename RouterType>
-    void Server<Codec, RouterType>::attach_http3(engine::Http3Router &h3_router) noexcept {
-        enable_http3(h3_router);
+        return has_quic_transport;
     }
 
     template<typename Codec, typename RouterType>

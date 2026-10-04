@@ -84,7 +84,7 @@ namespace wavex::protos {
          */
         template<typename Request, typename Response>
         static void prepare_response(const Request &, Response &, bool,
-                                     unsigned, unsigned) {
+                                     unsigned, unsigned, unsigned short = 0) {
         }
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
@@ -120,13 +120,18 @@ namespace wavex::protos {
 
         template<typename Request, typename Response>
         static void prepare_response(const Request &, Response &res, bool keep,
-                                     unsigned timeout_sec, unsigned remaining) {
+                                     unsigned timeout_sec, unsigned remaining,
+                                     unsigned short alt_svc_port = 0) {
             if (keep) {
                 res.set("Connection", "keep-alive");
                 res.set("Keep-Alive",
                         "timeout=" + std::to_string(timeout_sec) + ", max=" + std::to_string(remaining));
             } else {
                 res.set("Connection", "close");
+            }
+            if (alt_svc_port > 0 && !res.header("alt-svc")) {
+                const auto port_str = std::to_string(alt_svc_port);
+                res.set("alt-svc", "h3=\":" + port_str + "\"; ma=2592000,h3-29=\":" + port_str + "\"; ma=2592000");
             }
         }
 
@@ -208,7 +213,12 @@ namespace wavex::protos {
 
         /// RFC 7540 §8.1.2.2 forbids Connection/Keep-Alive headers in HTTP/2.
         template<typename Request, typename Response>
-        static void prepare_response(const Request &, Response &, bool, unsigned, unsigned) {
+        static void prepare_response(const Request &, Response &res, bool, unsigned, unsigned,
+                                     unsigned short alt_svc_port = 0) {
+            if (alt_svc_port > 0 && !res.header("alt-svc")) {
+                const auto port_str = std::to_string(alt_svc_port);
+                res.set("alt-svc", "h3=\":" + port_str + "\"; ma=2592000,h3-29=\":" + port_str + "\"; ma=2592000");
+            }
         }
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
@@ -282,7 +292,8 @@ namespace wavex::protos {
         }
 
         template<typename Request, typename Response>
-        static void prepare_response(const Request &req, Response &res, bool keep_alive, unsigned timeout_sec, unsigned max_req) {
+        static void prepare_response(const Request &req, Response &res, bool keep_alive, unsigned timeout_sec, unsigned max_req,
+                                     unsigned short = 0) {
             if constexpr (requires { req.version_major(); }) {
                 if (req.version_major() == 1) {
                     res.set_keep_alive(keep_alive, timeout_sec, max_req);

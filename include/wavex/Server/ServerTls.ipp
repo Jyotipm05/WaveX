@@ -50,6 +50,11 @@ namespace wavex::server {
         return tls_enabled_;
     }
 
+    template<typename Codec, typename RouterType>
+    const TlsConfig &Server<Codec, RouterType>::tls_config() const noexcept {
+        return tls_config_;
+    }
+
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
     template<typename Codec, typename RouterType>
     void Server<Codec, RouterType>::init_ssl() {

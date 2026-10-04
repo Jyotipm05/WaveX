@@ -128,6 +128,26 @@ namespace wavex::server {
     }
 
     template<typename Codec, typename RouterType>
+    void Server<Codec, RouterType>::set_alt_svc_port(unsigned short port) noexcept {
+        alt_svc_port_ = port;
+    }
+
+    template<typename Codec, typename RouterType>
+    unsigned short Server<Codec, RouterType>::alt_svc_port() const noexcept {
+        return alt_svc_port_;
+    }
+
+    template<typename Codec, typename RouterType>
+    std::string_view Server<Codec, RouterType>::address() const noexcept {
+        return address_;
+    }
+
+    template<typename Codec, typename RouterType>
+    unsigned short Server<Codec, RouterType>::port() const noexcept {
+        return port_;
+    }
+
+    template<typename Codec, typename RouterType>
     void Server<Codec, RouterType>::trim_memory() {
         pool_.post_all([] { wavex::memory::get_thread_local_pool().release(); });
     }

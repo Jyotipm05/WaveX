@@ -101,7 +101,6 @@ namespace wavex::server {
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
         std::unique_ptr<asio::ssl::context> ssl_ctx_;         // 8 bytes (pointer)
         std::unique_ptr<network::quic::QuicServer> quic_server_; // 8 bytes (pointer)
-        engine::Http3Router *h3_router_{nullptr};             // 8 bytes (pointer)
 #endif
 
         std::chrono::milliseconds shutdown_timeout_{10000};   // 8 bytes
@@ -113,6 +112,7 @@ namespace wavex::server {
         std::atomic<std::size_t> active_connections_{0};      // 8 bytes
         unsigned max_keep_alive_requests_{1000};              // 4 bytes
         unsigned short port_{0};                              // 2 bytes
+        unsigned short alt_svc_port_{0};                      // 2 bytes
         std::atomic<ServerState> state_{ServerState::Stopped}; // 1 byte
         std::atomic<bool> is_stopped_{false};                 // 1 byte
         std::atomic<bool> is_signal_shutdown_{false};         // 1 byte
@@ -120,7 +120,6 @@ namespace wavex::server {
         bool exit_on_signal_{true};                           // 1 byte
         bool tls_enabled_{false};                             // 1 byte
         bool allow_insecure_quic_{false};                     // 1 byte
-        bool http3_enabled_{false};                           // 1 byte
 
     public:
         // ─── 3. Constructors & Destructor ────────────────────────────────────
@@ -147,32 +146,20 @@ namespace wavex::server {
         void enable_tls(std::string cert_file = "ssl/test.crt",
                        std::string key_file = "ssl/test.key");
         [[nodiscard]] bool is_tls_enabled() const noexcept;
+        [[nodiscard]] const TlsConfig &tls_config() const noexcept;
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
         // HTTP/3 & QUIC (ServerQuic.ipp)
         [[nodiscard]] bool is_http3_enabled() const noexcept;
-        void enable_http3(engine::Http3Router &h3_router) noexcept;
-        void attach_http3(engine::Http3Router &h3_router) noexcept;
         void allow_insecure(bool allow = true) noexcept;
+#endif
 
         // Connection handling (ServerConnection.ipp)
         template<typename Stream>
         asio::awaitable<void> handle_connection(std::shared_ptr<Stream> stream_ptr);
 
-        asio::awaitable<void> handle_http3_connection(
-            std::shared_ptr<network::quic::QuicStream> stream_ptr);
-
         template<typename Stream>
         void spawn_connection(std::shared_ptr<Stream> stream_ptr);
-
-        void spawn_http3_stream(std::shared_ptr<network::quic::QuicStream> stream_ptr);
-#else
-        template<typename Stream>
-        asio::awaitable<void> handle_connection(std::shared_ptr<Stream> stream_ptr);
-
-        template<typename Stream>
-        void spawn_connection(std::shared_ptr<Stream> stream_ptr);
-#endif
 
         // Configuration (ServerConfig.ipp)
         void enable_signal_handling(bool enable = true) noexcept;
@@ -191,6 +178,10 @@ namespace wavex::server {
         [[nodiscard]] std::size_t max_query_params() const noexcept;
         void set_max_headers(std::size_t max) noexcept;
         [[nodiscard]] std::size_t max_headers() const noexcept;
+        void set_alt_svc_port(unsigned short port) noexcept;
+        [[nodiscard]] unsigned short alt_svc_port() const noexcept;
+        [[nodiscard]] std::string_view address() const noexcept;
+        [[nodiscard]] unsigned short port() const noexcept;
         void set_not_found_handler(NotFoundHandler h);
         void set_not_found(std::string body, std::string content_type = "text/plain");
         void set_not_found_page(const std::string &file_path);
@@ -206,6 +197,8 @@ namespace wavex::server {
 
         // Memory management (ServerConfig.ipp)
         void trim_memory();
+
+        friend class ComposedHttpServer;
 
     private:
         void start_graceful_shutdown(std::chrono::milliseconds timeout);

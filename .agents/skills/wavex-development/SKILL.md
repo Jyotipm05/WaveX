@@ -49,7 +49,7 @@ This skill provides essential domain context for developing, extending, and debu
       socket lifecycle management, proactive idle cancellation (`cancel_all_idle()`), and graceful in-flight request
       drain (`server.exit()`, `server.shutdown()`, `attach_shutdown_event()`). Supports complete server restartability
       across `run()` / `exit()` lifecycles without process termination. Concrete server aliases include `Http1Server`,
-      `Http2Server`, and `Http3Server`.
+      `Http2Server`, `Http3Server`, and multi-protocol orchestrator `ComposedHttpServer`.
     - `TlsConfig.hpp`: TLS 1.3 configuration struct (`cert_file`, `key_file`, `key_password`, `dh_file`, `force_tls13`).
     - `ThreadPool.hpp`: Adaptive Tokio-style work-stealing thread pool with proportional hysteresis scaling. Hot paths
       (stealing and round-robin dispatch) access an atomic pointer table (`worker_table_`) without `workers_mutex_` lock
@@ -83,13 +83,21 @@ This skill provides essential domain context for developing, extending, and debu
       committed state (`is_sent`), and headers sent state (`is_headers_sent`). Concrete specializations include
       `Http1Response`, `Http2Response`, and `Http3Response`.
 
-6. **Network Subsystem (`include/wavex/Network/`, `src/Network/`)**:
-    - `QUIC.hpp`, `QUIC.cpp`: Native RFC 9000 & RFC 9001 QUIC UDP transport engine, packet framing, connection ID routing,
-      TLS 1.3 BoringSSL/OpenSSL QUIC method (`SSL_set_quic_method`), congestion control, packet acknowledgment, flow
-      control, and stream demuxing. Exposes `QuicStream` compliant with the `AsyncStream` concept (`async_read_some`,
-      `async_write_some`, `close()`), `QuicConnection`, and `QuicServer`. Handles automatic opening of server-initiated
-      unidirectional Control (Stream 3 with `SETTINGS`) and QPACK encoder/decoder streams (Streams 7 and 11), while
-      filtering and draining client unidirectional streams (`(sid & 0x03) == 0x02`).
+6. **Network Subsystem (`include/wavex/Network/QUIC/`, `src/Network/QUIC/`)**:
+    - Modular architecture split across 13 headers and 10 implementation files:
+      - `QuicConstants.hpp`: RFC 9000/9001 limits, constants, and packet types (`PacketType`).
+      - `VarInt.hpp`, `VarInt.cpp`: RFC 9000 §16 62-bit variable-length integer encoding/decoding.
+      - `ConnectionId.hpp`, `ConnectionId.cpp`: Connection ID handling with boundary validation (0–20 bytes).
+      - `QuicFrames.hpp`, `QuicFrames.cpp`: Type-safe `std::variant<...>` framing for all RFC 9000 frame types.
+      - `QuicPacket.hpp`, `QuicPacket.cpp`: Header packing/unpacking and short/long form parsing.
+      - `QuicCrypto.hpp`, `QuicCrypto.cpp`: RFC 9001 AEAD (AES-128-GCM) packet protection, header protection (AES-128-ECB), and HKDF secret derivation.
+      - `CongestionControl.hpp`: RFC 9002 NewReno congestion control and RTT estimator (`RttStats`).
+      - `QuicStream.hpp`, `QuicStream.cpp`: Per-stream offset reassembly buffer, flow control, and `AsyncStream` concept compliance.
+      - `QuicConnection.hpp`, `QuicConnection.cpp`: Core connection state machine, packet loss tracking, PTO, and TLS handshake integration.
+      - `QuicServer.hpp`, `QuicServer.cpp`: UDP master listener, CID dispatching, and connection lifecycle management.
+      - `QuicClient.hpp`, `QuicClient.cpp`: Client-side QUIC endpoint and handshake initiator.
+      - `QuicSocket.hpp`, `QuicSocket.cpp`: Asio coroutine stream socket interface and acceptor bridge.
+      - `QUIC.hpp`: Master aggregator forwarding header.
 
 7. **Utils Subsystem (`include/wavex/Utils/`, `src/Utils/`)**:
     - `Utils.hpp` (`wavex:utils`): Umbrella header and primary C++ module interface partition for utilities.
@@ -140,9 +148,12 @@ This skill provides essential domain context for developing, extending, and debu
     - WaveX provides dual distribution (headers and modules). Any header change must be checked against
       `src/<Subsystem>/<Component>.ixx`.
 
-7. **Server Must Not Name Specific Codecs**:
-    - `Server.hpp` must remain protocol-agnostic. Never branch on `if constexpr (is_http2)` in `Server.hpp`; all
-      protocol connection behavior must query `protocol_traits<Codec>`.
+7. **Server Must Not Name Specific Codecs & 3-Seam Decoupling**:
+    - `Server.hpp` must remain strictly protocol-agnostic. Never branch on `if constexpr (is_http2)` or `is_http3` in `Server.hpp` or `ServerConnection.ipp`.
+    - All protocol connection behavior must query `protocol_traits<Codec>`.
+    - `Server<Codec, Router>` must never hold secondary protocol routers (e.g. `h3_router_`), protocol enable flags (`http3_enabled_`), or secondary dispatch methods (`handle_http3_connection`).
+    - Protocol advertisement headers (e.g. RFC 9114 `Alt-Svc: h3=":4433"; ma=86400`) must be injected exclusively via `protocol_traits<Codec>::prepare_response(...)`.
+    - Multi-protocol concurrency (running HTTP/1.1 & HTTP/2 over TCP alongside HTTP/3 over QUIC on the same port) must be managed exclusively through `ComposedHttpServer`.
 
 8. **Future Protocols (GraphQL, WebSockets)**:
     - Refer to `.agents/rules/future-protocols-architecture.md` for architectural blueprints.
@@ -253,4 +264,23 @@ This skill provides essential domain context for developing, extending, and debu
 29. **HTTP/3 Server Unidirectional Control & QPACK Streams**:
     - Per RFC 9114 §6.2, both endpoints must open a control stream and send a `SETTINGS` frame (`0x04`) as the very first frame.
     - WaveX servers must immediately open Stream 3 (`0x00` VarInt control stream type followed by `SETTINGS`), Stream 7 (`0x02` QPACK encoder), and Stream 11 (`0x03` QPACK decoder) upon handshake completion (`SSL_do_handshake == 1`) after emitting `HANDSHAKE_DONE`.
+
+30. **MSVC Debug C++20 Module `<deque>` Proxy Allocator Incompatibility**:
+    - In MSVC Debug builds (`/MDd`), `std::deque` constructs internal proxy allocators (`std::allocator<std::_Container_proxy>`). When referenced inside a C++20 module partition (e.g. `http3codec.ixx`), AST instantiation bugs trigger `error C2665: 'std::allocator<std::_Container_proxy>::allocator': no overloaded function could convert all the argument types`.
+    - **Rule**: Inside C++20 module partitions, use `std::vector` instead of `std::deque` for dynamic FIFO tables, using `entries_.erase(entries_.begin())` for eviction.
+
+31. **QUIC Header Protection Offset Calculation & Uninitialized `pn_offset`**:
+    - `PacketHeader::pn_offset` is not provided by the caller when encrypting with `protect_packet`. It MUST be computed as `const std::size_t pn_offset = header_bytes.size() - hdr.packet_number_len` after packing the unmasked header.
+    - Masking at `hdr.pn_offset + i` when `pn_offset` is 0 corrupts the leading header bytes instead of the packet number field, breaking subsequent AAD verification.
+
+32. **QUIC Long Header `Length` Field Invariant**:
+    - In RFC 9000 §17.2, long header packets (Initial, Handshake, 0-RTT) require a `Length` VarInt specifying the length of the packet number plus payload ciphertext plus the 16-byte AEAD authentication tag.
+    - `protect_packet` must set `hdr.length = plaintext.size() + 16 + hdr.packet_number_len` prior to packing `header_bytes`.
+
+33. **OpenSSL AES-128-ECB Header Protection Zero Padding**:
+    - OpenSSL `EVP_CIPHER_CTX` defaults to PKCS#7 padding. Header protection requires raw 16-byte block cipher operations.
+    - Both `protect_packet` and `unprotect_packet` must invoke `EVP_CIPHER_CTX_set_padding(hp_ctx, 0)` immediately after `EVP_EncryptInit_ex`.
+
+34. **ConnectionId Hex Validation Bounds**:
+    - `ConnectionId::from_hex` must reject odd-length strings, strings with non-hex characters, and lengths exceeding `MAX_CONNECTION_ID_LEN` (20 bytes), cleanly returning `ConnectionId{}` rather than partial or malformed IDs.
 
