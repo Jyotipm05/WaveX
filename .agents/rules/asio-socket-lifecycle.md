@@ -87,3 +87,15 @@ This rule governs all Asio networking, socket options, coroutine frame lifetimes
 
 - **Winsock Linking**: On Windows platforms, all CMake networking targets must explicitly link `ws2_32` and `mswsock` (`PUBLIC`). GNU `ld` on MinGW does not process `#pragma comment(lib, ...)`, which causes link-time failures (`undefined reference to '__imp_WSAStartup'`, etc.) if omitted.
 - **TS Executor Prohibited**: Never define `ASIO_USE_TS_EXECUTOR_AS_DEFAULT` in any codebase header or build flag. It alters the fundamental type of `asio::any_completion_executor`, conflicting with modern C++20 awaitable signatures and triggering MSVC `C2371` type redefinition errors.
+
+---
+
+## 8. Unit Test `io_context` Run Termination & Background Timer Isolation
+
+- Asio's `io_context::run()` blocks as long as there is active work. An active `asio::steady_timer` (such as RFC 9002 loss detection/PTO timers, keep-alive pingers, or idle timeouts) counts as pending work.
+- If a tested component schedules a background timer that rearms on expiration (e.g. PTO exponential backoff retransmission), calling unbounded `io.run()` in unit tests causes the test runner to hang indefinitely until CTest timeout.
+- **Mandatory Pattern in Unit Tests**:
+  1. Coroutines or completion callbacks driving tests must explicitly invoke `io.stop()` (or `io2.stop()`) as soon as the test assertion or coroutine step succeeds.
+  2. Prefer bounded execution methods (`io.run_for(100ms)`, `io.poll()`, or `io.run_one()`) when verifying asynchronous state transitions in tests.
+  3. Close connection and transport objects (`conn->close()`) to ensure all background timers are canceled (`loss_timer_.cancel(ec)`) before `io_context` teardown.
+

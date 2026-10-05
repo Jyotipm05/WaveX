@@ -126,8 +126,8 @@ namespace wavex::network::quic {
             ~TlsCtx();
             TlsCtx(const TlsCtx &) = delete;
             TlsCtx &operator=(const TlsCtx &) = delete;
-            TlsCtx(TlsCtx &&) noexcept = default;
-            TlsCtx &operator=(TlsCtx &&) noexcept = default;
+            TlsCtx(TlsCtx &&other) noexcept;
+            TlsCtx &operator=(TlsCtx &&other) noexcept;
         };
 
     private:

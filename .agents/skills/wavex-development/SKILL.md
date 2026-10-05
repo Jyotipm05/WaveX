@@ -284,3 +284,17 @@ This skill provides essential domain context for developing, extending, and debu
 34. **ConnectionId Hex Validation Bounds**:
     - `ConnectionId::from_hex` must reject odd-length strings, strings with non-hex characters, and lengths exceeding `MAX_CONNECTION_ID_LEN` (20 bytes), cleanly returning `ConnectionId{}` rather than partial or malformed IDs.
 
+35. **Unit Test `io_context` Run Termination & Background Timer Isolation (RFC 9002 PTO)**:
+    - Asio's `io_context::run()` executes until ALL outstanding handlers and asynchronous work complete. Active `asio::steady_timer` instances (e.g. RFC 9002 loss detection, keep-alive timers, idle timers) constitute active asynchronous work.
+    - If a connection object rearms its timer upon expiration (such as `loss_detection_timer_` continually scheduling exponential backoff probes while packets remain in flight), an unbounded `io.run()` will never terminate, resulting in a hang until the test framework timeout.
+    - **Rule**:
+      - Coroutines driving unit test assertions must explicitly stop the executor (`io.stop()`) as soon as the test condition (e.g., stream accepted, frame parsed) is met.
+      - Never leave connection instances active across test boundaries without calling `conn->close()`, which must proactively cancel `loss_detection_timer_->cancel(ec)`.
+      - When chaining sequential coroutines on the same `io_context`, call `io.restart()` prior to the next `co_spawn` and `run()`.
+
+36. **TlsCtx Move Ownership & Single-Delivery in Stream Acceptors (Issues A10, A11, A14)**:
+    - Moving connection contexts (`TlsCtx`) must zero out raw OpenSSL pointers (`ssl = nullptr`, `ctx = nullptr`) and reset state flags (`initialized = false`, protection levels to 0) to prevent double-free crashes during RAII destruction.
+    - `accept_stream()` must release internal connection mutexes prior to awaiting the completion token, avoiding deadlocks when inbound datagram worker threads dispatch new streams.
+    - Newly created streams must be delivered directly to active acceptors (`stream_acceptor_`) without also retaining duplicate references in `accepted_streams_`, guaranteeing exactly-once delivery semantics.
+
+

@@ -43,3 +43,11 @@ This rule governs RFC 9000, RFC 9001, and RFC 9002 compliance, wire framing, hea
 ## 5. Stream Reassembly by Offset
 - Incoming `StreamFrame` payloads must be reassembled by `frame.offset` via contiguous window buffering or ordered chunk collation.
 - Detect and log `FINAL_SIZE_ERROR` if peer transmits data beyond a previously communicated FIN offset.
+
+---
+
+## 6. Timer Lifecycle, PTO Backoff & Connection Shutdown
+- `QuicConnection::close()` MUST proactively cancel `loss_timer_` (`loss_timer_.cancel(ec)`) and set `state_ = ConnectionState::Closed`.
+- `on_loss_detection_timeout()` must immediately return if `state_ == ConnectionState::Closed` before attempting frame retransmissions or rearming the timer.
+- In automated unit tests, coroutines awaiting stream events or connection handshakes must explicitly stop their associated `asio::io_context` upon completion to prevent PTO backoff timers from stalling test executors.
+

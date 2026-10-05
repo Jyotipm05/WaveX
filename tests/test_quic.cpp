@@ -1139,6 +1139,129 @@ void test_quic_packet_fuzzer() {
     std::cout << "  [PASS] Pre-authentication packet parser fuzz harness passed (2500 mutations)." << std::endl;
 }
 
+void test_quic_tls_ctx_move_and_accept_stream() {
+    std::cout << "[Test QUIC] TlsCtx move safety (A14) and accept_stream() single-delivery (A10, A11, B3)..." << std::endl;
+
+    // 1. A14: TlsCtx move constructor and move assignment nulling out source
+    {
+        QuicConnection::TlsCtx ctx1;
+        ctx1.initialized = true;
+        ctx1.current_write_level = 2;
+        ctx1.current_read_level = 1;
+
+        // Move construct
+        QuicConnection::TlsCtx ctx2(std::move(ctx1));
+        assert(ctx2.initialized);
+        assert(ctx2.current_write_level == 2);
+        assert(ctx2.current_read_level == 1);
+        assert(!ctx1.initialized);
+        assert(ctx1.current_write_level == 0);
+        assert(ctx1.current_read_level == 0);
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+        assert(ctx1.ssl == nullptr);
+        assert(ctx1.ctx == nullptr);
+#endif
+
+        // Move assign
+        QuicConnection::TlsCtx ctx3;
+        ctx3 = std::move(ctx2);
+        assert(ctx3.initialized);
+        assert(ctx3.current_write_level == 2);
+        assert(!ctx2.initialized);
+        assert(ctx2.current_write_level == 0);
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+        assert(ctx2.ssl == nullptr);
+        assert(ctx2.ctx == nullptr);
+#endif
+    }
+
+    // 2. A10 & A11 / B3: accept_stream() coroutine async suspension and single-delivery
+    {
+        asio::io_context io;
+        const auto ep = asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 9999);
+        const auto client_dcid = ConnectionId::random(8);
+        const auto client_scid = ConnectionId::random(8);
+        const auto server_cid = ConnectionId::random(8);
+
+        ProtectionKeys client_keys, server_keys;
+        CryptoSuite::derive_initial_secrets(client_dcid, client_keys, server_keys);
+
+        auto conn = std::make_shared<QuicConnection>(
+            server_cid, client_scid, ep, true, io.get_executor(), client_dcid);
+
+        auto send_stream_pkt = [&](uint64_t sid, const std::string_view payload_text, uint64_t pn) {
+            StreamFrame sf;
+            sf.stream_id = sid;
+            sf.data = std::string(payload_text);
+            sf.fin = false;
+            sf.has_length = true;
+            sf.has_offset = false;
+            sf.offset = 0;
+
+            std::string payload;
+            serialize_frame(sf, payload);
+
+            PacketHeader hdr;
+            hdr.is_long = true;
+            hdr.type = PacketType::Initial;
+            hdr.version = QUIC_VERSION_1;
+            hdr.dcid = client_dcid;
+            hdr.scid = client_scid;
+            hdr.packet_number = pn;
+            hdr.packet_number_len = 4;
+
+            std::string protected_packet;
+            const bool prot_ok = CryptoSuite::protect_packet(client_keys, hdr, payload, protected_packet);
+            assert(prot_ok);
+            conn->handle_datagram(protected_packet);
+        };
+
+        bool stream_accepted = false;
+        uint64_t accepted_sid = 0;
+
+        // Coroutine suspends waiting on accept_stream() (A10: lock must be released before suspension)
+        asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+            auto stream = co_await conn->accept_stream();
+            assert(stream != nullptr);
+            accepted_sid = stream->stream_id();
+            stream_accepted = true;
+            io.stop();
+            co_return;
+        }, asio::detached);
+
+        // Deliver stream 4 via protected datagram
+        send_stream_pkt(4, "hello from test", 1);
+
+        io.run();
+
+        assert(stream_accepted);
+        assert(accepted_sid == 4);
+
+        // A11: Verify stream was delivered directly to stream_acceptor_ and NOT kept in accepted_streams_
+        // A second accept_stream() should suspend waiting for a NEW stream and NOT immediately return stream 4
+        io.restart();
+        bool second_stream_accepted = false;
+        asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+            auto stream = co_await conn->accept_stream();
+            second_stream_accepted = true;
+            io.stop();
+            co_return;
+        }, asio::detached);
+
+        io.poll();
+        assert(!second_stream_accepted); // Must NOT re-deliver stream 4!
+
+        // Now deliver stream 8 to satisfy the second accept_stream
+        send_stream_pkt(8, "second stream", 2);
+
+        io.run();
+        assert(second_stream_accepted);
+        conn->close();
+    }
+
+    std::cout << "  [PASS] TlsCtx move safety (A14) and accept_stream() single-delivery (A10, A11, B3) passed." << std::endl;
+}
+
 int main() {
     std::cout << "=== Running WaveX QUIC Transport Tests ===\n";
     try {
@@ -1155,6 +1278,7 @@ int main() {
         test_rfc9002_loss_and_recovery();
         test_congestion_controller();
         test_quic_stream_async();
+        test_quic_tls_ctx_move_and_accept_stream();
         test_quic_server_client_loopback();
         test_quic_protocol();
         test_quic_socket_acceptor_tcp_syntax();

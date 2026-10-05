@@ -42,6 +42,40 @@ namespace wavex::network::quic {
         }
     }
 
+    QuicConnection::TlsCtx::TlsCtx(TlsCtx &&other) noexcept
+        : ssl(std::exchange(other.ssl, nullptr)),
+          ctx(std::exchange(other.ctx, nullptr)),
+          current_write_level(other.current_write_level),
+          current_read_level(other.current_read_level),
+          initialized(other.initialized) {
+        other.current_write_level = 0;
+        other.current_read_level = 0;
+        other.initialized = false;
+    }
+
+    QuicConnection::TlsCtx &QuicConnection::TlsCtx::operator=(TlsCtx &&other) noexcept {
+        if (this != &other) {
+            if (ssl) {
+                SSL_free(ssl);
+                ssl = nullptr;
+            }
+            if (ctx) {
+                SSL_CTX_free(ctx);
+                ctx = nullptr;
+            }
+            ssl = std::exchange(other.ssl, nullptr);
+            ctx = std::exchange(other.ctx, nullptr);
+            current_write_level = other.current_write_level;
+            current_read_level = other.current_read_level;
+            initialized = other.initialized;
+
+            other.current_write_level = 0;
+            other.current_read_level = 0;
+            other.initialized = false;
+        }
+        return *this;
+    }
+
     extern "C" {
     static int quic_tls_crypto_send(
         SSL * /*s*/, const unsigned char *buf, size_t buf_len,
@@ -1272,12 +1306,24 @@ namespace wavex::network::quic {
                     if (it == streams_.end()) {
                         auto stream = std::make_shared<QuicStream>(shared_from_this(), frame.stream_id, executor_);
                         streams_[frame.stream_id] = stream;
-                        accepted_streams_.push_back(stream);
+
+                        // A11 & B3: Prevent double delivery and monotonic queue accumulation.
+                        // If stream_acceptor_ is waiting, deliver directly to it without queueing in accepted_streams_.
                         if (stream_acceptor_) {
                             auto cb = std::move(*stream_acceptor_);
                             stream_acceptor_.reset();
                             cb(stream);
+                        } else if (!on_stream_created_) {
+                            // Only queue when server uses the accept_stream() pull API and cap at 128
+                            constexpr std::size_t kMaxAcceptQueueSize = 128;
+                            if (accepted_streams_.size() < kMaxAcceptQueueSize) {
+                                accepted_streams_.push_back(stream);
+                            } else {
+                                wavex::log::warn("[QUIC] accepted_streams_ queue full ({}), dropping unaccepted stream {}",
+                                                 kMaxAcceptQueueSize, frame.stream_id);
+                            }
                         }
+
                         new_streams.push_back(stream);
                         it = streams_.find(frame.stream_id);
                     }
@@ -1394,11 +1440,13 @@ namespace wavex::network::quic {
     }
 
     asio::awaitable<std::shared_ptr<QuicStream> > QuicConnection::accept_stream() {
-        std::unique_lock lock(mtx_);
-        if (!accepted_streams_.empty()) {
-            auto stream = accepted_streams_.front();
-            accepted_streams_.pop_front();
-            co_return stream;
+        {
+            std::lock_guard lock(mtx_);
+            if (!accepted_streams_.empty()) {
+                auto stream = accepted_streams_.front();
+                accepted_streams_.pop_front();
+                co_return stream;
+            }
         }
 
         co_return co_await asio::async_initiate<const asio::use_awaitable_t<> &, void(std::shared_ptr<QuicStream>)>(
@@ -1543,6 +1591,11 @@ namespace wavex::network::quic {
             std::lock_guard lock(mtx_);
             if (state_ == ConnectionState::Closed) return;
             state_ = ConnectionState::Closed;
+
+            if (loss_detection_timer_) {
+                asio::error_code ec;
+                loss_detection_timer_->cancel(ec);
+            }
 
             ConnectionCloseFrame ccf;
             ccf.error_code = static_cast<uint64_t>(err);

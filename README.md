@@ -916,21 +916,39 @@ server.run();  // Cycle 2: re-opens acceptor and thread pool cleanly
 
 WaveX is architected around a strict **3-Seam Foundation**, making it completely protocol-agnostic. You can implement custom binary protocols, line-based RPCs, database interfaces (e.g. Redis, Memcached), or IoT message transports with zero changes to the underlying Tokio work-stealing runtime, connection tracker, or TCP/TLS/QUIC network engine.
 
-```
-┌───────────────────────────────────────────────────────────┐
-│              Server<CustomCodec, CustomRouter>            │
-└─────────────┬─────────────────┬───────────────────┬───────┘
-              │                 │                   │
-              ▼                 ▼                   ▼
-      ┌───────────────┐ ┌───────────────┐ ┌───────────────────┐
-      │ 1. Transport  │ │   2. Codec    │ │ 3. Policy Seam    │
-      │     Seam      │ │     Seam      │ │ (protocol_traits) │
-      └───────┬───────┘ └───────┬───────┘ └─────────┬─────────┘
-              │                 │                   │
-     AsyncStream concept  parse_stream()    on_connection_start()
-     (TCP, TLS, QUIC)     serialize()       keep_alive()
-                          result enum       prepare_response()
-                                            configure_alpn()
+```mermaid
+    graph TD
+%% Main Server Block
+  Server["Server&lt;CustomCodec, CustomRouter&gt;"]
+
+%% Seams
+  Transport["1. Transport Seam"]
+  Codec["2. Codec Seam"]
+  Policy["3. Policy Seam<br>(protocol_traits)"]
+
+%% Detail Blocks
+  TransportDet["AsyncStream concept<br>(TCP, TLS, QUIC)<br>parse_stream()<br>on_connection_start()"]
+  CodecDet["serialize()<br>keep_alive()<br>result enum<br>prepare_response()"]
+  PolicyDet["configure_alpn()"]
+
+%% Relationships
+  Server --> Transport
+  Server --> Codec
+  Server --> Policy
+
+  Transport -.-> TransportDet
+  Codec -.-> CodecDet
+  Policy -.-> PolicyDet
+
+%% High-Contrast Styling (Pure Dark Text)
+  style Server fill:#eeeeee,stroke:#111,stroke-width:2px,color:#000000;
+  style Transport fill:#ffffff,stroke:#111,stroke-width:1px,color:#000000;
+  style Codec fill:#ffffff,stroke:#111,stroke-width:1px,color:#000000;
+  style Policy fill:#ffffff,stroke:#111,stroke-width:1px,color:#000000;
+  style TransportDet fill:#ffffff,stroke:#444,stroke-dasharray: 5 5,color:#000000;
+  style CodecDet fill:#ffffff,stroke:#444,stroke-dasharray: 5 5,color:#000000;
+  style PolicyDet fill:#ffffff,stroke:#444,stroke-dasharray: 5 5,color:#000000;
+
 ```
 
 ---
