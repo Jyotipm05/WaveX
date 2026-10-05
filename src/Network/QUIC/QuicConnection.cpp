@@ -137,9 +137,13 @@ namespace wavex::network::quic {
     QuicConnection::TlsCtx::~TlsCtx() = default;
 #endif
 
-    void QuicConnection::CryptoStreamReassembler::insert(const uint64_t offset, const std::string_view data) {
-        if (data.empty()) return;
-        if (offset + data.size() <= next_offset) return;
+    bool QuicConnection::CryptoStreamReassembler::insert(const uint64_t offset, const std::string_view data) {
+        if (data.empty()) return true;
+        if (offset + data.size() <= next_offset) return true;
+        if (offset > next_offset + kMaxCryptoBufferSize) return false;
+        if (pending_bytes + data.size() > kMaxCryptoBufferSize) return false;
+
+        pending_bytes += data.size();
         pending.emplace(offset, std::string(data));
         while (!pending.empty()) {
             const auto it = pending.begin();
@@ -150,8 +154,10 @@ namespace wavex::network::quic {
                 ready.append(it->second.data() + overlap, it->second.size() - overlap);
                 next_offset = end;
             }
+            pending_bytes -= it->second.size();
             pending.erase(it);
         }
+        return true;
     }
 
     std::string_view QuicConnection::CryptoStreamReassembler::available() const noexcept {
@@ -276,6 +282,10 @@ namespace wavex::network::quic {
         if (loss_detection_timer_) {
             asio::error_code ec;
             loss_detection_timer_->cancel(ec);
+        }
+        if (idle_timer_) {
+            asio::error_code ec;
+            idle_timer_->cancel(ec);
         }
     }
 
@@ -978,6 +988,30 @@ namespace wavex::network::quic {
         if (on_outbound_) on_outbound_();
     }
 
+    void QuicConnection::refresh_idle_timer() {
+        std::lock_guard lock(mtx_);
+        if (state_ == ConnectionState::Closed) return;
+
+        if (!idle_timer_) {
+            idle_timer_ = std::make_unique<asio::steady_timer>(executor_);
+        }
+
+        idle_timer_->expires_after(idle_timeout_);
+
+        auto weak_self = std::weak_ptr<QuicConnection>(shared_from_this());
+        idle_timer_->async_wait([weak_self](const asio::error_code &timer_ec) {
+            if (timer_ec) return;
+            if (auto self = weak_self.lock()) {
+                std::lock_guard lk(self->mtx_);
+                if (self->state_ != ConnectionState::Closed) {
+                    wavex::log::info("[QUIC] Idle timeout expired ({} ms) for DCID={} -> closing connection",
+                                     self->idle_timeout_.count(), self->peer_cid_.to_string());
+                    self->close(TransportError::NoError, "Idle timeout expired");
+                }
+            }
+        });
+    }
+
     void QuicConnection::retransmit_frame(const Frame &frame, const PacketType pkt_type) {
         std::visit([this, pkt_type]<typename T0>(const T0 &f) {
             using T = std::decay_t<T0>;
@@ -1106,6 +1140,7 @@ namespace wavex::network::quic {
     }
 
     void QuicConnection::handle_datagram(const std::string_view datagram) {
+        refresh_idle_timer();
         std::vector<std::shared_ptr<QuicStream> > created_streams;
         OutboundCallback outbound_cb;
         StreamCreatedCallback stream_created_cb; {
@@ -1223,7 +1258,11 @@ namespace wavex::network::quic {
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
                             if (tls_ && tls_->initialized) {
                                 auto &reassembler = reassembler_for_pkt_type(hdr.type);
-                                reassembler.insert(cf->offset, cf->data);
+                                if (!reassembler.insert(cf->offset, cf->data)) {
+                                    wavex::log::warn("[QUIC] CRYPTO stream buffer limit exceeded (>64KB) at offset {}", cf->offset);
+                                    close(TransportError::CryptoBufferExceeded, "CRYPTO buffer limit exceeded");
+                                    return;
+                                }
                                 wavex::log::info("[QUIC] Crypto reassembler for pkt_type={}: ready={} unconsumed={} next_offset={} pending_fragments={}",
                                                  static_cast<int>(hdr.type),
                                                  reassembler.ready.size(),
@@ -1431,11 +1470,18 @@ namespace wavex::network::quic {
     }
 
     void QuicConnection::close_stream(const uint64_t stream_id) {
-        std::lock_guard lock(mtx_);
-        auto it = streams_.find(stream_id);
-        if (it != streams_.end()) {
-            it->second->close();
-            streams_.erase(it);
+        std::shared_ptr<QuicStream> stream_to_close;
+        {
+            std::lock_guard lock(mtx_);
+            auto it = streams_.find(stream_id);
+            if (it != streams_.end()) {
+                stream_to_close = it->second;
+                streams_.erase(it);
+                stream_send_offsets_.erase(stream_id);
+            }
+        }
+        if (stream_to_close) {
+            stream_to_close->close();
         }
     }
 
@@ -1587,7 +1633,10 @@ namespace wavex::network::quic {
     }
 
     void QuicConnection::close(const TransportError err, const std::string_view reason) {
-        OutboundCallback cb; {
+        OutboundCallback cb;
+        ClosedCallback closed_cb;
+        ConnectionId lcid, pcid, orig_dcid;
+        {
             std::lock_guard lock(mtx_);
             if (state_ == ConnectionState::Closed) return;
             state_ = ConnectionState::Closed;
@@ -1595,6 +1644,10 @@ namespace wavex::network::quic {
             if (loss_detection_timer_) {
                 asio::error_code ec;
                 loss_detection_timer_->cancel(ec);
+            }
+            if (idle_timer_) {
+                asio::error_code ec;
+                idle_timer_->cancel(ec);
             }
 
             ConnectionCloseFrame ccf;
@@ -1618,8 +1671,13 @@ namespace wavex::network::quic {
                 pending_outbound_datagrams_.push_back(std::move(packet));
             }
             cb = on_outbound_;
+            closed_cb = on_closed_;
+            lcid = local_cid_;
+            pcid = peer_cid_;
+            orig_dcid = original_dcid_;
         }
         if (cb) cb();
+        if (closed_cb) closed_cb(lcid, pcid, orig_dcid);
     }
 
 } // namespace wavex::network::quic

@@ -49,6 +49,19 @@ namespace wavex::network::quic {
         return fin_sent_;
     }
 
+    bool QuicStream::is_finished() const noexcept {
+        std::lock_guard lock(mtx_);
+        return (fin_sent_ || !is_open_) && (fin_received_ || !is_open_);
+    }
+
+    void QuicStream::notify_finished_if_needed() {
+        if (is_finished()) {
+            if (auto c = conn_.lock()) {
+                c->close_stream(stream_id_);
+            }
+        }
+    }
+
     std::error_code QuicStream::cancel(std::error_code &ec) noexcept {
         ec.clear();
         std::lock_guard lock(mtx_);
@@ -80,6 +93,7 @@ namespace wavex::network::quic {
                 conn->queue_stream_data(stream_id_, "", true);
             }
         }
+        notify_finished_if_needed();
         return ec;
     }
 
@@ -112,6 +126,7 @@ namespace wavex::network::quic {
         if (cb) {
             cb(asio::error::connection_reset, 0);
         }
+        notify_finished_if_needed();
     }
 
     std::size_t QuicStream::available(std::error_code &ec) const noexcept {
@@ -278,6 +293,7 @@ namespace wavex::network::quic {
         if (cb) {
             cb(ec, bytes_transferred);
         }
+        notify_finished_if_needed();
     }
 
     std::error_code QuicStream::write_outbound(const std::string_view data, const bool fin) {
@@ -287,6 +303,9 @@ namespace wavex::network::quic {
                 fin_sent_ = true;
             }
             conn->queue_stream_data(stream_id_, data, fin);
+            if (fin) {
+                notify_finished_if_needed();
+            }
             return {};
         }
         return asio::error::not_connected;

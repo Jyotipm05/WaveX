@@ -71,6 +71,11 @@ namespace wavex::network::quic {
 
         [[nodiscard]] bool is_open() const noexcept { return socket_.is_open(); }
 
+        [[nodiscard]] std::size_t connection_count() const noexcept {
+            std::lock_guard lock(mtx_);
+            return connections_.size();
+        }
+
         [[nodiscard]] uint16_t local_port() const noexcept {
             asio::error_code ec;
             auto ep = socket_.local_endpoint(ec);

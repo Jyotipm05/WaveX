@@ -50,6 +50,13 @@ namespace wavex::network::quic {
         running_ = false;
         asio::error_code ec;
         socket_.close(ec);
+        std::lock_guard lock(mtx_);
+        for (auto &[cid, conn] : connections_) {
+            if (conn) {
+                conn->close();
+            }
+        }
+        connections_.clear();
     }
 
     void QuicServer::do_receive() {
@@ -126,6 +133,16 @@ namespace wavex::network::quic {
                             }
                             connections_[server_cid] = conn;
                             connections_[hdr.dcid] = conn;
+
+                            conn->set_closed_callback([this](const ConnectionId &scid, const ConnectionId &peer_cid, const ConnectionId &orig_dcid) {
+                                asio::post(io_, [this, scid, peer_cid, orig_dcid] {
+                                    std::lock_guard lock(mtx_);
+                                    connections_.erase(scid);
+                                    if (!orig_dcid.empty()) connections_.erase(orig_dcid);
+                                    if (!peer_cid.empty()) connections_.erase(peer_cid);
+                                    wavex::log::info("[QUIC] [server] Removed closed connection (remaining={})", connections_.size());
+                                });
+                            });
 
                             conn->set_outbound_callback([this, weak_conn = std::weak_ptr<QuicConnection>(conn)] {
                                 asio::post(io_, [this, weak_conn] {

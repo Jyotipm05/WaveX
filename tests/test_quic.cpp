@@ -1262,6 +1262,88 @@ void test_quic_tls_ctx_move_and_accept_stream() {
     std::cout << "  [PASS] TlsCtx move safety (A14) and accept_stream() single-delivery (A10, A11, B3) passed." << std::endl;
 }
 
+void test_quic_lifecycle_idle_eviction_and_crypto_cap() {
+    std::cout << "[Test QUIC] Lifecycle: Idle timeout (B1), stream eviction (B2), and CRYPTO cap (B7)..." << std::endl;
+
+    // 1. B7: CRYPTO reassembly buffer 64KB cap
+    {
+        QuicConnection::CryptoStreamReassembler reasm;
+        assert(reasm.insert(0, "small initial"));
+        assert(reasm.insert(13, "next slice"));
+
+        // Oversized single offset beyond 64KB gap
+        assert(!reasm.insert(100000, "far away"));
+
+        // Massive payload exceeding 64KB
+        std::string huge(70000, 'X');
+        assert(!reasm.insert(23, huge));
+    }
+
+    // 2. B2: Finished stream auto-eviction from connection map
+    {
+        asio::io_context io;
+        const auto ep = asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 9999);
+        const auto client_dcid = ConnectionId::random(8);
+        const auto client_scid = ConnectionId::random(8);
+        const auto server_cid = ConnectionId::random(8);
+
+        auto conn = std::make_shared<QuicConnection>(
+            server_cid, client_scid, ep, true, io.get_executor(), client_dcid);
+
+        auto stream = conn->create_stream(true);
+        assert(conn->stream_count() == 1);
+        assert(!stream->is_finished());
+
+        // Send FIN from our side
+        stream->write_outbound("request payload", true);
+        assert(stream->is_fin_sent());
+        assert(!stream->is_finished()); // Still waiting for peer FIN!
+        assert(conn->stream_count() == 1);
+
+        // Receive FIN from peer side
+        stream->push_inbound("response payload", true);
+        assert(stream->is_fin_received());
+        assert(stream->is_finished());
+
+        // Stream MUST now be automatically evicted from conn->streams_!
+        assert(conn->stream_count() == 0);
+        conn->close();
+    }
+
+    // 3. B1: Connection idle timeout and closed callback
+    {
+        asio::io_context io;
+        const auto ep = asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 9999);
+        const auto client_dcid = ConnectionId::random(8);
+        const auto client_scid = ConnectionId::random(8);
+        const auto server_cid = ConnectionId::random(8);
+
+        auto conn = std::make_shared<QuicConnection>(
+            server_cid, client_scid, ep, true, io.get_executor(), client_dcid);
+
+        // Configure a fast 50ms idle timeout for the unit test
+        conn->set_idle_timeout(std::chrono::milliseconds(50));
+
+        bool closed_callback_invoked = false;
+        conn->set_closed_callback([&](const ConnectionId &scid, const ConnectionId &peer_cid, const ConnectionId &orig_dcid) {
+            closed_callback_invoked = true;
+            assert(scid == server_cid);
+            assert(peer_cid == client_scid);
+            assert(orig_dcid == client_dcid);
+        });
+
+        conn->refresh_idle_timer();
+
+        // Run io until idle timer fires
+        io.run_for(std::chrono::milliseconds(100));
+
+        assert(closed_callback_invoked);
+        assert(conn->state() == ConnectionState::Closed);
+    }
+
+    std::cout << "  [PASS] Lifecycle: Idle timeout (B1), stream eviction (B2), and CRYPTO cap (B7) passed." << std::endl;
+}
+
 int main() {
     std::cout << "=== Running WaveX QUIC Transport Tests ===\n";
     try {
@@ -1279,6 +1361,7 @@ int main() {
         test_congestion_controller();
         test_quic_stream_async();
         test_quic_tls_ctx_move_and_accept_stream();
+        test_quic_lifecycle_idle_eviction_and_crypto_cap();
         test_quic_server_client_loopback();
         test_quic_protocol();
         test_quic_socket_acceptor_tcp_syntax();

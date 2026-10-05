@@ -58,13 +58,18 @@ namespace wavex::network::quic {
         // ─── 1. Nested Types & Definitions (TOP) ───────────────────────────
         using StreamCreatedCallback = std::function<void(std::shared_ptr<QuicStream>)>;
         using OutboundCallback = std::function<void()>;
+        using ClosedCallback = std::function<void(const ConnectionId &local_cid, const ConnectionId &peer_cid, const ConnectionId &orig_dcid)>;
 
         struct CryptoStreamReassembler {
+            // ─── 1. Nested Types & Constants ───
+            inline static constexpr std::size_t kMaxCryptoBufferSize = 65536;
+
             // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
             std::map<uint64_t, std::string> pending{};
             std::string ready{};
             uint64_t next_offset{0};
             std::size_t ready_consumed{0};
+            std::size_t pending_bytes{0};
 
             // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
             CryptoStreamReassembler() = default;
@@ -75,7 +80,7 @@ namespace wavex::network::quic {
             CryptoStreamReassembler &operator=(CryptoStreamReassembler &&) noexcept = default;
 
             // ─── 4. Member Functions (LAST) ────────────────────────────────────
-            void insert(uint64_t offset, std::string_view data);
+            [[nodiscard]] bool insert(uint64_t offset, std::string_view data);
             [[nodiscard]] std::string_view available() const noexcept;
             void consume(std::size_t bytes);
             [[nodiscard]] bool has_available() const noexcept;
@@ -134,6 +139,7 @@ namespace wavex::network::quic {
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
         std::unique_ptr<TlsCtx> tls_{};
         std::unique_ptr<asio::steady_timer> loss_detection_timer_{};
+        std::unique_ptr<asio::steady_timer> idle_timer_{};
         mutable std::recursive_mutex mtx_{};
         asio::ip::udp::endpoint peer_endpoint_{};
         std::unordered_map<uint64_t, std::shared_ptr<QuicStream>> streams_{};
@@ -145,6 +151,7 @@ namespace wavex::network::quic {
         std::optional<std::function<void(std::shared_ptr<QuicStream>)>> stream_acceptor_{};
         StreamCreatedCallback on_stream_created_{};
         OutboundCallback on_outbound_{};
+        ClosedCallback on_closed_{};
         asio::any_io_executor executor_{};
         std::string tls_cert_file_{};
         std::string tls_key_file_{};
@@ -163,6 +170,7 @@ namespace wavex::network::quic {
         std::array<uint64_t, 3> next_packet_number_{0, 0, 0};
         std::array<uint64_t, 3> largest_acked_packet_{0, 0, 0};
         std::chrono::steady_clock::time_point loss_time_{};
+        std::chrono::milliseconds idle_timeout_{30000};
         uint64_t max_data_{1024 * 1024}; // 1 MB
         uint64_t max_stream_data_{256 * 1024}; // 256 KB
         uint64_t data_sent_{0};
@@ -221,6 +229,23 @@ namespace wavex::network::quic {
             std::lock_guard lock(mtx_);
             on_outbound_ = std::move(cb);
         }
+
+        void set_closed_callback(ClosedCallback cb) {
+            std::lock_guard lock(mtx_);
+            on_closed_ = std::move(cb);
+        }
+
+        void set_idle_timeout(std::chrono::milliseconds timeout) noexcept {
+            std::lock_guard lock(mtx_);
+            idle_timeout_ = timeout;
+        }
+
+        [[nodiscard]] std::size_t stream_count() const noexcept {
+            std::lock_guard lock(mtx_);
+            return streams_.size();
+        }
+
+        void refresh_idle_timer();
 
         void set_tls_credentials(std::string cert_file, std::string key_file) {
             std::lock_guard lock(mtx_);

@@ -104,6 +104,8 @@ namespace wavex::network::quic {
         [[nodiscard]] bool is_open() const noexcept;
         [[nodiscard]] bool is_fin_received() const noexcept;
         [[nodiscard]] bool is_fin_sent() const noexcept;
+        [[nodiscard]] bool is_finished() const noexcept;
+        void notify_finished_if_needed();
 
         // Stream concept methods
         [[nodiscard]] QuicStream &lowest_layer() noexcept { return *this; }
