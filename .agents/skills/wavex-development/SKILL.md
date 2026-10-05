@@ -292,9 +292,33 @@ This skill provides essential domain context for developing, extending, and debu
       - Never leave connection instances active across test boundaries without calling `conn->close()`, which must proactively cancel `loss_detection_timer_->cancel(ec)`.
       - When chaining sequential coroutines on the same `io_context`, call `io.restart()` prior to the next `co_spawn` and `run()`.
 
-36. **TlsCtx Move Ownership & Single-Delivery in Stream Acceptors (Issues A10, A11, A14)**:
-    - Moving connection contexts (`TlsCtx`) must zero out raw OpenSSL pointers (`ssl = nullptr`, `ctx = nullptr`) and reset state flags (`initialized = false`, protection levels to 0) to prevent double-free crashes during RAII destruction.
-    - `accept_stream()` must release internal connection mutexes prior to awaiting the completion token, avoiding deadlocks when inbound datagram worker threads dispatch new streams.
-    - Newly created streams must be delivered directly to active acceptors (`stream_acceptor_`) without also retaining duplicate references in `accepted_streams_`, guaranteeing exactly-once delivery semantics.
+37. **QUIC Server Initial Handshake Response Gating (`has_received_initial_`)**:
+    - `send_initial_handshake_response()` builds an Initial ACK packet and a 1-RTT `HANDSHAKE_DONE` packet.
+    - In mock or non-TLS fallbacks, this response must **only** be triggered if `has_received_initial_` is true:
+      ```cpp
+      if (is_server_ && state_ == ConnectionState::Initial && has_received_initial_) {
+          send_initial_handshake_response();
+          state_ = ConnectionState::Connected;
+      }
+      ```
+    - Never invoke Initial handshake responses on non-Initial datagrams (e.g. client `Handshake` packets sent to validate address under RFC 9000 §8.1). Doing so injects spurious packets into `pending_outbound_datagrams_`, corrupting outbound queues and breaking packet count assertions.
+
+38. **Zero Protocol Leakage & Clean 3-Seam Decoupling**:
+    - The core server (`Server<Codec, Router>`) and connection loop (`ServerConnection.ipp`) must remain completely protocol-agnostic.
+    - Never place codec-specific conditional logic (`if constexpr (is_http3_codec_v)`) or protocol-specific state (`h3_router_`, `http3_enabled_`) inside generic server components.
+    - Multi-protocol serving (e.g. HTTP/1.1 & HTTP/2 over TCP + HTTP/3 over QUIC) must be encapsulated in `ComposedHttpServer`.
+
+39. **Peer Address Validation & Anti-Amplification (RFC 9000 §8.1)**:
+    - Prior to address validation, server sends are hard-capped at 3× cumulative bytes received.
+    - Receiving any client `Handshake` packet validates the client address (`peer_address_validated_ = true`).
+    - If handshake keys are not yet available, incoming `Handshake` packets must be safely buffered in `buffered_handshake_packets_` without advancing connection state or triggering fallback responses.
+
+---
+
+## Detailed Reference Guides
+
+- [QUIC Transport & Reliability Architecture](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/skills/wavex-development/references/quic-transport-and-reliability.md): Loss detection (RFC 9002), PTO timers, stream reassembly by offset, and handshake state machine gating.
+- [3-Seam Architecture & Protocol Composition](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/skills/wavex-development/references/three-seam-architecture.md): Transport, Codec, and Policy seams, protocol leakage prevention, and `ComposedHttpServer`.
+- [Testing & Concurrency Gotchas](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/skills/wavex-development/references/testing-and-debugging-gotchas.md): Asio timers in unit tests, mutex unlocking before `co_await`, and `weak_ptr` callback lifetime rules.
 
 

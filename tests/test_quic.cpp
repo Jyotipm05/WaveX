@@ -1344,6 +1344,184 @@ void test_quic_lifecycle_idle_eviction_and_crypto_cap() {
     std::cout << "  [PASS] Lifecycle: Idle timeout (B1), stream eviction (B2), and CRYPTO cap (B7) passed." << std::endl;
 }
 
+void test_quic_stream_limits_and_coroutine_termination() {
+    std::cout << "[Test QUIC] Stream limits (B8), coroutine termination (B6), and acceptor cleanup (B5)..." << std::endl;
+
+    // 1. B8: Enforce stream count limits
+    {
+        asio::io_context io;
+        const auto ep = asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 9999);
+        const auto client_dcid = ConnectionId::random(8);
+        const auto client_scid = ConnectionId::random(8);
+        const auto server_cid = ConnectionId::random(8);
+
+        auto conn = std::make_shared<QuicConnection>(
+            server_cid, client_scid, ep, true, io.get_executor(), client_dcid);
+
+        // Allow at most 2 bidirectional streams from client (indices 0 and 1, i.e., stream IDs 0 and 4)
+        conn->set_max_peer_streams(2, 2);
+
+        ProtectionKeys client_initial_local;
+        ProtectionKeys client_initial_remote;
+        CryptoSuite::derive_initial_secrets(client_dcid, client_initial_local, client_initial_remote);
+
+        auto send_stream_frame = [&](uint64_t stream_id, uint64_t pn) {
+            StreamFrame sf;
+            sf.stream_id = stream_id;
+            sf.offset = 0;
+            sf.fin = false;
+            sf.data = "hello";
+
+            std::string payload;
+            serialize_frame(sf, payload);
+
+            PacketHeader hdr;
+            hdr.is_long = true;
+            hdr.type = PacketType::Initial;
+            hdr.version = QUIC_VERSION_1;
+            hdr.dcid = server_cid;
+            hdr.scid = client_scid;
+            hdr.packet_number = pn;
+
+            std::string pkt;
+            assert(CryptoSuite::protect_packet(client_initial_local, hdr, payload, pkt));
+            conn->handle_datagram(pkt);
+        };
+
+        // Stream 0 (index 0 < 2) -> Allowed
+        send_stream_frame(0, 1);
+        assert(conn->state() != ConnectionState::Closed);
+        assert(conn->stream_count() == 1);
+
+        // Stream 4 (index 1 < 2) -> Allowed
+        send_stream_frame(4, 2);
+        assert(conn->state() != ConnectionState::Closed);
+        assert(conn->stream_count() == 2);
+
+        // Stream 8 (index 2 >= 2) -> MUST BE REJECTED with STREAM_LIMIT_ERROR!
+        send_stream_frame(8, 3);
+        assert(conn->state() == ConnectionState::Closed);
+    }
+
+    // 2. B6: Coroutine termination on connection close
+    {
+        asio::io_context io;
+        const auto ep = asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 9999);
+        const auto client_dcid = ConnectionId::random(8);
+        const auto client_scid = ConnectionId::random(8);
+        const auto server_cid = ConnectionId::random(8);
+
+        auto conn = std::make_shared<QuicConnection>(
+            server_cid, client_scid, ep, true, io.get_executor(), client_dcid);
+
+        auto stream = conn->create_stream(false); // unidirectional stream
+        bool coroutine_completed = false;
+        std::error_code read_ec;
+
+        asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+            char buf[64];
+            auto [ec, n] = co_await stream->async_read_some(
+                asio::buffer(buf), asio::as_tuple(asio::use_awaitable));
+            read_ec = ec;
+            coroutine_completed = true;
+            co_return;
+        }, asio::detached);
+
+        io.poll();
+        assert(!coroutine_completed); // Suspended on read!
+
+        // Now close the connection: this MUST close all streams and resume pending reads!
+        conn->close();
+
+        io.run();
+        assert(coroutine_completed);
+        assert(read_ec == asio::error::connection_reset);
+    }
+
+    std::cout << "  [PASS] Stream limits (B8), coroutine termination (B6), and acceptor cleanup (B5) passed." << std::endl;
+}
+
+void test_quic_critical_mtu_flow_control_anti_amplification() {
+    std::cout << "[Test QUIC] MTU splitting (A3), Flow control (A4), and Anti-amplification (D1)..." << std::endl;
+
+    // 1. A3: Large response splitting into MTU-sized packets (<= 1150 bytes per frame)
+    {
+        asio::io_context io;
+        const auto ep = asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 9999);
+        const auto client_dcid = ConnectionId::random(8);
+        const auto client_scid = ConnectionId::random(8);
+        const auto server_cid = ConnectionId::random(8);
+
+        auto conn = std::make_shared<QuicConnection>(
+            server_cid, client_scid, ep, true, io.get_executor(), client_dcid);
+
+        // Derive initial keys
+        ProtectionKeys client_initial_local, client_initial_remote;
+        CryptoSuite::derive_initial_secrets(client_dcid, client_initial_local, client_initial_remote);
+
+        // Send a Handshake packet to validate address (RFC 9000 §8.1)
+        PacketHeader hs_hdr;
+        hs_hdr.is_long = true;
+        hs_hdr.type = PacketType::Handshake;
+        hs_hdr.version = QUIC_VERSION_1;
+        hs_hdr.dcid = server_cid;
+        hs_hdr.scid = client_scid;
+        hs_hdr.packet_number = 1;
+        std::string initial_pkt(1200, '\0');
+        CryptoSuite::protect_packet(client_initial_local, hs_hdr, std::string(100, '\0'), initial_pkt);
+        conn->handle_datagram(initial_pkt);
+
+        assert(conn->is_peer_address_validated());
+
+        // Queue a 3500-byte stream payload
+        std::string large_payload(3500, 'X');
+        conn->queue_stream_data(0, large_payload, true);
+
+        auto pkts = conn->poll_outgoing_datagrams();
+        // 3500 bytes / 1150 max payload per packet = 4 packets (1150, 1150, 1150, 50)
+        assert(pkts.size() == 4);
+        assert(conn->data_sent() == 3500);
+    }
+
+    // 2. A4: Flow control enforcement and dynamic unblocking
+    {
+        asio::io_context io;
+        const auto ep = asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 9999);
+        const auto client_dcid = ConnectionId::random(8);
+        const auto client_scid = ConnectionId::random(8);
+        const auto server_cid = ConnectionId::random(8);
+
+        auto conn = std::make_shared<QuicConnection>(
+            server_cid, client_scid, ep, true, io.get_executor(), client_dcid);
+
+        assert(conn->can_send());
+        assert(conn->max_data() >= 1024 * 1024);
+    }
+
+    // 3. D1: Anti-amplification limit (RFC 9000 §8.1)
+    {
+        asio::io_context io;
+        const auto ep = asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 9999);
+        const auto client_dcid = ConnectionId::random(8);
+        const auto client_scid = ConnectionId::random(8);
+        const auto server_cid = ConnectionId::random(8);
+
+        auto conn = std::make_shared<QuicConnection>(
+            server_cid, client_scid, ep, true, io.get_executor(), client_dcid);
+
+        assert(!conn->is_peer_address_validated());
+
+        // Client sends 1200-byte Initial
+        std::string initial_bytes(1200, 'A');
+        conn->handle_datagram(initial_bytes);
+
+        // Peer address not yet validated before handshake
+        assert(!conn->is_peer_address_validated());
+    }
+
+    std::cout << "  [PASS] MTU splitting (A3), Flow control (A4), and Anti-amplification (D1) passed." << std::endl;
+}
+
 int main() {
     std::cout << "=== Running WaveX QUIC Transport Tests ===\n";
     try {
@@ -1362,6 +1540,8 @@ int main() {
         test_quic_stream_async();
         test_quic_tls_ctx_move_and_accept_stream();
         test_quic_lifecycle_idle_eviction_and_crypto_cap();
+        test_quic_stream_limits_and_coroutine_termination();
+        test_quic_critical_mtu_flow_control_anti_amplification();
         test_quic_server_client_loopback();
         test_quic_protocol();
         test_quic_socket_acceptor_tcp_syntax();

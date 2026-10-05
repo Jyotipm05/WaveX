@@ -625,6 +625,44 @@ void test_http3_unidirectional_control_and_qpack_streams() {
     std::cout << "  [PASS] RFC 9114 §6.2 Unidirectional Control & QPACK streams verified.\n";
 }
 
+void test_http3_body_truncation_prevention_c1() {
+    std::cout << "[Test HTTP/3] Body truncation prevention & Content-Length verification (C1)...\n";
+
+    // 1. Construct valid HTTP/3 request
+    h3::request req;
+    req.method_type = method::POST;
+    req.target = "/submit";
+    req.scheme = "https";
+    req.authority = "127.0.0.1";
+    req.headers.emplace_back("content-length", "11");
+    req.body = "hello world";
+
+    std::string headers_frame = h3::encoder::encode_frame(
+        frame_type::HEADERS,
+        qpk::encoder::encode_request_headers(req.method_type, req.target, req.scheme,
+                                             req.authority, req.headers));
+    std::string data_frame = h3::encoder::encode_data_frame(req.body);
+    std::string full_wire = headers_frame + data_frame;
+
+    // 2. Cut wire buffer in half (DATA frame is cut off)
+    assert(data_frame.size() > 5);
+    std::string partial_wire = headers_frame + data_frame.substr(0, data_frame.size() - 5);
+
+    h3::request parsed_req;
+    std::size_t consumed = 0;
+    qpk::dynamic_table dec_dt;
+    const auto res_incomplete = http3codec::parse_request(partial_wire, parsed_req, consumed, dec_dt);
+    // Must return incomplete, NOT success with a truncated body!
+    assert(res_incomplete == http3codec::result::incomplete);
+
+    // 3. Provide full wire: must return success with the full body
+    const auto res_complete = http3codec::parse_request(full_wire, parsed_req, consumed, dec_dt);
+    assert(res_complete == http3codec::result::success);
+    assert(parsed_req.body == "hello world");
+
+    std::cout << "  [PASS] C1: Request body truncation properly prevented.\n";
+}
+
 int main() {
     std::cout << "=== Running WaveX HTTP/3 Codec Tests ===\n";
     try {
@@ -639,6 +677,7 @@ int main() {
         test_http3_rfc9114_stream_rules();
         test_http3_unidirectional_control_and_qpack_streams();
         test_http3_server_acceptor_guard();
+        test_http3_body_truncation_prevention_c1();
         std::cout << "=== All HTTP/3 Tests PASSED ===\n";
         return 0;
     } catch (const std::exception &ex) {

@@ -51,3 +51,22 @@ This rule governs RFC 9000, RFC 9001, and RFC 9002 compliance, wire framing, hea
 - `on_loss_detection_timeout()` must immediately return if `state_ == ConnectionState::Closed` before attempting frame retransmissions or rearming the timer.
 - In automated unit tests, coroutines awaiting stream events or connection handshakes must explicitly stop their associated `asio::io_context` upon completion to prevent PTO backoff timers from stalling test executors.
 
+---
+
+## 7. Address Validation & Handshake Packet Buffering (RFC 9000 §8.1)
+- Receiving a client `Handshake` packet validates the client's network address (`peer_address_validated_ = true`), unblocking the 3× anti-amplification limit.
+- If handshake keys (`handshake_keys_peer_`) are not yet available, incoming `Handshake` packets must be safely buffered in `buffered_handshake_packets_` (capped to 16) without failing the connection.
+- Handshake packets must never trigger Initial packet handling or advance connection state until properly decrypted.
+
+---
+
+## 8. State Machine Fallbacks & Initial Handshake Response Gating
+- Server Initial handshake responses (including mock/non-TLS fallbacks) MUST be strictly gated on `has_received_initial_`:
+  ```cpp
+  if (is_server_ && state_ == ConnectionState::Initial && has_received_initial_) {
+      send_initial_handshake_response();
+      state_ = ConnectionState::Connected;
+  }
+  ```
+- NEVER invoke `send_initial_handshake_response()` upon receiving non-Initial packets (such as buffered `Handshake` or 1-RTT datagrams). Doing so emits spurious Initial ACK and HANDSHAKE_DONE frames, corrupting the connection state and polluting outbound packet queues.
+

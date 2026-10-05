@@ -144,6 +144,9 @@ namespace wavex::network::quic {
         asio::ip::udp::endpoint peer_endpoint_{};
         std::unordered_map<uint64_t, std::shared_ptr<QuicStream>> streams_{};
         std::unordered_map<uint64_t, uint64_t> stream_send_offsets_{};
+        std::unordered_map<uint64_t, uint64_t> stream_data_sent_{};
+        std::unordered_map<uint64_t, std::string> stream_send_queues_{};
+        std::unordered_map<uint64_t, bool> stream_send_fin_{};
         std::deque<std::string> pending_outbound_datagrams_{};
         std::deque<std::string> buffered_handshake_packets_{};
         std::deque<std::string> buffered_one_rtt_packets_{};
@@ -175,8 +178,12 @@ namespace wavex::network::quic {
         uint64_t max_stream_data_{256 * 1024}; // 256 KB
         uint64_t data_sent_{0};
         uint64_t data_received_{0};
+        uint64_t cumulative_bytes_received_{0};
+        uint64_t cumulative_bytes_sent_{0};
         uint64_t next_bidi_stream_id_{0};
         uint64_t next_uni_stream_id_{0};
+        uint64_t max_peer_bidi_streams_{100};
+        uint64_t max_peer_uni_streams_{100};
         uint64_t crypto_send_offset_initial_{0};
         uint64_t crypto_send_offset_handshake_{0};
         uint64_t crypto_send_offset_app_{0};
@@ -191,6 +198,7 @@ namespace wavex::network::quic {
         ConnectionState state_{ConnectionState::Initial};
         std::array<bool, 3> has_largest_acked_{false, false, false};
         bool is_server_{true};
+        bool peer_address_validated_{false};
         bool handshake_done_{false};
         bool has_received_initial_{false};
         bool has_received_handshake_{false};
@@ -243,6 +251,37 @@ namespace wavex::network::quic {
         [[nodiscard]] std::size_t stream_count() const noexcept {
             std::lock_guard lock(mtx_);
             return streams_.size();
+        }
+
+        [[nodiscard]] bool can_send() const noexcept {
+            std::lock_guard lock(mtx_);
+            return congestion_controller_.can_send() && (data_sent_ < max_data_);
+        }
+
+        [[nodiscard]] bool is_peer_address_validated() const noexcept {
+            std::lock_guard lock(mtx_);
+            return peer_address_validated_;
+        }
+
+        [[nodiscard]] uint64_t max_data() const noexcept {
+            std::lock_guard lock(mtx_);
+            return max_data_;
+        }
+
+        [[nodiscard]] uint64_t max_stream_data() const noexcept {
+            std::lock_guard lock(mtx_);
+            return max_stream_data_;
+        }
+
+        [[nodiscard]] uint64_t data_sent() const noexcept {
+            std::lock_guard lock(mtx_);
+            return data_sent_;
+        }
+
+        void set_max_peer_streams(uint64_t max_bidi, uint64_t max_uni) noexcept {
+            std::lock_guard lock(mtx_);
+            max_peer_bidi_streams_ = max_bidi;
+            max_peer_uni_streams_ = max_uni;
         }
 
         void refresh_idle_timer();
@@ -332,6 +371,7 @@ namespace wavex::network::quic {
         void retransmit_frame(const Frame &frame, PacketType pkt_type);
         void process_frames(const std::vector<Frame> &frames, uint64_t pn, PacketType pkt_type, std::vector<std::shared_ptr<QuicStream>> &new_streams);
         void send_initial_handshake_response();
+        void flush_stream_send_queues();
         void run_tls_engine();
         void drain_buffered_packets();
         [[nodiscard]] std::string build_quic_transport_params() const;

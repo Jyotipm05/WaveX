@@ -865,6 +865,7 @@ namespace wavex::network::quic {
             }
             detect_lost_packets(s, ack.largest_acknowledged);
             arm_loss_detection_timer();
+            flush_stream_send_queues();
         }
     }
 
@@ -1145,6 +1146,7 @@ namespace wavex::network::quic {
         OutboundCallback outbound_cb;
         StreamCreatedCallback stream_created_cb; {
             std::lock_guard lock(mtx_);
+            cumulative_bytes_received_ += datagram.size();
             std::string_view remaining = datagram;
 
             while (!remaining.empty()) {
@@ -1174,6 +1176,7 @@ namespace wavex::network::quic {
                     if (hdr.type == PacketType::Initial) {
                         keys = &initial_keys_peer_;
                     } else if (hdr.type == PacketType::Handshake) {
+                        peer_address_validated_ = true; // RFC 9000 §8.1: Client Handshake packet validates peer address
                         if (!handshake_keys_peer_.valid) {
                             if (buffered_handshake_packets_.size() < 16) {
                                 buffered_handshake_packets_.emplace_back(packet_bytes);
@@ -1307,7 +1310,7 @@ namespace wavex::network::quic {
                 send_ack_for_space(PacketType::OneRTT);
             }
 
-            if (is_server_ && state_ == ConnectionState::Initial) {
+            if (is_server_ && state_ == ConnectionState::Initial && has_received_initial_) {
                 // For mock or non-TLS connections (e.g. unit tests without certs), auto-complete handshake
                 if (!tls_ || !tls_->initialized) {
                     wavex::log::info("[QUIC] Non-TLS or uninitialized fallback: calling send_initial_handshake_response()");
@@ -1343,6 +1346,17 @@ namespace wavex::network::quic {
                     // STREAM frames are ack-eliciting; coalesced ACK is handled at packet/datagram level
                     auto it = streams_.find(frame.stream_id);
                     if (it == streams_.end()) {
+                        // B8: Enforce advertised stream count limits (RFC 9000 §4.6)
+                        const bool is_bidi = (frame.stream_id & 0x02) == 0x00;
+                        const uint64_t stream_idx = frame.stream_id >> 2;
+                        const uint64_t max_allowed = is_bidi ? max_peer_bidi_streams_ : max_peer_uni_streams_;
+                        if (stream_idx >= max_allowed) {
+                            wavex::log::warn("[QUIC] Peer exceeded stream limit: sid={} (idx={}) >= max_allowed={}",
+                                             frame.stream_id, stream_idx, max_allowed);
+                            close(TransportError::StreamLimitError, "Stream limit exceeded");
+                            return;
+                        }
+
                         auto stream = std::make_shared<QuicStream>(shared_from_this(), frame.stream_id, executor_);
                         streams_[frame.stream_id] = stream;
 
@@ -1373,10 +1387,12 @@ namespace wavex::network::quic {
                 } else if constexpr (std::is_same_v<T, MaxDataFrame>) {
                     if (frame.max_data > max_data_) {
                         max_data_ = frame.max_data;
+                        flush_stream_send_queues();
                     }
                 } else if constexpr (std::is_same_v<T, MaxStreamDataFrame>) {
                     if (frame.max_stream_data > max_stream_data_) {
                         max_stream_data_ = frame.max_stream_data;
+                        flush_stream_send_queues();
                     }
                 } else if constexpr (std::is_same_v<T, ResetStreamFrame>) {
                     auto it = streams_.find(frame.stream_id);
@@ -1478,6 +1494,9 @@ namespace wavex::network::quic {
                 stream_to_close = it->second;
                 streams_.erase(it);
                 stream_send_offsets_.erase(stream_id);
+                stream_data_sent_.erase(stream_id);
+                stream_send_queues_.erase(stream_id);
+                stream_send_fin_.erase(stream_id);
             }
         }
         if (stream_to_close) {
@@ -1523,37 +1542,105 @@ namespace wavex::network::quic {
     void QuicConnection::queue_stream_data(const uint64_t stream_id, const std::string_view data, const bool fin) {
         OutboundCallback cb; {
             std::lock_guard lock(mtx_);
-            StreamFrame sf;
-            sf.stream_id = stream_id;
-            sf.data = std::string(data);
-            sf.fin = fin;
-            sf.has_length = true;
-
-            uint64_t &cur_offset = stream_send_offsets_[stream_id];
-            sf.offset = cur_offset;
-            sf.has_offset = (cur_offset > 0);
-            cur_offset += data.size();
-
-            std::string payload;
-            serialize_frame(sf, payload);
-
-            PacketHeader hdr;
-            hdr.is_long = false;
-            hdr.type = PacketType::OneRTT;
-            hdr.dcid = peer_cid_;
-            hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
-
-            std::string packet;
-            const auto &keys = (one_rtt_keys_local_.valid)
-                                   ? one_rtt_keys_local_
-                                   : (one_rtt_keys_.valid ? one_rtt_keys_ : initial_keys_local_);
-            if (CryptoSuite::protect_packet(keys, hdr, payload, packet)) {
-                track_sent_packet(PacketType::OneRTT, hdr.packet_number, packet.size(), {sf});
-                pending_outbound_datagrams_.push_back(std::move(packet));
+            stream_send_queues_[stream_id].append(data);
+            if (fin) {
+                stream_send_fin_[stream_id] = true;
             }
+            flush_stream_send_queues();
             cb = on_outbound_;
         }
         if (cb) cb();
+    }
+
+    void QuicConnection::flush_stream_send_queues() {
+        if (state_ == ConnectionState::Closed) return;
+
+        // MTU packetization: safe stream frame payload fitting inside typical network MTU (RFC 9000 §14.1)
+        constexpr std::size_t kMaxStreamFramePayload = 1150;
+
+        for (auto &[sid, queue] : stream_send_queues_) {
+            while (!queue.empty() || stream_send_fin_[sid]) {
+                // Flow control limits (A4)
+                const uint64_t conn_credit = (max_data_ > data_sent_) ? (max_data_ - data_sent_) : 0;
+                uint64_t &stream_sent = stream_data_sent_[sid];
+                const uint64_t stream_credit = (max_stream_data_ > stream_sent) ? (max_stream_data_ - stream_sent) : 0;
+
+                if (!queue.empty() && (conn_credit == 0 || stream_credit == 0)) {
+                    wavex::log::info("[QUIC] Flow control credit blocked on sid={} (conn_credit={}, stream_credit={})",
+                                     sid, conn_credit, stream_credit);
+                    break;
+                }
+
+                // Anti-amplification limit (D1, RFC 9000 §8.1)
+                if (is_server_ && !peer_address_validated_) {
+                    const uint64_t max_allowed_send = 3 * (std::max<uint64_t>)(cumulative_bytes_received_, 1200);
+                    if (cumulative_bytes_sent_ + 100 > max_allowed_send) {
+                        wavex::log::warn("[QUIC] Anti-amplification 3x limit reached (sent={} > 3*recv={}), suppressing outbound",
+                                         cumulative_bytes_sent_, cumulative_bytes_received_);
+                        break;
+                    }
+                }
+
+                std::size_t chunk_len = queue.size();
+                if (chunk_len > kMaxStreamFramePayload) {
+                    chunk_len = kMaxStreamFramePayload;
+                }
+                if (chunk_len > conn_credit) {
+                    chunk_len = static_cast<std::size_t>(conn_credit);
+                }
+                if (chunk_len > stream_credit) {
+                    chunk_len = static_cast<std::size_t>(stream_credit);
+                }
+
+                if (chunk_len == 0 && !queue.empty()) {
+                    break;
+                }
+
+                const bool is_last = (chunk_len == queue.size());
+                const bool chunk_fin = is_last && stream_send_fin_[sid];
+
+                StreamFrame sf;
+                sf.stream_id = sid;
+                sf.data = queue.substr(0, chunk_len);
+                sf.fin = chunk_fin;
+                sf.has_length = true;
+
+                uint64_t &cur_offset = stream_send_offsets_[sid];
+                sf.offset = cur_offset;
+                sf.has_offset = (cur_offset > 0);
+                cur_offset += chunk_len;
+                data_sent_ += chunk_len;
+                stream_sent += chunk_len;
+
+                queue.erase(0, chunk_len);
+                if (chunk_fin) {
+                    stream_send_fin_[sid] = false;
+                }
+
+                std::string payload;
+                serialize_frame(sf, payload);
+
+                PacketHeader hdr;
+                hdr.is_long = false;
+                hdr.type = PacketType::OneRTT;
+                hdr.dcid = peer_cid_;
+                hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
+
+                std::string packet;
+                const auto &keys = (one_rtt_keys_local_.valid)
+                                       ? one_rtt_keys_local_
+                                       : (one_rtt_keys_.valid ? one_rtt_keys_ : initial_keys_local_);
+                if (CryptoSuite::protect_packet(keys, hdr, payload, packet)) {
+                    track_sent_packet(PacketType::OneRTT, hdr.packet_number, packet.size(), {sf});
+                    cumulative_bytes_sent_ += packet.size();
+                    pending_outbound_datagrams_.push_back(std::move(packet));
+                }
+
+                if (chunk_len == 0 && chunk_fin) {
+                    break;
+                }
+            }
+        }
     }
 
     uint64_t QuicConnection::open_unidirectional_stream() {
@@ -1636,6 +1723,7 @@ namespace wavex::network::quic {
         OutboundCallback cb;
         ClosedCallback closed_cb;
         ConnectionId lcid, pcid, orig_dcid;
+        std::vector<std::shared_ptr<QuicStream>> open_streams;
         {
             std::lock_guard lock(mtx_);
             if (state_ == ConnectionState::Closed) return;
@@ -1670,11 +1758,24 @@ namespace wavex::network::quic {
             if (CryptoSuite::protect_packet(keys, hdr, payload, packet)) {
                 pending_outbound_datagrams_.push_back(std::move(packet));
             }
+            open_streams.reserve(streams_.size());
+            for (auto &[sid, s] : streams_) {
+                if (s) open_streams.push_back(s);
+            }
+            streams_.clear();
+            stream_send_offsets_.clear();
+            stream_data_sent_.clear();
+            stream_send_queues_.clear();
+            stream_send_fin_.clear();
+
             cb = on_outbound_;
             closed_cb = on_closed_;
             lcid = local_cid_;
             pcid = peer_cid_;
             orig_dcid = original_dcid_;
+        }
+        for (auto &s : open_streams) {
+            s->close();
         }
         if (cb) cb();
         if (closed_cb) closed_cb(lcid, pcid, orig_dcid);

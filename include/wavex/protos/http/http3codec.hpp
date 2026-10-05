@@ -1102,7 +1102,7 @@ namespace wavex::protos::http {
 
                     const auto r = parse_frame(remaining, hdr, payload, frame_bytes);
                     if (r == result::incomplete) {
-                        return headers_received ? result::success : result::incomplete;
+                        return result::incomplete;
                     }
                     if (r == result::error) return result::error;
 
@@ -1129,6 +1129,20 @@ namespace wavex::protos::http {
                 }
 
                 if (!headers_received) return result::incomplete;
+
+                // C1: Verify full body reception against Content-Length if specified
+                for (const auto &[name, val] : decoded_headers) {
+                    if (name == "content-length") {
+                        if (auto cl = std::strtoull(val.c_str(), nullptr, 10); cl != 0 || val == "0") {
+                            if (body_accumulator.size() < cl) {
+                                return result::incomplete; // Incomplete body; wait for remaining DATA frame(s)
+                            }
+                            if (body_accumulator.size() > cl) {
+                                return result::error; // Content-Length mismatch error per RFC 9114
+                            }
+                        }
+                    }
+                }
 
                 dt = working_dt;
                 bytes_consumed = cursor;
@@ -1197,7 +1211,7 @@ namespace wavex::protos::http {
 
                     const auto r = parse_frame(remaining, hdr, payload, frame_bytes);
                     if (r == result::incomplete) {
-                        return headers_received ? result::success : result::incomplete;
+                        return result::incomplete;
                     }
                     if (r == result::error) return result::error;
 
@@ -1222,6 +1236,20 @@ namespace wavex::protos::http {
                 }
 
                 if (!headers_received) return result::incomplete;
+
+                // C1: Verify full body reception against Content-Length if specified
+                for (const auto &[name, val] : decoded_headers) {
+                    if (name == "content-length") {
+                        if (auto cl = std::strtoull(val.c_str(), nullptr, 10); cl != 0 || val == "0") {
+                            if (body_accumulator.size() < cl) {
+                                return result::incomplete; // Incomplete body; wait for remaining DATA frame(s)
+                            }
+                            if (body_accumulator.size() > cl) {
+                                return result::error; // Content-Length mismatch error per RFC 9114
+                            }
+                        }
+                    }
+                }
 
                 dt = working_dt;
                 bytes_consumed = cursor;

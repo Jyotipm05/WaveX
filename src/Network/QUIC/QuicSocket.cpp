@@ -551,6 +551,16 @@ namespace wavex::network::quic {
         if (udp_socket_.is_open()) {
             udp_socket_.close(ec);
         }
+        std::unordered_map<ConnectionId, std::shared_ptr<QuicConnection>> conns;
+        {
+            std::lock_guard lock(mtx_);
+            conns = std::move(connections_);
+            connections_.clear();
+            accept_queue_.clear();
+        }
+        for (auto &[cid, c] : conns) {
+            if (c) c->close();
+        }
     }
 
     void basic_quic_acceptor::cancel() {
@@ -708,6 +718,18 @@ namespace wavex::network::quic {
                             connections_[server_cid] = conn;
                             connections_[hdr.dcid] = conn;
 
+                            conn->set_closed_callback([this](const ConnectionId &scid, const ConnectionId &peer_cid, const ConnectionId &orig_dcid) {
+                                asio::post(executor_, [this, scid, peer_cid, orig_dcid] {
+                                    std::lock_guard lock(mtx_);
+                                    connections_.erase(scid);
+                                    if (!orig_dcid.empty()) connections_.erase(orig_dcid);
+                                    if (!peer_cid.empty()) connections_.erase(peer_cid);
+                                    std::erase_if(accept_queue_, [&](const AcceptedStreamInfo &info) {
+                                        return !info.conn || info.conn->local_cid() == scid || info.conn->state() == ConnectionState::Closed;
+                                    });
+                                });
+                            });
+
                             conn->set_outbound_callback([this, weak_conn = std::weak_ptr<QuicConnection>(conn)] {
                                 asio::post(executor_, [this, weak_conn] {
                                     if (auto c = weak_conn.lock()) {
@@ -717,7 +739,7 @@ namespace wavex::network::quic {
                             });
 
                             conn->set_stream_created_callback(
-                                [this, conn, sender_ep = sender_endpoint_](std::shared_ptr<QuicStream> stream) {
+                                [this, weak_conn = std::weak_ptr<QuicConnection>(conn), sender_ep = sender_endpoint_](std::shared_ptr<QuicStream> stream) {
                                     if (!stream) return;
                                     const uint64_t sid = stream->stream_id();
                                     // Client-initiated unidirectional stream (sid & 0x03 == 2)
@@ -735,7 +757,9 @@ namespace wavex::network::quic {
                                     }
                                     // Client-initiated bidirectional stream (sid & 0x03 == 0)
                                     if ((sid & 0x03) == 0x00) {
-                                        on_stream_ready(std::move(stream), conn, sender_ep);
+                                        if (auto c = weak_conn.lock()) {
+                                            on_stream_ready(std::move(stream), c, sender_ep);
+                                        }
                                     }
                                 });
                         }
@@ -777,7 +801,12 @@ namespace wavex::network::quic {
                 handler = std::move(pending_accepts_.front());
                 pending_accepts_.pop_front();
             } else {
-                accept_queue_.push_back(AcceptedStreamInfo{std::move(stream), std::move(conn), peer_ep});
+                constexpr std::size_t kMaxAcceptQueueSize = 256;
+                if (accept_queue_.size() < kMaxAcceptQueueSize) {
+                    accept_queue_.push_back(AcceptedStreamInfo{std::move(stream), std::move(conn), peer_ep});
+                } else {
+                    wavex::log::warn("[QUIC] [acceptor] accept_queue_ limit reached ({}), dropping unaccepted stream", kMaxAcceptQueueSize);
+                }
                 return;
             }
         }
