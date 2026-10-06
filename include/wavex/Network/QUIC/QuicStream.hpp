@@ -38,6 +38,7 @@
 #include <asio/post.hpp>
 
 #include <wavex/Network/QUIC/QuicConstants.hpp>
+#include <wavex/Base/Logger.hpp>
 
 namespace wavex::network::quic {
 
@@ -71,8 +72,6 @@ namespace wavex::network::quic {
 
     private:
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
-        void *pending_buf_{nullptr};
-        std::size_t pending_buf_size_{0};
         uint64_t stream_id_{0};
         uint64_t send_offset_{0};
         uint64_t recv_offset_{0};
@@ -175,13 +174,38 @@ namespace wavex::network::quic {
                         return;
                     }
 
-                    // Register pending read
-                    auto first_buf = *asio::buffer_sequence_begin(buffers);
-                    self->pending_buf_ = first_buf.data();
-                    self->pending_buf_size_ = first_buf.size();
-                    self->pending_read_ = [shared_h, executor](std::error_code ec, std::size_t bytes) {
-                        asio::post(executor, [shared_h, ec, bytes] {
-                            (*shared_h)(ec, bytes);
+                    // Register pending read: wake callback posts to reader's executor where data is copied under lock
+                    self->pending_read_ = [weak_self, buffers, shared_h, executor](std::error_code ec, std::size_t) {
+                        asio::post(executor, [weak_self, buffers, shared_h, ec] {
+                            auto s = weak_self.lock();
+                            if (!s) {
+                                (*shared_h)(asio::error::operation_aborted, 0);
+                                return;
+                            }
+                            std::lock_guard lock(s->mtx_);
+                            if (ec) {
+                                (*shared_h)(ec, 0);
+                                return;
+                            }
+                            if (s->in_buffer_.empty()) {
+                                (*shared_h)(s->fin_received_ ? asio::error::eof : std::error_code{}, 0);
+                                return;
+                            }
+                            std::size_t dest_len = asio::buffer_size(buffers);
+                            std::size_t to_copy = (std::min)(dest_len, s->in_buffer_.size());
+                            std::size_t copied = 0;
+                            for (auto b = asio::buffer_sequence_begin(buffers);
+                                 b != asio::buffer_sequence_end(buffers) && copied < to_copy; ++b) {
+                                asio::mutable_buffer mb(*b);
+                                std::size_t chunk = (std::min)(mb.size(), to_copy - copied);
+                                auto *dest = static_cast<uint8_t*>(mb.data());
+                                for (std::size_t i = 0; i < chunk; ++i) {
+                                    dest[i] = s->in_buffer_.front();
+                                    s->in_buffer_.pop_front();
+                                }
+                                copied += chunk;
+                            }
+                            (*shared_h)(std::error_code{}, copied);
                         });
                     };
                 },

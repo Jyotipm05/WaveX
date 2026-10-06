@@ -32,7 +32,8 @@
 #include <cstdint>
 #include <utility>
 #include <algorithm>
-#include <optional>
+#include <asio/as_tuple.hpp>
+#include <asio/use_awaitable.hpp>
 #include <wavex/protos/http/Methods.hpp>
 #include <wavex/protos/http/http1codec.hpp>
 #include <wavex/protos/http/http2codec.hpp>
@@ -559,7 +560,7 @@ namespace wavex::protos::http {
                     if (used_dynamic) {
                         const uint64_t ric = max_used_abs + 1;
                         const uint64_t base = dt ? dt->total_inserts() : ric;
-                        encode_prefix(out, ric, base);
+                        encode_prefix(out, ric, base, dt ? dt->max_capacity() : 4096);
                     } else {
                         // Required Insert Count = 0, Delta Base = 0
                         out.push_back('\0');
@@ -619,8 +620,15 @@ namespace wavex::protos::http {
 
             private:
                 // Encoded Field Section Prefix (RFC 9204 §4.5.1)
-                static void encode_prefix(std::string &out, const uint64_t ric, const uint64_t base) {
-                    http2::hpack::encode_integer(out, ric, 8, 0x00);
+                static void encode_prefix(std::string &out, const uint64_t ric, const uint64_t base, const uint64_t max_table_capacity = 4096) {
+                    uint64_t enc_insert_count = 0;
+                    if (ric > 0) {
+                        const uint64_t max_entries = max_table_capacity / 32;
+                        if (max_entries > 0) {
+                            enc_insert_count = (ric % (2 * max_entries)) + 1;
+                        }
+                    }
+                    http2::hpack::encode_integer(out, enc_insert_count, 8, 0x00);
                     if (base >= ric) {
                         const uint64_t delta_base = base - ric;
                         http2::hpack::encode_integer(out, delta_base, 7, 0x00); // Sign = 0
@@ -754,8 +762,33 @@ namespace wavex::protos::http {
 
                     // RFC 9204 §4.5.1: Encoded Field Section Prefix
                     // 1. Required Insert Count (8-bit prefix integer)
+                    uint64_t enc_insert_count = 0;
+                    if (!http2::hpack::decode_integer(block, cursor, 8, enc_insert_count)) return false;
+
+                    // RFC 9204 §4.5.1.1: Decoding Required Insert Count
                     uint64_t req_insert_count = 0;
-                    if (!http2::hpack::decode_integer(block, cursor, 8, req_insert_count)) return false;
+                    const uint64_t max_entries = dt_.max_capacity() / 32;
+                    if (enc_insert_count == 0) {
+                        req_insert_count = 0;
+                    } else {
+                        if (max_entries == 0) {
+                            // RFC 9204 §4.5.1.1: With capacity 0, non-zero Encoded Insert Count is a decompression error
+                            return false;
+                        }
+                        const uint64_t full_range = 2 * max_entries;
+                        if (enc_insert_count > full_range) {
+                            return false;
+                        }
+                        const uint64_t total_number_of_inserts = dt_.total_inserts();
+                        const uint64_t max_value = total_number_of_inserts + max_entries;
+                        const uint64_t max_wrapped = (max_value / full_range) * full_range;
+                        req_insert_count = max_wrapped + enc_insert_count - 1;
+                        if (req_insert_count > max_value) {
+                            if (req_insert_count < full_range) return false;
+                            req_insert_count -= full_range;
+                        }
+                        if (req_insert_count == 0) return false;
+                    }
 
                     // 2. Sign bit + Delta Base (7-bit prefix integer)
                     if (cursor >= block.size()) return false;
@@ -854,8 +887,11 @@ namespace wavex::protos::http {
             // ─── 2. Member Variables (SECOND - Minimal Padding) ────────────────
             qpack::dynamic_table decode_table{};
             uint64_t max_field_section_size{65536};
+            uint64_t peer_qpack_max_table_capacity{0};
+            uint64_t peer_qpack_blocked_streams{0};
             bool settings_sent{false};
             bool settings_received{false};
+            bool goaway_received{false};
         };
 
         // ─── HTTP/3 Messages ───────────────────────────────────────────────────────
@@ -864,6 +900,21 @@ namespace wavex::protos::http {
          * @brief HTTP/3 Request Message (inherits protocol-agnostic message_base).
          */
         struct request : public message_base {
+            // ─── 1. Nested Types (TOP) ─────────────────────────────────────────
+            struct parser_state {
+                uint64_t content_length{0};
+                std::size_t cursor{0};
+                bool headers_received{false};
+                bool has_content_length{false};
+
+                void reset() noexcept {
+                    content_length = 0;
+                    cursor = 0;
+                    headers_received = false;
+                    has_content_length = false;
+                }
+            };
+
             // ─── 2. Member Variables (SECOND - Minimal Padding) ────────────────
             std::string_view target{};
             std::string_view scheme{"https"};
@@ -873,6 +924,7 @@ namespace wavex::protos::http {
             std::string authority_storage{};
             std::string body_storage{};
             std::vector<std::pair<std::string, std::string>> headers_storage{};
+            parser_state state_{};
             uint64_t stream_id{0};
             http::method method_type{method::UNKNOWN};
 
@@ -971,10 +1023,14 @@ namespace wavex::protos::http {
          * @brief HTTP/3 Response Message (inherits protocol-agnostic message_base).
          */
         struct response : public message_base {
+            // ─── 1. Nested Types (TOP) ─────────────────────────────────────────
+            using parser_state = request::parser_state;
+
             // ─── 2. Member Variables (SECOND - Minimal Padding) ────────────────
             std::string_view status_text{"OK"};
             std::string body_storage{};
             std::vector<std::pair<std::string, std::string>> headers_storage{};
+            parser_state state_{};
             uint64_t stream_id{0};
             unsigned int status_code{200};
 
@@ -1077,22 +1133,19 @@ namespace wavex::protos::http {
                 bytes_consumed = 0;
                 if (buffer.empty()) return result::incomplete;
 
-                std::size_t cursor = 0;
+                if (req.state_.cursor == 0) {
+                    req.headers.clear();
+                    req.headers_storage.clear();
+                    req.target_storage.clear();
+                    req.scheme_storage.clear();
+                    req.authority_storage.clear();
+                    req.body_storage.clear();
+                    req.body = {};
+                    req.state_.reset();
+                }
 
-                req.headers.clear();
-                req.headers_storage.clear();
-                req.target_storage.clear();
-                req.scheme_storage.clear();
-                req.authority_storage.clear();
-                req.body_storage.clear();
-                req.body = {};
-
-                qpack::dynamic_table working_dt = dt;
-                qpack::decoder dec(working_dt);
-
-                std::vector<std::pair<std::string, std::string>> decoded_headers;
-                bool headers_received = false;
-                std::string body_accumulator;
+                qpack::decoder dec(dt);
+                std::size_t cursor = req.state_.cursor;
 
                 while (cursor < buffer.size()) {
                     const std::string_view remaining = buffer.substr(cursor);
@@ -1102,68 +1155,75 @@ namespace wavex::protos::http {
 
                     const auto r = parse_frame(remaining, hdr, payload, frame_bytes);
                     if (r == result::incomplete) {
-                        return result::incomplete;
+                        break;
                     }
-                    if (r == result::error) return result::error;
+                    if (r == result::error) {
+                        req.state_.reset();
+                        return result::error;
+                    }
 
                     if (hdr.type == static_cast<uint64_t>(frame_type::HEADERS)) {
                         bool is_blocked = false;
+                        std::vector<std::pair<std::string, std::string>> decoded_headers;
                         if (!dec.decode_header_block(payload, decoded_headers, is_blocked)) {
                             if (is_blocked) return result::incomplete; // Wait for QPACK encoder stream inserts
+                            req.state_.reset();
                             return result::error;
                         }
-                        headers_received = true;
+
+                        for (auto &[name, val] : decoded_headers) {
+                            if (name == ":method") {
+                                req.method_type = from_string(val);
+                            } else if (name == ":path") {
+                                req.target_storage = std::move(val);
+                            } else if (name == ":scheme") {
+                                req.scheme_storage = std::move(val);
+                            } else if (name == ":authority") {
+                                req.authority_storage = std::move(val);
+                            } else {
+                                if (name == "content-length") {
+                                    if (auto cl = std::strtoull(val.c_str(), nullptr, 10); cl != 0 || val == "0") {
+                                        req.state_.has_content_length = true;
+                                        req.state_.content_length = cl;
+                                    }
+                                }
+                                req.headers_storage.emplace_back(std::move(name), std::move(val));
+                            }
+                        }
+                        req.state_.headers_received = true;
                     } else if (hdr.type == static_cast<uint64_t>(frame_type::DATA)) {
-                        if (!headers_received) {
+                        if (!req.state_.headers_received) {
                             // RFC 9114 §4.1: DATA frame before HEADERS is a stream error
+                            req.state_.reset();
                             return result::error;
                         }
-                        body_accumulator.append(payload);
+                        req.body_storage.append(payload);
                     } else if (hdr.type == static_cast<uint64_t>(frame_type::SETTINGS)) {
                         // RFC 9114 §7.2.4: SETTINGS frame MUST NOT be sent on any stream other than control stream
+                        req.state_.reset();
                         return result::error;
                     }
                     // RFC 9114 §7.2.8: Unknown frames are ignored
 
                     cursor += frame_bytes;
+                    req.state_.cursor = cursor;
                 }
 
-                if (!headers_received) return result::incomplete;
+                if (!req.state_.headers_received) return result::incomplete;
 
-                // C1: Verify full body reception against Content-Length if specified
-                for (const auto &[name, val] : decoded_headers) {
-                    if (name == "content-length") {
-                        if (auto cl = std::strtoull(val.c_str(), nullptr, 10); cl != 0 || val == "0") {
-                            if (body_accumulator.size() < cl) {
-                                return result::incomplete; // Incomplete body; wait for remaining DATA frame(s)
-                            }
-                            if (body_accumulator.size() > cl) {
-                                return result::error; // Content-Length mismatch error per RFC 9114
-                            }
-                        }
+                if (req.state_.has_content_length) {
+                    if (req.body_storage.size() < req.state_.content_length) {
+                        return result::incomplete;
+                    }
+                    if (req.body_storage.size() > req.state_.content_length) {
+                        req.state_.reset();
+                        return result::error;
                     }
                 }
 
-                dt = working_dt;
-                bytes_consumed = cursor;
-
-                // Process decoded pseudo-headers & standard headers
-                for (auto &[name, val] : decoded_headers) {
-                    if (name == ":method") {
-                        req.method_type = from_string(val);
-                    } else if (name == ":path") {
-                        req.target_storage = std::move(val);
-                    } else if (name == ":scheme") {
-                        req.scheme_storage = std::move(val);
-                    } else if (name == ":authority") {
-                        req.authority_storage = std::move(val);
-                    } else {
-                        req.headers_storage.emplace_back(std::move(name), std::move(val));
-                    }
-                }
-
-                req.body_storage = std::move(body_accumulator);
+                bytes_consumed = req.state_.cursor;
                 req.rebase(req);
+                req.state_.reset();
                 return result::success;
             }
 
@@ -1189,19 +1249,18 @@ namespace wavex::protos::http {
                 std::size_t &bytes_consumed,
                 qpack::dynamic_table &dt) {
                 bytes_consumed = 0;
-                std::size_t cursor = 0;
+                if (buffer.empty()) return result::incomplete;
 
-                res.headers.clear();
-                res.headers_storage.clear();
-                res.body_storage.clear();
-                res.body = {};
+                if (res.state_.cursor == 0) {
+                    res.headers.clear();
+                    res.headers_storage.clear();
+                    res.body_storage.clear();
+                    res.body = {};
+                    res.state_.reset();
+                }
 
-                qpack::dynamic_table working_dt = dt;
-                qpack::decoder dec(working_dt);
-
-                std::vector<std::pair<std::string, std::string>> decoded_headers;
-                bool headers_received = false;
-                std::string body_accumulator;
+                qpack::decoder dec(dt);
+                std::size_t cursor = res.state_.cursor;
 
                 while (cursor < buffer.size()) {
                     const std::string_view remaining = buffer.substr(cursor);
@@ -1211,63 +1270,70 @@ namespace wavex::protos::http {
 
                     const auto r = parse_frame(remaining, hdr, payload, frame_bytes);
                     if (r == result::incomplete) {
-                        return result::incomplete;
+                        break;
                     }
-                    if (r == result::error) return result::error;
+                    if (r == result::error) {
+                        res.state_.reset();
+                        return result::error;
+                    }
 
                     if (hdr.type == static_cast<uint64_t>(frame_type::HEADERS)) {
                         bool is_blocked = false;
+                        std::vector<std::pair<std::string, std::string>> decoded_headers;
                         if (!dec.decode_header_block(payload, decoded_headers, is_blocked)) {
                             if (is_blocked) return result::incomplete;
+                            res.state_.reset();
                             return result::error;
                         }
-                        headers_received = true;
+
+                        for (auto &[name, val] : decoded_headers) {
+                            if (name == ":status") {
+                                if (auto sc = std::strtoul(val.c_str(), nullptr, 10); sc != 0) {
+                                    res.status_code = static_cast<unsigned int>(sc);
+                                }
+                            } else {
+                                if (name == "content-length") {
+                                    if (auto cl = std::strtoull(val.c_str(), nullptr, 10); cl != 0 || val == "0") {
+                                        res.state_.has_content_length = true;
+                                        res.state_.content_length = cl;
+                                    }
+                                }
+                                res.headers_storage.emplace_back(std::move(name), std::move(val));
+                            }
+                        }
+                        res.state_.headers_received = true;
                     } else if (hdr.type == static_cast<uint64_t>(frame_type::DATA)) {
-                        if (!headers_received) {
+                        if (!res.state_.headers_received) {
+                            res.state_.reset();
                             return result::error;
                         }
-                        body_accumulator.append(payload);
+                        res.body_storage.append(payload);
                     } else if (hdr.type == static_cast<uint64_t>(frame_type::SETTINGS)) {
+                        res.state_.reset();
                         return result::error;
                     }
                     // RFC 9114 §7.2.8: Unknown frames are ignored
 
                     cursor += frame_bytes;
+                    res.state_.cursor = cursor;
                 }
 
-                if (!headers_received) return result::incomplete;
+                if (!res.state_.headers_received) return result::incomplete;
 
-                // C1: Verify full body reception against Content-Length if specified
-                for (const auto &[name, val] : decoded_headers) {
-                    if (name == "content-length") {
-                        if (auto cl = std::strtoull(val.c_str(), nullptr, 10); cl != 0 || val == "0") {
-                            if (body_accumulator.size() < cl) {
-                                return result::incomplete; // Incomplete body; wait for remaining DATA frame(s)
-                            }
-                            if (body_accumulator.size() > cl) {
-                                return result::error; // Content-Length mismatch error per RFC 9114
-                            }
-                        }
+                if (res.state_.has_content_length) {
+                    if (res.body_storage.size() < res.state_.content_length) {
+                        return result::incomplete;
+                    }
+                    if (res.body_storage.size() > res.state_.content_length) {
+                        res.state_.reset();
+                        return result::error;
                     }
                 }
 
-                dt = working_dt;
-                bytes_consumed = cursor;
-
-                // Process decoded pseudo-headers & standard headers
-                for (auto &[name, val] : decoded_headers) {
-                    if (name == ":status") {
-                        if (auto sc = std::strtoul(val.c_str(), nullptr, 10); sc != 0) {
-                            res.status_code = static_cast<unsigned int>(sc);
-                        }
-                    } else {
-                        res.headers_storage.emplace_back(std::move(name), std::move(val));
-                    }
-                }
-
+                bytes_consumed = res.state_.cursor;
                 res.status_text = http1codec::status_text_for(res.status_code);
-                res.body_storage = std::move(body_accumulator);
                 res.rebase(res);
+                res.state_.reset();
                 return result::success;
             }
 
@@ -1389,6 +1455,110 @@ namespace wavex::protos::http {
             }
         };
 
+        /**
+         * @class session_handler
+         * @brief Handles HTTP/3 unidirectional streams (Control, QPACK Encoder, QPACK Decoder per RFC 9114/9204).
+         */
+        class session_handler {
+        public:
+            template<typename Stream>
+            static asio::awaitable<void> handle_unidirectional_stream(
+                std::shared_ptr<Stream> stream,
+                std::shared_ptr<connection_context> ctx) {
+                if (!stream || !ctx) co_return;
+
+                std::string stream_buf;
+                char buf[1024];
+
+                // 1. Read unidirectional stream type (RFC 9114 §6.2)
+                uint64_t stream_type = 0;
+                while (stream->is_open()) {
+                    std::size_t offset = 0;
+                    if (VarInt::decode(stream_buf, offset, stream_type)) {
+                        stream_buf.erase(0, offset);
+                        break;
+                    }
+                    auto [ec, n] = co_await stream->async_read_some(
+                        asio::buffer(buf), asio::as_tuple(asio::use_awaitable));
+                    if (ec || n == 0) co_return;
+                    stream_buf.append(buf, n);
+                }
+
+                if (stream_type == 0x00) {
+                    // Control Stream (RFC 9114 §6.2.1)
+                    while (stream->is_open()) {
+                        frame_header hdr;
+                        std::string_view payload;
+                        std::size_t frame_bytes = 0;
+                        const auto res = parser::parse_frame(stream_buf, hdr, payload, frame_bytes);
+                        if (res == parser::result::incomplete) {
+                            auto [ec, n] = co_await stream->async_read_some(
+                                asio::buffer(buf), asio::as_tuple(asio::use_awaitable));
+                            if (ec || n == 0) break;
+                            stream_buf.append(buf, n);
+                            continue;
+                        }
+                        if (res == parser::result::error) {
+                            break;
+                        }
+
+                        if (hdr.type == static_cast<uint64_t>(frame_type::SETTINGS)) {
+                            // Parse SETTINGS frame payload (pairs of VarInt: identifier and value)
+                            std::size_t s_cursor = 0;
+                            while (s_cursor < payload.size()) {
+                                uint64_t id = 0, val = 0;
+                                if (!VarInt::decode(payload, s_cursor, id)) break;
+                                if (!VarInt::decode(payload, s_cursor, val)) break;
+
+                                if (id == 0x01) { // SETTINGS_QPACK_MAX_TABLE_CAPACITY
+                                    ctx->peer_qpack_max_table_capacity = val;
+                                    ctx->decode_table.set_max_capacity(static_cast<std::size_t>(val));
+                                } else if (id == 0x06) { // SETTINGS_MAX_FIELD_SECTION_SIZE
+                                    ctx->max_field_section_size = val;
+                                } else if (id == 0x07) { // SETTINGS_QPACK_BLOCKED_STREAMS
+                                    ctx->peer_qpack_blocked_streams = val;
+                                }
+                            }
+                            ctx->settings_received = true;
+                        } else if (hdr.type == static_cast<uint64_t>(frame_type::GOAWAY)) {
+                            ctx->goaway_received = true;
+                        }
+
+                        stream_buf.erase(0, frame_bytes);
+                    }
+                } else if (stream_type == 0x02) {
+                    // QPACK Encoder Stream (RFC 9204 §4.2)
+                    qpack::decoder dec(ctx->decode_table);
+                    while (stream->is_open()) {
+                        std::size_t cursor = 0;
+                        while (cursor < stream_buf.size()) {
+                            std::size_t prev_cursor = cursor;
+                            if (!dec.apply_encoder_instruction(stream_buf, cursor)) {
+                                cursor = prev_cursor;
+                                break;
+                            }
+                        }
+                        if (cursor > 0) {
+                            stream_buf.erase(0, cursor);
+                        }
+
+                        auto [ec, n] = co_await stream->async_read_some(
+                            asio::buffer(buf), asio::as_tuple(asio::use_awaitable));
+                        if (ec || n == 0) break;
+                        stream_buf.append(buf, n);
+                    }
+                } else if (stream_type == 0x03) {
+                    // QPACK Decoder Stream (RFC 9204 §4.2)
+                    while (stream->is_open()) {
+                        auto [ec, n] = co_await stream->async_read_some(
+                            asio::buffer(buf), asio::as_tuple(asio::use_awaitable));
+                        if (ec || n == 0) break;
+                    }
+                }
+                co_return;
+            }
+        };
+
     } // namespace http3
 
     // ─── http3codec (WaveX Codec Concept Implementation) ──────────────────────
@@ -1399,6 +1569,7 @@ namespace wavex::protos::http {
         using request_type = http3::request;
         using response_type = http3::response;
         using connection_context = http3::connection_context;
+        using session_handler = http3::session_handler;
         using dynamic_table = http3::qpack::dynamic_table;
         using parser = http3::parser;
         using encoder = http3::encoder;

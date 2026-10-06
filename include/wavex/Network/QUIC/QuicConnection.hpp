@@ -59,6 +59,7 @@ namespace wavex::network::quic {
         using StreamCreatedCallback = std::function<void(std::shared_ptr<QuicStream>)>;
         using OutboundCallback = std::function<void()>;
         using ClosedCallback = std::function<void(const ConnectionId &local_cid, const ConnectionId &peer_cid, const ConnectionId &orig_dcid)>;
+        using ConnectedCallback = std::function<void()>;
 
         struct CryptoStreamReassembler {
             // ─── 1. Nested Types & Constants ───
@@ -155,9 +156,11 @@ namespace wavex::network::quic {
         StreamCreatedCallback on_stream_created_{};
         OutboundCallback on_outbound_{};
         ClosedCallback on_closed_{};
+        ConnectedCallback on_connected_{};
         asio::any_io_executor executor_{};
         std::string tls_cert_file_{};
         std::string tls_key_file_{};
+        std::string sni_hostname_{};
         std::string local_transport_params_{};
         ProtectionKeys initial_keys_peer_{};
         ProtectionKeys initial_keys_local_{};
@@ -241,6 +244,19 @@ namespace wavex::network::quic {
         void set_closed_callback(ClosedCallback cb) {
             std::lock_guard lock(mtx_);
             on_closed_ = std::move(cb);
+        }
+
+        void set_connected_callback(ConnectedCallback cb) {
+            std::lock_guard lock(mtx_);
+            on_connected_ = std::move(cb);
+            if (state_ == ConnectionState::Connected && on_connected_) {
+                on_connected_();
+            }
+        }
+
+        void set_sni_hostname(std::string sni) {
+            std::lock_guard lock(mtx_);
+            sni_hostname_ = std::move(sni);
         }
 
         void set_idle_timeout(std::chrono::milliseconds timeout) noexcept {

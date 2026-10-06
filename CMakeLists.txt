@@ -290,6 +290,7 @@ target_compile_definitions(wavex PUBLIC
     ASIO_STANDALONE=1
     $<$<BOOL:${WIN32}>:_WIN32_WINNT=${WAVEX_WIN32_WINNT}>
     $<$<AND:$<BOOL:${WIN32}>,$<BOOL:${MINGW}>>:ASIO_HAS_PTHREADS=1>
+    $<$<NOT:$<CONFIG:Release>>:ENABLE_LOGGING=1>
 )
 
 if (WAVEX_HAS_SSL)

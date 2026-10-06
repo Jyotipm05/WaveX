@@ -166,8 +166,17 @@ namespace wavex::server {
                 quic_server_->set_tls_credentials(std::move(cert_path), std::move(key_path));
             }
 
+            auto session_ctx = std::make_shared<protos::http::http3::connection_context>();
+
+            quic_server_->set_uni_stream_handler(
+                [session_ctx](std::shared_ptr<network::quic::QuicStream> stream)
+                    -> asio::awaitable<void> {
+                    co_await protos::http::http3codec::session_handler::handle_unidirectional_stream(
+                        std::move(stream), session_ctx);
+                });
+
             quic_server_->set_stream_handler(
-                [this](std::shared_ptr<network::quic::QuicStream> stream)
+                [this, session_ctx](std::shared_ptr<network::quic::QuicStream> stream)
                     -> asio::awaitable<void> {
                     if (!stream) co_return;
                     if ((stream->stream_id() & 0x03) == 0x00) {

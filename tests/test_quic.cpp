@@ -16,6 +16,8 @@
 #include <thread>
 #include <chrono>
 #include <iomanip>
+#include <filesystem>
+#include <source_location>
 
 #include <wavex/Network/QUIC.hpp>
 #include <asio/co_spawn.hpp>
@@ -232,7 +234,13 @@ void test_quic_server_client_loopback() {
     asio::io_context server_io;
     asio::io_context client_io;
 
+    const auto current_src = std::filesystem::path(std::source_location::current().file_name());
+    const auto project_root = current_src.parent_path().parent_path();
+    const std::string cert_path = (project_root / "ssl" / "test.crt").string();
+    const std::string key_path = (project_root / "ssl" / "test.key").string();
+
     QuicServer server(server_io, 0); // Bind ephemeral port
+    server.set_tls_credentials(cert_path, key_path);
     const uint16_t port = server.local_port();
     assert(port > 0);
 

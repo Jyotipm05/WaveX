@@ -659,9 +659,6 @@ namespace wavex::network::quic {
                     return;
                 }
 
-                wavex::log::info("[QUIC] [acceptor] Received UDP datagram ({} bytes) from {}:{}",
-                                 bytes_recvd, sender_endpoint_.address().to_string(), sender_endpoint_.port());
-
                 const std::string_view datagram(reinterpret_cast<const char *>(recv_buf_.data()), bytes_recvd);
                 PacketHeader hdr;
                 std::size_t hdr_len = 0;
@@ -669,8 +666,6 @@ namespace wavex::network::quic {
                 if (!unpack_packet_header(datagram, hdr, hdr_len)) {
                     wavex::log::warn("[QUIC] [acceptor] Failed to unpack packet header from {} bytes UDP datagram", bytes_recvd);
                 } else {
-                    wavex::log::info("[QUIC] [acceptor] Datagram header unpacked: is_long={} type={} dcid={} scid={}",
-                                     hdr.is_long, static_cast<int>(hdr.type), hdr.dcid.to_string(), hdr.scid.to_string());
 
                     if (hdr.is_long && hdr.version != QUIC_VERSION_1 && hdr.version != 0) {
                         std::string vn_packet;

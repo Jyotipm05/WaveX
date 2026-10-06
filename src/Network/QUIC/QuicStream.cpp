@@ -160,7 +160,7 @@ namespace wavex::network::quic {
 
     void QuicStream::push_inbound(uint64_t offset, std::string_view data, const bool fin) {
         ReadCallback cb;
-        std::size_t bytes_transferred = 0;
+        std::size_t available = 0;
         std::error_code ec;
 
         {
@@ -196,8 +196,6 @@ namespace wavex::network::quic {
                     if (pending_read_ && in_buffer_.empty()) {
                         cb = std::move(*pending_read_);
                         pending_read_.reset();
-                        pending_buf_ = nullptr;
-                        pending_buf_size_ = 0;
                         ec = asio::error::eof;
                     }
                 }
@@ -211,20 +209,8 @@ namespace wavex::network::quic {
 
                 auto append_bytes = [&](std::string_view chunk) {
                     if (chunk.empty()) return;
-                    if (pending_read_ && pending_buf_ && pending_buf_size_ > 0 && in_buffer_.empty()) {
-                        const std::size_t to_copy = (std::min)(chunk.size(), pending_buf_size_);
-                        std::memcpy(pending_buf_, chunk.data(), to_copy);
-                        bytes_transferred += to_copy;
-                        pending_buf_ = static_cast<uint8_t *>(pending_buf_) + to_copy;
-                        pending_buf_size_ -= to_copy;
-
-                        for (std::size_t i = to_copy; i < chunk.size(); ++i) {
-                            in_buffer_.push_back(static_cast<uint8_t>(chunk[i]));
-                        }
-                    } else {
-                        for (const char c : chunk) {
-                            in_buffer_.push_back(static_cast<uint8_t>(c));
-                        }
+                    for (const char c : chunk) {
+                        in_buffer_.push_back(static_cast<uint8_t>(c));
                     }
                     recv_offset_ += chunk.size();
                 };
@@ -250,17 +236,13 @@ namespace wavex::network::quic {
                         fin_received_ = true;
                     }
 
-                    if (bytes_transferred > 0 && pending_read_) {
+                    available = in_buffer_.size();
+                    if (pending_read_ && (available > 0 || fin_received_)) {
                         cb = std::move(*pending_read_);
                         pending_read_.reset();
-                        pending_buf_ = nullptr;
-                        pending_buf_size_ = 0;
-                    } else if (fin_received_ && pending_read_ && in_buffer_.empty()) {
-                        cb = std::move(*pending_read_);
-                        pending_read_.reset();
-                        pending_buf_ = nullptr;
-                        pending_buf_size_ = 0;
-                        ec = asio::error::eof;
+                        if (available == 0 && fin_received_) {
+                            ec = asio::error::eof;
+                        }
                     }
                 } else {
                     // offset > recv_offset_: Out-of-order gap!
@@ -291,7 +273,7 @@ namespace wavex::network::quic {
         }
 
         if (cb) {
-            cb(ec, bytes_transferred);
+            cb(ec, available);
         }
         notify_finished_if_needed();
     }

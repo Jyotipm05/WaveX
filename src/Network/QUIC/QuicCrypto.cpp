@@ -243,7 +243,7 @@ namespace wavex::network::quic {
 
         std::size_t hdr_len = 0;
         if (!unpack_packet_header(packet_bytes, hdr, hdr_len, expected_dcid_len)) {
-            wavex::log::warn("[QUIC] unprotect_packet: unpack_packet_header failed (bytes={})", packet_bytes.size());
+            wavex::log::debug("[QUIC] unprotect_packet: unpack_packet_header failed (bytes={})", packet_bytes.size());
             return false;
         }
 
@@ -253,8 +253,8 @@ namespace wavex::network::quic {
         // Step 1: Remove Header Protection (RFC 9001 §5.4)
         const std::size_t sample_offset = pn_offset + 4;
         if (packet_bytes.size() < sample_offset + 16) {
-            wavex::log::warn("[QUIC] unprotect_packet: packet too small for sample (size={}, needed={})",
-                             packet_bytes.size(), sample_offset + 16);
+            wavex::log::debug("[QUIC] unprotect_packet: packet too small for sample (size={}, needed={})",
+                              packet_bytes.size(), sample_offset + 16);
             return false;
         }
 
@@ -270,7 +270,7 @@ namespace wavex::network::quic {
                       EVP_EncryptUpdate(hp_ctx, mask, &hp_len, sample, 16) == 1);
         EVP_CIPHER_CTX_free(hp_ctx);
         if (!hp_ok) {
-            wavex::log::warn("[QUIC] unprotect_packet: HP cipher failed");
+            wavex::log::debug("[QUIC] unprotect_packet: HP cipher failed");
             return false;
         }
 
@@ -285,8 +285,8 @@ namespace wavex::network::quic {
         hdr.packet_number_len = pn_len;
 
         if (packet_bytes.size() < pn_offset + pn_len + 16) {
-            wavex::log::warn("[QUIC] unprotect_packet: packet too small for PN and tag (size={}, needed={})",
-                             packet_bytes.size(), pn_offset + pn_len + 16);
+            wavex::log::debug("[QUIC] unprotect_packet: packet too small for PN and tag (size={}, needed={})",
+                              packet_bytes.size(), pn_offset + pn_len + 16);
             return false;
         }
 
@@ -320,8 +320,8 @@ namespace wavex::network::quic {
         }
 
         if (total_packet_len < real_hdr_len + 16) {
-            wavex::log::warn("[QUIC] unprotect_packet: total_packet_len < real_hdr_len + 16 (total={}, hdr={})",
-                             total_packet_len, real_hdr_len);
+            wavex::log::debug("[QUIC] unprotect_packet: total_packet_len < real_hdr_len + 16 (total={}, hdr={})",
+                              total_packet_len, real_hdr_len);
             return false;
         }
         const std::string_view payload = packet_bytes.substr(real_hdr_len, total_packet_len - real_hdr_len);
@@ -350,8 +350,8 @@ namespace wavex::network::quic {
             ok = false;
         if (ok && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16, const_cast<uint8_t *>(tag_data)) != 1) ok = false;
         if (ok && EVP_DecryptFinal_ex(ctx, decrypted.data() + out_len, &out_len) <= 0) {
-            wavex::log::warn("[QUIC] unprotect_packet: AEAD GCM tag verification failed (pn={}, type={})",
-                             full_packet_num, static_cast<int>(hdr.type));
+            wavex::log::debug("[QUIC] unprotect_packet: AEAD GCM tag verification failed (pn={}, type={})",
+                              full_packet_num, static_cast<int>(hdr.type));
             ok = false;
         }
 

@@ -8,6 +8,7 @@
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -34,6 +35,7 @@ namespace wavex::network::quic {
     public:
         // ─── 1. Nested Types & Definitions (TOP) ───────────────────────────
         using StreamHandler = std::function<asio::awaitable<void>(std::shared_ptr<QuicStream>)>;
+        using UniStreamHandler = std::function<asio::awaitable<void>(std::shared_ptr<QuicStream>)>;
 
     private:
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
@@ -44,8 +46,10 @@ namespace wavex::network::quic {
         mutable std::mutex mtx_{};
         std::array<uint8_t, 65536> recv_buf_{};
         StreamHandler stream_handler_{};
+        UniStreamHandler uni_stream_handler_{};
         std::string tls_cert_file_{};
         std::string tls_key_file_{};
+        std::atomic<bool> stopped_{false};
         bool running_{false};
 
     public:
@@ -58,6 +62,11 @@ namespace wavex::network::quic {
         void set_stream_handler(StreamHandler handler) {
             std::lock_guard lock(mtx_);
             stream_handler_ = std::move(handler);
+        }
+
+        void set_uni_stream_handler(UniStreamHandler handler) {
+            std::lock_guard lock(mtx_);
+            uni_stream_handler_ = std::move(handler);
         }
 
         void set_tls_credentials(std::string cert_file, std::string key_file) {

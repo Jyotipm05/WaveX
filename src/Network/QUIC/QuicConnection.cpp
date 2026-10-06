@@ -27,7 +27,6 @@
 #include <cassert>
 
 namespace wavex::network::quic {
-
     // ─── 7. QuicConnection Implementation ──────────────────────────────────────
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
@@ -82,7 +81,6 @@ namespace wavex::network::quic {
         size_t *consumed, void *arg) {
         if (!arg || !buf || buf_len == 0) return 0;
         auto *conn = static_cast<QuicConnection *>(arg);
-        wavex::log::info("[QUIC] crypto_send_fn: {} bytes at write_level={}", buf_len, conn->current_write_level());
         conn->queue_crypto_frame(std::string_view(reinterpret_cast<const char *>(buf), buf_len));
         if (consumed) *consumed = buf_len;
         return 1;
@@ -93,18 +91,13 @@ namespace wavex::network::quic {
         void *arg) {
         if (!arg || !buf || !bytes_read) return 0;
         auto *conn = static_cast<QuicConnection *>(arg);
-        const int res = conn->on_tls_crypto_recv(buf, bytes_read);
-        if (*bytes_read > 0) {
-            wavex::log::info("[QUIC] crypto_recv_rcd: supplied {} bytes to TLS engine", *bytes_read);
-        }
-        return res;
+        return conn->on_tls_crypto_recv(buf, bytes_read);
     }
 
     static int quic_tls_crypto_release_rcd(
         SSL * /*s*/, size_t bytes_read, void *arg) {
         if (!arg) return 0;
         auto *conn = static_cast<QuicConnection *>(arg);
-        wavex::log::info("[QUIC] crypto_release_rcd: released {} bytes", bytes_read);
         return conn->on_tls_crypto_release(bytes_read);
     }
 
@@ -113,8 +106,6 @@ namespace wavex::network::quic {
         const unsigned char *secret, size_t secret_len, void *arg) {
         if (!arg || !secret) return 0;
         auto *conn = static_cast<QuicConnection *>(arg);
-        wavex::log::info("[QUIC] yield_secret: prot_level={} direction={} (0=read,1=write) len={}",
-                         prot_level, direction, secret_len);
         return conn->on_tls_secret(prot_level, direction, secret, secret_len);
     }
 
@@ -123,7 +114,6 @@ namespace wavex::network::quic {
         void *arg) {
         if (!arg) return 0;
         auto *conn = static_cast<QuicConnection *>(arg);
-        wavex::log::info("[QUIC] got_transport_params: len={}", params_len);
         return conn->on_tls_transport_params(params, params_len);
     }
 
@@ -350,7 +340,8 @@ namespace wavex::network::quic {
                     std::string alt = std::string(PROJECT_DIR) + "/" + cert_file;
                     if (std::filesystem::exists(alt, ec)) cert_file = alt;
 #endif
-                    if (!std::filesystem::exists(cert_file, ec) && std::filesystem::exists("../" + tls_cert_file_, ec)) {
+                    if (!std::filesystem::exists(cert_file, ec) &&
+                        std::filesystem::exists("../" + tls_cert_file_, ec)) {
                         cert_file = "../" + tls_cert_file_;
                     }
                 }
@@ -365,17 +356,21 @@ namespace wavex::network::quic {
                 }
 
                 if (SSL_CTX_use_certificate_file(tls_->ctx, cert_file.c_str(), SSL_FILETYPE_PEM) != 1) {
-                    wavex::log::error("[QUIC] init_tls_handshake_engine: SSL_CTX_use_certificate_file failed for '{}'", cert_file);
+                    wavex::log::error("[QUIC] init_tls_handshake_engine: SSL_CTX_use_certificate_file failed for '{}'",
+                                      cert_file);
                     return false;
                 }
                 if (SSL_CTX_use_PrivateKey_file(tls_->ctx, key_file.c_str(), SSL_FILETYPE_PEM) != 1) {
-                    wavex::log::error("[QUIC] init_tls_handshake_engine: SSL_CTX_use_PrivateKey_file failed for '{}'", key_file);
+                    wavex::log::error("[QUIC] init_tls_handshake_engine: SSL_CTX_use_PrivateKey_file failed for '{}'",
+                                      key_file);
                     return false;
                 }
-                wavex::log::info("[QUIC] init_tls_handshake_engine: loaded cert '{}' and key '{}'", cert_file, key_file);
+                wavex::log::debug("[QUIC] init_tls_handshake_engine: loaded cert '{}' and key '{}'", cert_file,
+                                  key_file);
             } else {
-                wavex::log::warn("[QUIC] init_tls_handshake_engine: is_server=true but cert ('{}') or key ('{}') is empty!",
-                                 tls_cert_file_, tls_key_file_);
+                wavex::log::warn(
+                    "[QUIC] init_tls_handshake_engine: is_server=true but cert ('{}') or key ('{}') is empty!",
+                    tls_cert_file_, tls_key_file_);
             }
 
             // ALPN selection callback for server (mandated by RFC 9001 §8.1)
@@ -414,6 +409,10 @@ namespace wavex::network::quic {
             SSL_set_accept_state(tls_->ssl);
         } else {
             SSL_set_connect_state(tls_->ssl);
+            SSL_set_verify(tls_->ssl, SSL_VERIFY_NONE, nullptr);
+            if (!sni_hostname_.empty()) {
+                SSL_set_tlsext_host_name(tls_->ssl, sni_hostname_.c_str());
+            }
             static const unsigned char kAlpnProtos[] = "\x02h3\x05h3-29";
             SSL_set_alpn_protos(tls_->ssl, kAlpnProtos, sizeof(kAlpnProtos) - 1);
         }
@@ -461,7 +460,8 @@ namespace wavex::network::quic {
         }
 
         tls_->initialized = true;
-        wavex::log::info("[QUIC] init_tls_handshake_engine: TLS engine initialized successfully (is_server={})", is_server_);
+        wavex::log::debug("[QUIC] init_tls_handshake_engine: TLS engine initialized successfully (is_server={})",
+                         is_server_);
         if (!is_server_) {
             run_tls_engine();
         }
@@ -544,8 +544,8 @@ namespace wavex::network::quic {
         uint32_t prot_level, int direction,
         const unsigned char *secret, size_t secret_len) {
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
-        wavex::log::info("[QUIC] on_tls_secret: prot_level={} direction={} (0=read, 1=write) secret_len={}",
-                         prot_level, direction, secret_len);
+        wavex::log::debug("[QUIC] on_tls_secret: prot_level={} direction={} (0=read, 1=write) secret_len={}",
+                          prot_level, direction, secret_len);
         ProtectionKeys keys;
         if (!CryptoSuite::expand_quic_keys(secret, secret_len, keys)) {
             wavex::log::error("[QUIC] on_tls_secret: expand_quic_keys failed for level={}", prot_level);
@@ -558,12 +558,12 @@ namespace wavex::network::quic {
             if (prot_level == 2) {
                 // OSSL_RECORD_PROTECTION_LEVEL_HANDSHAKE
                 handshake_keys_local_ = keys;
-                wavex::log::info("[QUIC] on_tls_secret: handshake_keys_local_ expanded and marked valid");
+                wavex::log::debug("[QUIC] on_tls_secret: handshake_keys_local_ expanded and marked valid");
             } else if (prot_level == 3) {
                 // OSSL_RECORD_PROTECTION_LEVEL_APPLICATION
                 one_rtt_keys_local_ = keys;
                 one_rtt_keys_ = keys;
-                wavex::log::info("[QUIC] on_tls_secret: one_rtt_keys_local_ expanded and marked valid");
+                wavex::log::debug("[QUIC] on_tls_secret: one_rtt_keys_local_ expanded and marked valid");
             }
         } else {
             // 0 = read (peer/receiver)
@@ -571,12 +571,14 @@ namespace wavex::network::quic {
             if (prot_level == 2) {
                 // OSSL_RECORD_PROTECTION_LEVEL_HANDSHAKE
                 handshake_keys_peer_ = keys;
-                wavex::log::info("[QUIC] on_tls_secret: handshake_keys_peer_ expanded and marked valid! Draining buffered packets...");
+                wavex::log::debug(
+                    "[QUIC] on_tls_secret: handshake_keys_peer_ expanded and marked valid! Draining buffered packets...");
                 drain_buffered_packets();
             } else if (prot_level == 3) {
                 // OSSL_RECORD_PROTECTION_LEVEL_APPLICATION
                 one_rtt_keys_peer_ = keys;
-                wavex::log::info("[QUIC] on_tls_secret: one_rtt_keys_peer_ expanded and marked valid! Draining buffered packets...");
+                wavex::log::debug(
+                    "[QUIC] on_tls_secret: one_rtt_keys_peer_ expanded and marked valid! Draining buffered packets...");
                 drain_buffered_packets();
             }
         }
@@ -666,19 +668,20 @@ namespace wavex::network::quic {
                     ack_trackers_[2].mark_ack_sent();
                 }
                 serialize_frame(cf, payload);
-                keys = one_rtt_keys_local_.valid ? &one_rtt_keys_local_ : (!tls_ || !tls_->initialized ? &initial_keys_local_ : nullptr);
+                keys = one_rtt_keys_local_.valid
+                           ? &one_rtt_keys_local_
+                           : (!tls_ || !tls_->initialized ? &initial_keys_local_ : nullptr);
             }
 
             std::string packet;
             if (!keys || !keys->valid) {
-                wavex::log::error("[QUIC] queue_crypto_frame: No valid keys for write_level={}! Dropping crypto packet.",
-                                  current_write_level_);
+                wavex::log::error(
+                    "[QUIC] queue_crypto_frame: No valid keys for write_level={}! Dropping crypto packet.",
+                    current_write_level_);
             } else if (!CryptoSuite::protect_packet(*keys, hdr, payload, packet)) {
                 wavex::log::error("[QUIC] queue_crypto_frame: CryptoSuite::protect_packet failed for write_level={}!",
                                   current_write_level_);
             } else {
-                wavex::log::info("[QUIC] queue_crypto_frame: successfully protected packet ({} bytes, type={:02x}, pn={}), enqueuing to pending_outbound_datagrams_ (total={})",
-                                 packet.size(), static_cast<uint8_t>(hdr.type), hdr.packet_number, pending_outbound_datagrams_.size() + 1);
                 track_sent_packet(hdr.type, hdr.packet_number, packet.size(), {cf});
                 pending_outbound_datagrams_.push_back(std::move(packet));
             }
@@ -701,11 +704,12 @@ namespace wavex::network::quic {
         const int ret = SSL_do_handshake(tls_->ssl);
         if (ret != 1) {
             const int err = SSL_get_error(tls_->ssl, ret);
-            wavex::log::error("[QUIC] SSL_do_handshake rc={} SSL_get_error={}", ret, err);
             if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+                wavex::log::debug("[QUIC] SSL_do_handshake: waiting for IO (rc={}, err={})", ret, err);
                 if (on_outbound_) on_outbound_();
                 return;
             }
+            wavex::log::error("[QUIC] SSL_do_handshake fatal error rc={} SSL_get_error={}", ret, err);
             // Fatal TLS error
             state_ = ConnectionState::Closed;
             return;
@@ -716,6 +720,12 @@ namespace wavex::network::quic {
         handshake_done_ = true;
         state_ = ConnectionState::Connected;
         drain_buffered_packets();
+
+        ConnectedCallback connected_cb; {
+            std::lock_guard lock(mtx_);
+            connected_cb = on_connected_;
+        }
+        if (connected_cb) connected_cb();
 
         if (is_server_) {
             // Send HANDSHAKE_DONE in a 1-RTT short packet (RFC 9000 §19.20)
@@ -787,8 +797,6 @@ namespace wavex::network::quic {
 
         std::string packet;
         if (CryptoSuite::protect_packet(*keys, hdr, payload, packet)) {
-            wavex::log::info("[QUIC] send_ack_for_space: Sent coalesced ACK (space={}, pn={}, largest_ack={}, ranges={})",
-                             s, hdr.packet_number, ack.largest_acknowledged, ack.ranges.size());
             pending_outbound_datagrams_.push_back(std::move(packet));
         }
         if (on_outbound_) on_outbound_();
@@ -800,7 +808,8 @@ namespace wavex::network::quic {
         send_ack_for_space(type);
     }
 
-    void QuicConnection::track_sent_packet(const PacketType type, const uint64_t pn, const std::size_t bytes, std::vector<Frame> frames) {
+    void QuicConnection::track_sent_packet(const PacketType type, const uint64_t pn, const std::size_t bytes,
+                                           std::vector<Frame> frames) {
         const std::size_t s = space_index(type);
         const bool ack_eliciting = !frames.empty();
         sent_packets_[s].emplace_back(pn, bytes, type, std::move(frames), std::chrono::steady_clock::now());
@@ -813,10 +822,12 @@ namespace wavex::network::quic {
     void QuicConnection::on_ack_received(const PacketType pkt_type, const AckFrame &ack) {
         const std::size_t s = space_index(pkt_type);
         auto &pkts = sent_packets_[s];
+        wavex::log::debug("[QUIC] on_ack_received: enter space={} pkts.size()={} largest_ack={} ranges={}",
+                          s, pkts.size(), ack.largest_acknowledged, ack.ranges.size());
         if (pkts.empty()) return;
 
         // Decode all acknowledged ranges
-        std::vector<std::pair<uint64_t, uint64_t>> acked_ranges;
+        std::vector<std::pair<uint64_t, uint64_t> > acked_ranges;
         uint64_t largest = ack.largest_acknowledged;
         uint64_t first_range_len = ack.ranges.empty() ? 0 : ack.ranges[0].ack_range_len;
         uint64_t smallest = (largest >= first_range_len) ? (largest - first_range_len) : 0;
@@ -831,7 +842,7 @@ namespace wavex::network::quic {
         }
 
         auto is_acked = [&](const uint64_t pn) noexcept {
-            for (const auto &[min_pn, max_pn] : acked_ranges) {
+            for (const auto &[min_pn, max_pn]: acked_ranges) {
                 if (pn >= min_pn && pn <= max_pn) return true;
             }
             return false;
@@ -842,7 +853,7 @@ namespace wavex::network::quic {
         std::vector<SentPacket> remaining;
         remaining.reserve(pkts.size());
 
-        for (auto &pkt : pkts) {
+        for (auto &pkt: pkts) {
             if (is_acked(pkt.packet_number)) {
                 newly_acked_any = true;
                 congestion_controller_.on_packet_acked(pkt.bytes_sent);
@@ -881,8 +892,9 @@ namespace wavex::network::quic {
 
         std::vector<SentPacket> remaining;
         remaining.reserve(pkts.size());
+        std::vector<std::pair<Frame, PacketType> > lost_frames;
 
-        for (auto &pkt : pkts) {
+        for (auto &pkt: pkts) {
             if (pkt.packet_number > largest_acked) {
                 remaining.push_back(std::move(pkt));
                 continue;
@@ -892,11 +904,12 @@ namespace wavex::network::quic {
             const bool time_loss = (now >= pkt.time_sent + time_threshold);
 
             if (packet_loss || time_loss) {
-                wavex::log::info("[QUIC] Declaring packet lost: space={}, pn={}, bytes={}, packet_loss={}, time_loss={}",
-                                 space, pkt.packet_number, pkt.bytes_sent, packet_loss, time_loss);
+                wavex::log::debug(
+                    "[QUIC] Declaring packet lost: space={}, pn={}, bytes={}, packet_loss={}, time_loss={}",
+                    space, pkt.packet_number, pkt.bytes_sent, packet_loss, time_loss);
                 congestion_controller_.on_congestion_event(pkt.time_sent, now);
-                for (const auto &f : pkt.retransmittable_frames) {
-                    retransmit_frame(f, pkt.packet_type);
+                for (const auto &f: pkt.retransmittable_frames) {
+                    lost_frames.emplace_back(f, pkt.packet_type);
                 }
             } else {
                 remaining.push_back(std::move(pkt));
@@ -904,6 +917,10 @@ namespace wavex::network::quic {
         }
 
         pkts = std::move(remaining);
+
+        for (const auto &[f, pt]: lost_frames) {
+            retransmit_frame(f, pt);
+        }
     }
 
     void QuicConnection::arm_loss_detection_timer() {
@@ -914,7 +931,7 @@ namespace wavex::network::quic {
         auto earliest_sent = std::chrono::steady_clock::time_point::max();
 
         for (std::size_t s = 0; s < 3; ++s) {
-            for (const auto &pkt : sent_packets_[s]) {
+            for (const auto &pkt: sent_packets_[s]) {
                 if (pkt.ack_eliciting && !pkt.retransmittable_frames.empty()) {
                     has_in_flight = true;
                     if (pkt.time_sent < earliest_sent) {
@@ -963,24 +980,28 @@ namespace wavex::network::quic {
         std::lock_guard lock(mtx_);
         if (state_ == ConnectionState::Closed) return;
 
-        bool retransmitted = false;
+        std::vector<std::pair<Frame, PacketType> > frames_to_retransmit;
         for (std::size_t s = 0; s < 3; ++s) {
             auto &pkts = sent_packets_[s];
             if (pkts.empty()) continue;
 
-            for (auto &pkt : pkts) {
+            for (auto &pkt: pkts) {
                 if (!pkt.retransmittable_frames.empty()) {
-                    wavex::log::info("[QUIC] PTO timeout fired (pto_count={}): retransmitting {} frames from space={}, pn={}",
-                                     pto_count_, pkt.retransmittable_frames.size(), s, pkt.packet_number);
-                    for (const auto &f : pkt.retransmittable_frames) {
-                        retransmit_frame(f, pkt.packet_type);
+                    wavex::log::debug(
+                        "[QUIC] PTO timeout fired (pto_count={}): retransmitting {} frames from space={}, pn={}",
+                        pto_count_, pkt.retransmittable_frames.size(), s, pkt.packet_number);
+                    for (const auto &f: pkt.retransmittable_frames) {
+                        frames_to_retransmit.emplace_back(f, pkt.packet_type);
                     }
                     pkt.retransmittable_frames.clear();
-                    retransmitted = true;
                     break;
                 }
             }
-            if (retransmitted) break;
+            if (!frames_to_retransmit.empty()) break;
+        }
+
+        for (const auto &[f, pt]: frames_to_retransmit) {
+            retransmit_frame(f, pt);
         }
 
         pto_count_++;
@@ -1005,7 +1026,7 @@ namespace wavex::network::quic {
             if (auto self = weak_self.lock()) {
                 std::lock_guard lk(self->mtx_);
                 if (self->state_ != ConnectionState::Closed) {
-                    wavex::log::info("[QUIC] Idle timeout expired ({} ms) for DCID={} -> closing connection",
+                    wavex::log::debug("[QUIC] Idle timeout expired ({} ms) for DCID={} -> closing connection",
                                      self->idle_timeout_.count(), self->peer_cid_.to_string());
                     self->close(TransportError::NoError, "Idle timeout expired");
                 }
@@ -1031,7 +1052,8 @@ namespace wavex::network::quic {
                     hdr.scid = local_cid_;
                     hdr.packet_number = allocate_next_pn(PacketType::Initial);
                     keys = &initial_keys_local_;
-                    const std::size_t est_overhead = 1 + 4 + (1 + hdr.dcid.length()) + (1 + hdr.scid.length()) + 1 + 2 + 4 + 16;
+                    const std::size_t est_overhead =
+                            1 + 4 + (1 + hdr.dcid.length()) + (1 + hdr.scid.length()) + 1 + 2 + 4 + 16;
                     if (payload.size() + est_overhead < 1200) {
                         payload.resize(1200 - est_overhead, '\0');
                     }
@@ -1054,8 +1076,9 @@ namespace wavex::network::quic {
                 if (keys && keys->valid) {
                     std::string packet;
                     if (CryptoSuite::protect_packet(*keys, hdr, payload, packet)) {
-                        wavex::log::info("[QUIC] retransmit_frame: resending CRYPTO frame (space={}, new_pn={}, bytes={})",
-                                         space_index(hdr.type), hdr.packet_number, packet.size());
+                        wavex::log::debug(
+                            "[QUIC] retransmit_frame: resending CRYPTO frame (space={}, new_pn={}, bytes={})",
+                            space_index(hdr.type), hdr.packet_number, packet.size());
                         track_sent_packet(hdr.type, hdr.packet_number, packet.size(), {cf});
                         pending_outbound_datagrams_.push_back(std::move(packet));
                     }
@@ -1081,8 +1104,9 @@ namespace wavex::network::quic {
                                        ? one_rtt_keys_local_
                                        : (one_rtt_keys_.valid ? one_rtt_keys_ : initial_keys_local_);
                 if (CryptoSuite::protect_packet(keys, hdr, payload, packet)) {
-                    wavex::log::info("[QUIC] retransmit_frame: resending STREAM frame (sid={}, offset={}, size={}, new_pn={})",
-                                     sf.stream_id, sf.offset, sf.data.size(), hdr.packet_number);
+                    wavex::log::debug(
+                        "[QUIC] retransmit_frame: resending STREAM frame (sid={}, offset={}, size={}, new_pn={})",
+                        sf.stream_id, sf.offset, sf.data.size(), hdr.packet_number);
                     track_sent_packet(PacketType::OneRTT, hdr.packet_number, packet.size(), {sf});
                     pending_outbound_datagrams_.push_back(std::move(packet));
                 }
@@ -1100,7 +1124,8 @@ namespace wavex::network::quic {
                 const auto &keys = one_rtt_keys_local_.valid ? one_rtt_keys_local_ : initial_keys_local_;
                 std::string packet;
                 if (CryptoSuite::protect_packet(keys, hdr, payload, packet)) {
-                    wavex::log::info("[QUIC] retransmit_frame: resending HANDSHAKE_DONE frame (new_pn={})", hdr.packet_number);
+                    wavex::log::debug("[QUIC] retransmit_frame: resending HANDSHAKE_DONE frame (new_pn={})",
+                                      hdr.packet_number);
                     track_sent_packet(PacketType::OneRTT, hdr.packet_number, packet.size(), {hdf});
                     pending_outbound_datagrams_.push_back(std::move(packet));
                 }
@@ -1119,8 +1144,6 @@ namespace wavex::network::quic {
             if (handshake_keys_peer_.valid && !buffered_handshake_packets_.empty()) {
                 auto pkt = std::move(buffered_handshake_packets_.front());
                 buffered_handshake_packets_.pop_front();
-                wavex::log::info("[QUIC] Draining buffered Handshake packet ({} bytes, remaining in queue={})",
-                                 pkt.size(), buffered_handshake_packets_.size());
                 handle_datagram(pkt);
                 progress = true;
                 continue;
@@ -1129,8 +1152,6 @@ namespace wavex::network::quic {
             if (one_rtt_keys_peer_.valid && !buffered_one_rtt_packets_.empty()) {
                 auto pkt = std::move(buffered_one_rtt_packets_.front());
                 buffered_one_rtt_packets_.pop_front();
-                wavex::log::info("[QUIC] Draining buffered 1-RTT packet ({} bytes, remaining in queue={})",
-                                 pkt.size(), buffered_one_rtt_packets_.size());
                 handle_datagram(pkt);
                 progress = true;
                 continue;
@@ -1150,10 +1171,12 @@ namespace wavex::network::quic {
             std::string_view remaining = datagram;
 
             while (!remaining.empty()) {
+                if (state_ == ConnectionState::Closed) break;
                 PacketHeader hdr;
                 std::size_t hdr_len = 0;
                 if (!unpack_packet_header(remaining, hdr, hdr_len, local_cid_.length())) {
-                    wavex::log::warn("[QUIC] handle_datagram: failed to unpack packet header from remaining {} bytes", remaining.size());
+                    wavex::log::debug("[QUIC] handle_datagram: failed to unpack packet header from remaining {} bytes",
+                                     remaining.size());
                     break;
                 }
 
@@ -1168,9 +1191,6 @@ namespace wavex::network::quic {
                 const std::string_view packet_bytes = remaining.substr(0, packet_size);
                 remaining.remove_prefix(packet_size);
 
-                wavex::log::info("[QUIC] handle_datagram: processing packet ({} bytes, is_long={}, type={}, dcid={})",
-                                 packet_bytes.size(), hdr.is_long, static_cast<int>(hdr.type), hdr.dcid.to_string());
-
                 const ProtectionKeys *keys = nullptr;
                 if (hdr.is_long) {
                     if (hdr.type == PacketType::Initial) {
@@ -1180,10 +1200,9 @@ namespace wavex::network::quic {
                         if (!handshake_keys_peer_.valid) {
                             if (buffered_handshake_packets_.size() < 16) {
                                 buffered_handshake_packets_.emplace_back(packet_bytes);
-                                wavex::log::info("[QUIC] Buffering Handshake packet ({} bytes) - handshake_keys_peer not yet valid (queue_size={})",
-                                                 packet_bytes.size(), buffered_handshake_packets_.size());
                             } else {
-                                wavex::log::warn("[QUIC] Dropping Handshake packet ({} bytes) - buffer limit reached", packet_bytes.size());
+                                wavex::log::warn("[QUIC] Dropping Handshake packet ({} bytes) - buffer limit reached",
+                                                 packet_bytes.size());
                             }
                             continue;
                         }
@@ -1197,10 +1216,9 @@ namespace wavex::network::quic {
                         } else {
                             if (buffered_one_rtt_packets_.size() < 16) {
                                 buffered_one_rtt_packets_.emplace_back(packet_bytes);
-                                wavex::log::info("[QUIC] Buffering 1-RTT packet ({} bytes) - one_rtt_keys_peer not yet valid (queue_size={})",
-                                                 packet_bytes.size(), buffered_one_rtt_packets_.size());
                             } else {
-                                wavex::log::warn("[QUIC] Dropping 1-RTT packet ({} bytes) - buffer limit reached", packet_bytes.size());
+                                wavex::log::warn("[QUIC] Dropping 1-RTT packet ({} bytes) - buffer limit reached",
+                                                 packet_bytes.size());
                             }
                             continue;
                         }
@@ -1211,7 +1229,8 @@ namespace wavex::network::quic {
 
                 // Drop packet if we don't have the right keys for this level yet
                 if (!keys || !keys->valid) {
-                    wavex::log::warn("[QUIC] handle_datagram: no valid keys for packet type={}! Dropping packet.", static_cast<int>(hdr.type));
+                    wavex::log::debug("[QUIC] handle_datagram: no valid keys for packet type={}! Dropping packet.",
+                                     static_cast<int>(hdr.type));
                     continue;
                 }
 
@@ -1221,18 +1240,9 @@ namespace wavex::network::quic {
                 std::string plaintext;
                 if (!CryptoSuite::unprotect_packet(*keys, hdr, packet_bytes, plaintext, largest_pn_in_space,
                                                    local_cid_.length())) {
-                    wavex::log::warn("[QUIC] handle_datagram: unprotect_packet failed for packet type={} ({} bytes)!",
+                    wavex::log::debug("[QUIC] handle_datagram: unprotect_packet failed for packet type={} ({} bytes)!",
                                      static_cast<int>(hdr.type), packet_bytes.size());
                     continue;
-                }
-
-                wavex::log::info("[QUIC] handle_datagram: packet decrypted! type={} pn={} plaintext_len={}",
-                                 static_cast<int>(hdr.type), hdr.packet_number, plaintext.size());
-
-                if (plaintext.size() == 224) {
-                    std::string hex;
-                    for (unsigned char c : plaintext) hex += std::format("{:02x} ", c);
-                    wavex::log::info("[QUIC] pn={} plaintext hex dump: {}", hdr.packet_number, hex);
                 }
 
                 if (hdr.is_long) {
@@ -1245,7 +1255,6 @@ namespace wavex::network::quic {
 
                 std::vector<Frame> frames;
                 if (parse_frames(plaintext, frames)) {
-                    wavex::log::info("[QUIC] parse_frames succeeded: {} frames extracted", frames.size());
                     bool is_ack_eliciting = false;
                     bool has_crypto_frame = false;
                     for (const auto &f: frames) {
@@ -1256,26 +1265,20 @@ namespace wavex::network::quic {
                         }
 
                         if (const auto *cf = std::get_if<CryptoFrame>(&f)) {
-                            wavex::log::info("[QUIC] Received CryptoFrame: {} bytes at offset {} (pkt_type={})",
-                                             cf->data.size(), cf->offset, static_cast<int>(hdr.type));
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
                             if (tls_ && tls_->initialized) {
                                 auto &reassembler = reassembler_for_pkt_type(hdr.type);
                                 if (!reassembler.insert(cf->offset, cf->data)) {
-                                    wavex::log::warn("[QUIC] CRYPTO stream buffer limit exceeded (>64KB) at offset {}", cf->offset);
+                                    wavex::log::warn("[QUIC] CRYPTO stream buffer limit exceeded (>64KB) at offset {}",
+                                                     cf->offset);
                                     close(TransportError::CryptoBufferExceeded, "CRYPTO buffer limit exceeded");
                                     return;
                                 }
-                                wavex::log::info("[QUIC] Crypto reassembler for pkt_type={}: ready={} unconsumed={} next_offset={} pending_fragments={}",
-                                                 static_cast<int>(hdr.type),
-                                                 reassembler.ready.size(),
-                                                 reassembler.ready.size() - reassembler.ready_consumed,
-                                                 reassembler.next_offset,
-                                                 reassembler.pending.size());
                                 has_crypto_frame = true;
                             } else {
-                                wavex::log::warn("[QUIC] Received CryptoFrame ({} bytes) but TLS engine not initialized! tls_={} initialized={}",
-                                                 cf->data.size(), (tls_ != nullptr), (tls_ ? tls_->initialized : false));
+                                wavex::log::warn(
+                                    "[QUIC] Received CryptoFrame ({} bytes) but TLS engine not initialized! tls_={} initialized={}",
+                                    cf->data.size(), (tls_ != nullptr), (tls_ ? tls_->initialized : false));
                             }
 #endif
                         }
@@ -1285,16 +1288,16 @@ namespace wavex::network::quic {
                     ack_trackers_[space_idx].add_packet(hdr.packet_number, is_ack_eliciting);
 
                     if (has_crypto_frame) {
-                        wavex::log::info("[QUIC] invoking run_tls_engine() due to incoming CRYPTO frame");
                         run_tls_engine();
                     }
 
                     // Pass the packet type so process_frames can handle frames
                     process_frames(frames, hdr.packet_number, hdr.type, created_streams);
+                    wavex::log::debug("[QUIC] handle_datagram: process_frames returned for pn={}", hdr.packet_number);
                 } else {
                     std::string hex;
-                    for (unsigned char c : plaintext) hex += std::format("{:02x} ", c);
-                    wavex::log::warn("[QUIC] parse_frames failed for packet pn={} (plaintext_len={}) hex: {}",
+                    for (unsigned char c: plaintext) hex += std::format("{:02x} ", c);
+                    log::warn("[QUIC] parse_frames failed for packet pn={} (plaintext_len={}) hex: {}",
                                      hdr.packet_number, plaintext.size(), hex);
                 }
             }
@@ -1313,9 +1316,15 @@ namespace wavex::network::quic {
             if (is_server_ && state_ == ConnectionState::Initial && has_received_initial_) {
                 // For mock or non-TLS connections (e.g. unit tests without certs), auto-complete handshake
                 if (!tls_ || !tls_->initialized) {
-                    wavex::log::info("[QUIC] Non-TLS or uninitialized fallback: calling send_initial_handshake_response()");
+                    wavex::log::debug(
+                        "[QUIC] Non-TLS or uninitialized fallback: calling send_initial_handshake_response()");
                     send_initial_handshake_response();
                     state_ = ConnectionState::Connected;
+                    ConnectedCallback connected_cb; {
+                        std::lock_guard lock(mtx_);
+                        connected_cb = on_connected_;
+                    }
+                    if (connected_cb) connected_cb();
                 }
             }
 
@@ -1344,45 +1353,54 @@ namespace wavex::network::quic {
                     on_ack_received(pkt_type, frame);
                 } else if constexpr (std::is_same_v<T, StreamFrame>) {
                     // STREAM frames are ack-eliciting; coalesced ACK is handled at packet/datagram level
-                    auto it = streams_.find(frame.stream_id);
-                    if (it == streams_.end()) {
-                        // B8: Enforce advertised stream count limits (RFC 9000 §4.6)
-                        const bool is_bidi = (frame.stream_id & 0x02) == 0x00;
-                        const uint64_t stream_idx = frame.stream_id >> 2;
-                        const uint64_t max_allowed = is_bidi ? max_peer_bidi_streams_ : max_peer_uni_streams_;
-                        if (stream_idx >= max_allowed) {
-                            wavex::log::warn("[QUIC] Peer exceeded stream limit: sid={} (idx={}) >= max_allowed={}",
-                                             frame.stream_id, stream_idx, max_allowed);
-                            close(TransportError::StreamLimitError, "Stream limit exceeded");
-                            return;
-                        }
-
-                        auto stream = std::make_shared<QuicStream>(shared_from_this(), frame.stream_id, executor_);
-                        streams_[frame.stream_id] = stream;
-
-                        // A11 & B3: Prevent double delivery and monotonic queue accumulation.
-                        // If stream_acceptor_ is waiting, deliver directly to it without queueing in accepted_streams_.
-                        if (stream_acceptor_) {
-                            auto cb = std::move(*stream_acceptor_);
-                            stream_acceptor_.reset();
-                            cb(stream);
-                        } else if (!on_stream_created_) {
-                            // Only queue when server uses the accept_stream() pull API and cap at 128
-                            constexpr std::size_t kMaxAcceptQueueSize = 128;
-                            if (accepted_streams_.size() < kMaxAcceptQueueSize) {
-                                accepted_streams_.push_back(stream);
-                            } else {
-                                wavex::log::warn("[QUIC] accepted_streams_ queue full ({}), dropping unaccepted stream {}",
-                                                 kMaxAcceptQueueSize, frame.stream_id);
+                    std::shared_ptr<QuicStream> target_stream; {
+                        auto it = streams_.find(frame.stream_id);
+                        if (it == streams_.end()) {
+                            // B8: Enforce advertised stream count limits (RFC 9000 §4.6)
+                            const bool is_bidi = (frame.stream_id & 0x02) == 0x00;
+                            const uint64_t stream_idx = frame.stream_id >> 2;
+                            const uint64_t max_allowed = is_bidi ? max_peer_bidi_streams_ : max_peer_uni_streams_;
+                            if (stream_idx >= max_allowed) {
+                                wavex::log::warn("[QUIC] Peer exceeded stream limit: sid={} (idx={}) >= max_allowed={}",
+                                                 frame.stream_id, stream_idx, max_allowed);
+                                close(TransportError::StreamLimitError, "Stream limit exceeded");
+                                return;
                             }
-                        }
 
-                        new_streams.push_back(stream);
-                        it = streams_.find(frame.stream_id);
+                            auto stream = std::make_shared<QuicStream>(shared_from_this(), frame.stream_id, executor_);
+                            streams_[frame.stream_id] = stream;
+
+                            // A11 & B3: Prevent double delivery and monotonic queue accumulation.
+                            // If stream_acceptor_ is waiting, deliver directly to it without queueing in accepted_streams_.
+                            if (stream_acceptor_) {
+                                auto cb = std::move(*stream_acceptor_);
+                                stream_acceptor_.reset();
+                                cb(stream);
+                            } else if (!on_stream_created_) {
+                                // Only queue when server uses the accept_stream() pull API and cap at 128
+                                constexpr std::size_t kMaxAcceptQueueSize = 128;
+                                if (accepted_streams_.size() < kMaxAcceptQueueSize) {
+                                    accepted_streams_.push_back(stream);
+                                } else {
+                                    wavex::log::warn(
+                                        "[QUIC] accepted_streams_ queue full ({}), dropping unaccepted stream {}",
+                                        kMaxAcceptQueueSize, frame.stream_id);
+                                }
+                            }
+
+                            new_streams.push_back(stream);
+                            target_stream = stream;
+                        } else {
+                            target_stream = it->second;
+                        }
                     }
-                    it->second->push_inbound(frame.offset, frame.data, frame.fin);
-                    if (it->second->has_final_size_error()) {
-                        wavex::log::error("[QUIC] Stream {} FINAL_SIZE_ERROR: final size mismatch with peer", frame.stream_id);
+
+                    if (target_stream) {
+                        target_stream->push_inbound(frame.offset, frame.data, frame.fin);
+                        if (target_stream->has_final_size_error()) {
+                            wavex::log::error("[QUIC] Stream {} FINAL_SIZE_ERROR: final size mismatch with peer",
+                                              frame.stream_id);
+                        }
                     }
                 } else if constexpr (std::is_same_v<T, MaxDataFrame>) {
                     if (frame.max_data > max_data_) {
@@ -1395,21 +1413,31 @@ namespace wavex::network::quic {
                         flush_stream_send_queues();
                     }
                 } else if constexpr (std::is_same_v<T, ResetStreamFrame>) {
+                    std::shared_ptr<QuicStream> s;
                     auto it = streams_.find(frame.stream_id);
-                    if (it != streams_.end()) {
-                        it->second->close();
+                    if (it != streams_.end()) s = it->second;
+                    if (s) {
+                        s->close();
                     }
                 } else if constexpr (std::is_same_v<T, StopSendingFrame>) {
+                    std::shared_ptr<QuicStream> s;
                     auto it = streams_.find(frame.stream_id);
-                    if (it != streams_.end()) {
-                        it->second->close();
+                    if (it != streams_.end()) s = it->second;
+                    if (s) {
+                        s->close();
                     }
                 } else if constexpr (std::is_same_v<T, ConnectionCloseFrame>) {
-                    wavex::log::error(
-                        "[QUIC] Received CONNECTION_CLOSE from peer: is_application={} error_code=0x{:x} ({}) frame_type=0x{:x} reason=\"{}\" (pkt_type={} pn={})",
-                        frame.is_application, frame.error_code, frame.error_code,
-                        frame.frame_type, frame.reason_phrase,
-                        static_cast<int>(pkt_type), pn);
+                    if (frame.error_code == 0 || (frame.is_application && frame.error_code == 0x0100)) {
+                        wavex::log::info(
+                            "[QUIC] Received graceful CONNECTION_CLOSE from peer: reason=\"{}\" (pkt_type={} pn={})",
+                            frame.reason_phrase, static_cast<int>(pkt_type), pn);
+                    } else {
+                        wavex::log::warn(
+                            "[QUIC] Received CONNECTION_CLOSE from peer: is_application={} error_code=0x{:x} ({}) frame_type=0x{:x} reason=\"{}\" (pkt_type={} pn={})",
+                            frame.is_application, frame.error_code, frame.error_code,
+                            frame.frame_type, frame.reason_phrase,
+                            static_cast<int>(pkt_type), pn);
+                    }
                     state_ = ConnectionState::Closed;
                 }
             }, f);
@@ -1486,8 +1514,7 @@ namespace wavex::network::quic {
     }
 
     void QuicConnection::close_stream(const uint64_t stream_id) {
-        std::shared_ptr<QuicStream> stream_to_close;
-        {
+        std::shared_ptr<QuicStream> stream_to_close; {
             std::lock_guard lock(mtx_);
             auto it = streams_.find(stream_id);
             if (it != streams_.end()) {
@@ -1504,8 +1531,7 @@ namespace wavex::network::quic {
         }
     }
 
-    asio::awaitable<std::shared_ptr<QuicStream> > QuicConnection::accept_stream() {
-        {
+    asio::awaitable<std::shared_ptr<QuicStream> > QuicConnection::accept_stream() { {
             std::lock_guard lock(mtx_);
             if (!accepted_streams_.empty()) {
                 auto stream = accepted_streams_.front();
@@ -1558,7 +1584,7 @@ namespace wavex::network::quic {
         // MTU packetization: safe stream frame payload fitting inside typical network MTU (RFC 9000 §14.1)
         constexpr std::size_t kMaxStreamFramePayload = 1150;
 
-        for (auto &[sid, queue] : stream_send_queues_) {
+        for (auto &[sid, queue]: stream_send_queues_) {
             while (!queue.empty() || stream_send_fin_[sid]) {
                 // Flow control limits (A4)
                 const uint64_t conn_credit = (max_data_ > data_sent_) ? (max_data_ - data_sent_) : 0;
@@ -1566,7 +1592,7 @@ namespace wavex::network::quic {
                 const uint64_t stream_credit = (max_stream_data_ > stream_sent) ? (max_stream_data_ - stream_sent) : 0;
 
                 if (!queue.empty() && (conn_credit == 0 || stream_credit == 0)) {
-                    wavex::log::info("[QUIC] Flow control credit blocked on sid={} (conn_credit={}, stream_credit={})",
+                    wavex::log::debug("[QUIC] Flow control credit blocked on sid={} (conn_credit={}, stream_credit={})",
                                      sid, conn_credit, stream_credit);
                     break;
                 }
@@ -1575,8 +1601,9 @@ namespace wavex::network::quic {
                 if (is_server_ && !peer_address_validated_) {
                     const uint64_t max_allowed_send = 3 * (std::max<uint64_t>)(cumulative_bytes_received_, 1200);
                     if (cumulative_bytes_sent_ + 100 > max_allowed_send) {
-                        wavex::log::warn("[QUIC] Anti-amplification 3x limit reached (sent={} > 3*recv={}), suppressing outbound",
-                                         cumulative_bytes_sent_, cumulative_bytes_received_);
+                        wavex::log::debug(
+                            "[QUIC] Anti-amplification 3x limit reached (sent={} > 3*recv={}), suppressing outbound",
+                            cumulative_bytes_sent_, cumulative_bytes_received_);
                         break;
                     }
                 }
@@ -1701,8 +1728,8 @@ namespace wavex::network::quic {
         VarInt::encode(0x03, dec_init_data);
         write_stream(qpack_dec_id, dec_init_data, false);
 
-        wavex::log::info("[QUIC] HTTP/3 session initialized: control_stream={}, qpack_enc={}, qpack_dec={}",
-                         control_stream_id, qpack_enc_id, qpack_dec_id);
+        wavex::log::debug("[QUIC] HTTP/3 session initialized: control_stream={}, qpack_enc={}, qpack_dec={}",
+                          control_stream_id, qpack_enc_id, qpack_dec_id);
     }
 
     std::vector<std::string> QuicConnection::poll_outgoing_datagrams() {
@@ -1713,9 +1740,6 @@ namespace wavex::network::quic {
             pkts.push_back(std::move(pending_outbound_datagrams_.front()));
             pending_outbound_datagrams_.pop_front();
         }
-        if (!pkts.empty()) {
-            wavex::log::info("[QUIC] poll_outgoing_datagrams: drained {} datagram(s)", pkts.size());
-        }
         return pkts;
     }
 
@@ -1723,8 +1747,7 @@ namespace wavex::network::quic {
         OutboundCallback cb;
         ClosedCallback closed_cb;
         ConnectionId lcid, pcid, orig_dcid;
-        std::vector<std::shared_ptr<QuicStream>> open_streams;
-        {
+        std::vector<std::shared_ptr<QuicStream> > open_streams; {
             std::lock_guard lock(mtx_);
             if (state_ == ConnectionState::Closed) return;
             state_ = ConnectionState::Closed;
@@ -1759,7 +1782,7 @@ namespace wavex::network::quic {
                 pending_outbound_datagrams_.push_back(std::move(packet));
             }
             open_streams.reserve(streams_.size());
-            for (auto &[sid, s] : streams_) {
+            for (auto &[sid, s]: streams_) {
                 if (s) open_streams.push_back(s);
             }
             streams_.clear();
@@ -1774,14 +1797,12 @@ namespace wavex::network::quic {
             pcid = peer_cid_;
             orig_dcid = original_dcid_;
         }
-        for (auto &s : open_streams) {
+        for (auto &s: open_streams) {
             s->close();
         }
         if (cb) cb();
         if (closed_cb) closed_cb(lcid, pcid, orig_dcid);
     }
-
 } // namespace wavex::network::quic
 
 #endif // WAVEX_HAS_SSL
-

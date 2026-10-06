@@ -137,8 +137,6 @@ namespace wavex::network::quic {
 
             uint64_t raw_type = 0;
             if (!VarInt::decode(payload, cursor, raw_type)) PARSE_FAIL("decode raw_type");
-            wavex::log::info("[QUIC] parse_frames: decoded frame type=0x{:02x} at offset {} (payload_size={})",
-                              raw_type, frame_start_cursor, payload.size());
 
             if (raw_type == 0x00) {
                 // PADDING

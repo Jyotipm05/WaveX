@@ -256,7 +256,21 @@ namespace wavex::log {
         }
     };
 
+    // --- Log Level Enablement Invariant ---
+    // In Release builds without ENABLE_LOGGING, trace and debug logs are compiled
+    // as no-op inline functions that the compiler eliminates completely.
+    // INFO, WARN, ERROR, and FATAL logs, as well as base log_loc(), remain unaffected in all builds.
+#if defined(ENABLE_LOGGING) || defined(WAVEX_ENABLE_LOGGING)
+#  define WAVEX_LOG_ENABLED 1
+#elif !defined(NDEBUG) || defined(_DEBUG) || defined(DEBUG)
+#  define WAVEX_LOG_ENABLED 1
+#else
+#  define WAVEX_LOG_ENABLED 0
+#endif
+
     // --- Modern Log Functions (Formatted) ---
+
+#if WAVEX_LOG_ENABLED
 
     template<typename... Args>
     inline void trace(format_with_loc<std::type_identity_t<Args>...> fwl, Args &&... args) {
@@ -277,6 +291,20 @@ namespace wavex::log {
     inline void debug(const msg_with_loc &mwl) {
         ::wavex::base::Logger::instance().log_loc(::wavex::base::LogLevel::DEBUG, mwl.loc, mwl.msg);
     }
+
+#else
+
+    template<typename... Args>
+    inline void trace([[maybe_unused]] format_with_loc<std::type_identity_t<Args>...> fwl, [[maybe_unused]] Args &&... args) {}
+
+    inline void trace([[maybe_unused]] const msg_with_loc &mwl) {}
+
+    template<typename... Args>
+    inline void debug([[maybe_unused]] format_with_loc<std::type_identity_t<Args>...> fwl, [[maybe_unused]] Args &&... args) {}
+
+    inline void debug([[maybe_unused]] const msg_with_loc &mwl) {}
+
+#endif
 
     template<typename... Args>
     inline void info(format_with_loc<std::type_identity_t<Args>...> fwl, Args &&... args) {
@@ -324,6 +352,8 @@ namespace wavex::log {
 /**
  * Convenience macros for legacy compatibility.
  */
+#if WAVEX_LOG_ENABLED
+
 #define WX_LOG_TRACE(...) \
     do { if (::wavex::base::Logger::instance().level() <= ::wavex::base::LogLevel::TRACE) \
         ::wavex::base::Logger::instance().log_loc(::wavex::base::LogLevel::TRACE, std::source_location::current(), __VA_ARGS__); } while(0)
@@ -331,6 +361,13 @@ namespace wavex::log {
 #define WX_LOG_DEBUG(...) \
     do { if (::wavex::base::Logger::instance().level() <= ::wavex::base::LogLevel::DEBUG) \
         ::wavex::base::Logger::instance().log_loc(::wavex::base::LogLevel::DEBUG, std::source_location::current(), __VA_ARGS__); } while(0)
+
+#else
+
+#define WX_LOG_TRACE(...) do {} while(0)
+#define WX_LOG_DEBUG(...) do {} while(0)
+
+#endif
 
 #define WX_LOG_INFO(...) \
     do { if (::wavex::base::Logger::instance().level() <= ::wavex::base::LogLevel::INFO) \
@@ -340,6 +377,7 @@ namespace wavex::log {
     do { if (::wavex::base::Logger::instance().level() <= ::wavex::base::LogLevel::WARN) \
         ::wavex::base::Logger::instance().log_loc(::wavex::base::LogLevel::WARN, std::source_location::current(), __VA_ARGS__); } while(0)
 
+
 #define WX_LOG_ERROR(...) \
     do { if (::wavex::base::Logger::instance().level() <= ::wavex::base::LogLevel::ERR) \
         ::wavex::base::Logger::instance().log_loc(::wavex::base::LogLevel::ERR, std::source_location::current(), __VA_ARGS__); } while(0)
@@ -347,5 +385,4 @@ namespace wavex::log {
 #define WX_LOG_FATAL(...) \
     do { ::wavex::base::Logger::instance().log_loc(::wavex::base::LogLevel::FATAL, std::source_location::current(), __VA_ARGS__); \
          std::abort(); } while(0)
-
 namespace wxlog = wavex::log;
