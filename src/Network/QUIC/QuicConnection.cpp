@@ -558,12 +558,11 @@ namespace wavex::network::quic {
             if (prot_level == 2) {
                 // OSSL_RECORD_PROTECTION_LEVEL_HANDSHAKE
                 handshake_keys_local_ = keys;
-                wavex::log::debug("[QUIC] on_tls_secret: handshake_keys_local_ expanded and marked valid");
-            } else if (prot_level == 3) {
+                wavex::log::info("[QUIC] on_tls_secret: handshake_keys_local_ set (write)");
+            } else if (prot_level >= 3) {
                 // OSSL_RECORD_PROTECTION_LEVEL_APPLICATION
                 one_rtt_keys_local_ = keys;
-                one_rtt_keys_ = keys;
-                wavex::log::debug("[QUIC] on_tls_secret: one_rtt_keys_local_ expanded and marked valid");
+                wavex::log::info("[QUIC] on_tls_secret: one_rtt_keys_local_ set (write)");
             }
         } else {
             // 0 = read (peer/receiver)
@@ -571,14 +570,13 @@ namespace wavex::network::quic {
             if (prot_level == 2) {
                 // OSSL_RECORD_PROTECTION_LEVEL_HANDSHAKE
                 handshake_keys_peer_ = keys;
-                wavex::log::debug(
-                    "[QUIC] on_tls_secret: handshake_keys_peer_ expanded and marked valid! Draining buffered packets...");
+                wavex::log::info("[QUIC] on_tls_secret: handshake_keys_peer_ set (read)");
                 drain_buffered_packets();
-            } else if (prot_level == 3) {
+            } else if (prot_level >= 3) {
                 // OSSL_RECORD_PROTECTION_LEVEL_APPLICATION
                 one_rtt_keys_peer_ = keys;
-                wavex::log::debug(
-                    "[QUIC] on_tls_secret: one_rtt_keys_peer_ expanded and marked valid! Draining buffered packets...");
+                wavex::log::info(
+                    "[QUIC] on_tls_secret: one_rtt_keys_peer_ set (read) - CRITICAL!");
                 drain_buffered_packets();
             }
         }
@@ -716,10 +714,15 @@ namespace wavex::network::quic {
         }
 
         // ret == 1: Handshake completed successfully
+        if (handshake_done_) {
+            return;
+        }
+
         wavex::log::info("[QUIC] SSL_do_handshake succeeded (rc=1)! Handshake complete.");
         handshake_done_ = true;
         state_ = ConnectionState::Connected;
         drain_buffered_packets();
+        flush_stream_send_queues();
 
         ConnectedCallback connected_cb; {
             std::lock_guard lock(mtx_);
@@ -728,23 +731,7 @@ namespace wavex::network::quic {
         if (connected_cb) connected_cb();
 
         if (is_server_) {
-            // Send HANDSHAKE_DONE in a 1-RTT short packet (RFC 9000 §19.20)
-            PacketHeader one_rtt_hdr;
-            one_rtt_hdr.is_long = false;
-            one_rtt_hdr.type = PacketType::OneRTT;
-            one_rtt_hdr.dcid = peer_cid_;
-            one_rtt_hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
-
-            HandshakeDoneFrame hdf;
-            std::string one_rtt_payload;
-            serialize_frame(hdf, one_rtt_payload);
-
-            const auto &keys = one_rtt_keys_local_.valid ? one_rtt_keys_local_ : initial_keys_local_;
-            std::string one_rtt_packet;
-            if (CryptoSuite::protect_packet(keys, one_rtt_hdr, one_rtt_payload, one_rtt_packet)) {
-                track_sent_packet(PacketType::OneRTT, one_rtt_hdr.packet_number, one_rtt_packet.size(), {hdf});
-                pending_outbound_datagrams_.push_back(std::move(one_rtt_packet));
-            }
+            send_handshake_done();
 
             if (!http3_session_initialized_) {
                 initialize_http3_session();
@@ -1209,6 +1196,7 @@ namespace wavex::network::quic {
                         keys = &handshake_keys_peer_;
                     }
                 } else {
+                    // Short header (1-RTT packet)
                     if (!one_rtt_keys_peer_.valid) {
                         if (!tls_ || !tls_->initialized) {
                             // Non-TLS or mock test fallback
@@ -1216,6 +1204,8 @@ namespace wavex::network::quic {
                         } else {
                             if (buffered_one_rtt_packets_.size() < 16) {
                                 buffered_one_rtt_packets_.emplace_back(packet_bytes);
+                                wavex::log::debug("[QUIC] Buffering 1-RTT packet ({} bytes) - waiting for keys",
+                                                  packet_bytes.size());
                             } else {
                                 wavex::log::warn("[QUIC] Dropping 1-RTT packet ({} bytes) - buffer limit reached",
                                                  packet_bytes.size());
@@ -1224,6 +1214,7 @@ namespace wavex::network::quic {
                         }
                     } else {
                         keys = &one_rtt_keys_peer_;
+                        wavex::log::debug("[QUIC] Using one_rtt_keys_peer_ for incoming 1-RTT packet");
                     }
                 }
 
@@ -1251,6 +1242,8 @@ namespace wavex::network::quic {
                     } else if (hdr.type == PacketType::Handshake) {
                         has_received_handshake_ = true;
                     }
+                } else {
+                    peer_address_validated_ = true; // RFC 9000 §8.1: Authenticated 1-RTT validates address
                 }
 
                 std::vector<Frame> frames;
@@ -1467,6 +1460,13 @@ namespace wavex::network::quic {
         }
 
         // Send HANDSHAKE_DONE in a 1-RTT packet (RFC 9000 §19.20)
+        send_handshake_done();
+    }
+
+    void QuicConnection::send_handshake_done() {
+        if (!is_server_ || handshake_done_sent_) return;
+        handshake_done_sent_ = true;
+
         PacketHeader one_rtt_hdr;
         one_rtt_hdr.is_long = false;
         one_rtt_hdr.type = PacketType::OneRTT;
@@ -1477,13 +1477,12 @@ namespace wavex::network::quic {
         std::string one_rtt_payload;
         serialize_frame(hdf, one_rtt_payload);
 
-        const auto &one_rtt_keys = (one_rtt_keys_local_.valid)
-                                       ? one_rtt_keys_local_
-                                       : (one_rtt_keys_.valid ? one_rtt_keys_ : initial_keys_local_);
+        const auto &keys = one_rtt_keys_local_.valid ? one_rtt_keys_local_ : initial_keys_local_;
         std::string one_rtt_packet;
-        if (CryptoSuite::protect_packet(one_rtt_keys, one_rtt_hdr, one_rtt_payload, one_rtt_packet)) {
+        if (CryptoSuite::protect_packet(keys, one_rtt_hdr, one_rtt_payload, one_rtt_packet)) {
             track_sent_packet(PacketType::OneRTT, one_rtt_hdr.packet_number, one_rtt_packet.size(), {hdf});
             pending_outbound_datagrams_.push_back(std::move(one_rtt_packet));
+            wavex::log::info("[QUIC] HANDSHAKE_DONE sent on 1-RTT (keys_valid={})", one_rtt_keys_local_.valid);
         }
     }
 
@@ -1685,6 +1684,7 @@ namespace wavex::network::quic {
 
     void QuicConnection::initialize_http3_session() {
         if (!is_server_) return;
+        if (http3_session_initialized_) return;
         http3_session_initialized_ = true;
 
         // 1. Establish HTTP/3 Control Stream (Stream Type 0x00)
@@ -1728,7 +1728,9 @@ namespace wavex::network::quic {
         VarInt::encode(0x03, dec_init_data);
         write_stream(qpack_dec_id, dec_init_data, false);
 
-        wavex::log::debug("[QUIC] HTTP/3 session initialized: control_stream={}, qpack_enc={}, qpack_dec={}",
+        flush_stream_send_queues();
+
+        wavex::log::info("[QUIC] HTTP/3 session initialized and flushed: control_stream={}, qpack_enc={}, qpack_dec={}",
                           control_stream_id, qpack_enc_id, qpack_dec_id);
     }
 

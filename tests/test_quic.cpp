@@ -228,6 +228,33 @@ void test_quic_stream_async() {
     std::cout << "  [PASS] QuicStream async read/write buffering passed." << std::endl;
 }
 
+void test_udp_basic_loopback() {
+    std::cout << "[Test QUIC] Basic UDP socket loopback..." << std::endl;
+
+    asio::io_context io;
+    asio::ip::udp::socket server_socket(
+        io, asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 0));
+    auto server_ep = server_socket.local_endpoint();
+
+    asio::ip::udp::socket client_socket(io);
+    client_socket.open(asio::ip::udp::v4());
+
+    // Send test packet
+    std::string test_data = "Hello UDP";
+    client_socket.send_to(asio::buffer(test_data), server_ep);
+
+    // Receive
+    char buf[256];
+    asio::ip::udp::endpoint sender;
+    std::size_t n = server_socket.receive_from(asio::buffer(buf), sender);
+
+    std::string received(buf, n);
+    std::cout << "  [LOG] Sent: '" << test_data << "', Received: '" << received << "'" << std::endl;
+
+    assert(received == test_data);
+    std::cout << "  [PASS] Basic UDP loopback passed." << std::endl;
+}
+
 void test_quic_server_client_loopback() {
     std::cout << "[Test QUIC] QuicServer and QuicClient UDP integration loopback..." << std::endl;
 
@@ -239,10 +266,11 @@ void test_quic_server_client_loopback() {
     const std::string cert_path = (project_root / "ssl" / "test.crt").string();
     const std::string key_path = (project_root / "ssl" / "test.key").string();
 
-    QuicServer server(server_io, 0); // Bind ephemeral port
+    QuicServer server(server_io, "127.0.0.1", 8445);
     server.set_tls_credentials(cert_path, key_path);
     const uint16_t port = server.local_port();
     assert(port > 0);
+    wavex::log::info("[Test] Server bound to 127.0.0.1:{}", port);
 
     std::string server_received_msg;
 
@@ -814,6 +842,7 @@ void test_connection_id_boundaries() {
 
 void test_malformed_packets_and_fuzzing() {
     std::cout << "[Test QUIC] Malformed packet parser resilience & fuzzing..." << std::endl;
+    wavex::log::set_level(wavex::log::LogLevel::ERROR);
 
     // 1. Packet too short for header
     {
@@ -916,6 +945,7 @@ void test_malformed_packets_and_fuzzing() {
         assert(!ok); // AEAD tag verification must reject tampered packet!
     }
 
+    wavex::log::set_level(wavex::log::LogLevel::INFO);
     std::cout << "  [PASS] Malformed packet parser resilience & fuzzing passed." << std::endl;
 }
 
@@ -1076,6 +1106,7 @@ void test_congestion_controller() {
 
 void test_quic_packet_fuzzer() {
     std::cout << "[Test QUIC] Pre-authentication packet parser fuzz harness..." << std::endl;
+    wavex::log::set_level(wavex::log::LogLevel::ERROR);
 
     // Deterministic pseudo-random sequence for repeatability
     uint32_t state = 0x12345678;
@@ -1144,6 +1175,7 @@ void test_quic_packet_fuzzer() {
         CryptoSuite::unprotect_packet(client_keys, dec_hdr, mutated, dec_payload);
     }
 
+    wavex::log::set_level(wavex::log::LogLevel::INFO);
     std::cout << "  [PASS] Pre-authentication packet parser fuzz harness passed (2500 mutations)." << std::endl;
 }
 
@@ -1550,6 +1582,7 @@ int main() {
         test_quic_lifecycle_idle_eviction_and_crypto_cap();
         test_quic_stream_limits_and_coroutine_termination();
         test_quic_critical_mtu_flow_control_anti_amplification();
+        test_udp_basic_loopback();
         test_quic_server_client_loopback();
         test_quic_protocol();
         test_quic_socket_acceptor_tcp_syntax();

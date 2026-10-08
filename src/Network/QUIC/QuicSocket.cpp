@@ -592,7 +592,11 @@ namespace wavex::network::quic {
     }
 
     basic_quic_acceptor::endpoint_type basic_quic_acceptor::local_endpoint(std::error_code &ec) const noexcept {
-        return udp_socket_.local_endpoint(ec);
+        auto ep = udp_socket_.local_endpoint(ec);
+        if (!ec && ep.address().is_unspecified()) {
+            ep.address(asio::ip::address_v4::loopback());
+        }
+        return ep;
     }
 
     void basic_quic_acceptor::set_tls_credentials(std::string cert_file, std::string key_file) {

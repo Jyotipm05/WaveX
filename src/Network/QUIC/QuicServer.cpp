@@ -42,14 +42,14 @@ namespace wavex::network::quic {
     }
 
     void QuicServer::start() {
-        if (!socket_.is_open() || stopped_) return;
-        running_ = true;
+        if (!socket_.is_open() || stopped_.load()) return;
+        running_.store(true);
         do_receive();
     }
 
     void QuicServer::stop() {
         if (stopped_.exchange(true)) return;
-        running_ = false;
+        running_.store(false);
 
         asio::error_code ec;
         socket_.close(ec); // cancels pending async_receive_from first
@@ -57,46 +57,45 @@ namespace wavex::network::quic {
         // Teardown MUST happen on the io thread, after all in-flight
         // handle_datagram/flush_outbound calls have finished, and posted
         // callbacks must not touch a dying server.
-        if (io_.get_executor().running_in_this_thread()) {
-            std::unordered_map<ConnectionId, std::shared_ptr<QuicConnection>> conns;
-            {
-                std::lock_guard lock(mtx_);
-                conns.swap(connections_);
-            }
+        std::unordered_map<ConnectionId, std::shared_ptr<QuicConnection>> conns;
+        {
+            std::lock_guard lock(mtx_);
+            conns.swap(connections_);
+        }
+        if (conns.empty() || io_.get_executor().running_in_this_thread() || io_.stopped()) {
             for (auto &[cid, conn] : conns) {
                 if (conn) conn->close();
             }
-        } else {
-            std::promise<void> drained;
-            auto fut = drained.get_future();
-            asio::post(io_, [this, &drained] {
-                std::unordered_map<ConnectionId, std::shared_ptr<QuicConnection>> conns;
-                {
-                    std::lock_guard lock(mtx_);
-                    conns.swap(connections_);
-                }
-                for (auto &[cid, conn] : conns) {
-                    if (conn) conn->close();
-                }
-                drained.set_value();
-            });
-            fut.wait(); // safe: io_.run() is executing on server_thread
+            return;
         }
+
+        std::promise<void> drained;
+        auto fut = drained.get_future();
+        asio::post(io_, [&conns, &drained] {
+            for (auto &[cid, conn] : conns) {
+                if (conn) conn->close();
+            }
+            drained.set_value();
+        });
+        fut.wait_for(std::chrono::milliseconds(500));
     }
 
     void QuicServer::do_receive() {
-        if (!running_ || stopped_) return;
+        if (!running_.load() || stopped_.load()) return;
 
         socket_.async_receive_from(
             asio::buffer(recv_buf_), sender_endpoint_,
             [this](const std::error_code ec, const std::size_t bytes_recvd) {
                 // Only abort the receive loop on intentional cancellation (shutdown).
                 // Transient UDP errors (e.g. ECONNRESET on Windows) must not halt the loop.
-                if (ec == asio::error::operation_aborted || stopped_ || !running_) return;
+                if (ec == asio::error::operation_aborted || stopped_.load() || !running_.load()) return;
                 if (ec || bytes_recvd == 0) {
                     do_receive();
                     return;
                 }
+
+                wavex::log::info("[QuicServer] Received {} bytes from {}",
+                                 bytes_recvd, sender_endpoint_.address().to_string());
 
                 const std::string_view datagram(reinterpret_cast<const char *>(recv_buf_.data()), bytes_recvd);
                 PacketHeader hdr;
@@ -144,6 +143,35 @@ namespace wavex::network::quic {
                             const ConnectionId server_cid = ConnectionId::random(8);
                             conn = std::make_shared<QuicConnection>(server_cid, hdr.scid, sender_endpoint_, true,
                                                                     io_.get_executor(), hdr.dcid);
+
+                            conn->set_outbound_callback([this, weak_conn = std::weak_ptr<QuicConnection>(conn)] {
+                                if (stopped_.load() || !running_.load()) return;
+                                if (io_.get_executor().running_in_this_thread()) {
+                                    if (auto c = weak_conn.lock()) {
+                                        flush_outbound(c);
+                                    }
+                                } else {
+                                    asio::post(io_, [this, weak_conn] {
+                                        if (stopped_.load() || !running_.load()) return;
+                                        if (auto c = weak_conn.lock()) {
+                                            flush_outbound(c);
+                                        }
+                                    });
+                                }
+                            });
+
+                            conn->set_closed_callback([this, server_cid](const ConnectionId &scid, const ConnectionId &peer_cid, const ConnectionId &orig_dcid) {
+                                asio::post(io_, [this, server_cid, scid, peer_cid, orig_dcid] {
+                                    if (stopped_.load()) return;
+                                    std::lock_guard lock(mtx_);
+                                    connections_.erase(server_cid);
+                                    connections_.erase(scid);
+                                    if (!orig_dcid.empty()) connections_.erase(orig_dcid);
+                                    if (!peer_cid.empty()) connections_.erase(peer_cid);
+                                    wavex::log::info("[QUIC] [server] Removed closed connection (remaining={})", connections_.size());
+                                });
+                            });
+
                             std::string cert = tls_cert_file_;
                             std::string key = tls_key_file_;
                             if (!cert.empty() && !key.empty()) {
@@ -157,27 +185,6 @@ namespace wavex::network::quic {
                             connections_[server_cid] = conn;
                             connections_[hdr.dcid] = conn;
                             if (!hdr.scid.empty()) connections_[hdr.scid] = conn;
-
-                            conn->set_closed_callback([this, server_cid](const ConnectionId &scid, const ConnectionId &peer_cid, const ConnectionId &orig_dcid) {
-                                asio::post(io_, [this, server_cid, scid, peer_cid, orig_dcid] {
-                                    if (stopped_) return;
-                                    std::lock_guard lock(mtx_);
-                                    connections_.erase(server_cid);
-                                    connections_.erase(scid);
-                                    if (!orig_dcid.empty()) connections_.erase(orig_dcid);
-                                    if (!peer_cid.empty()) connections_.erase(peer_cid);
-                                    wavex::log::info("[QUIC] [server] Removed closed connection (remaining={})", connections_.size());
-                                });
-                            });
-
-                            conn->set_outbound_callback([this, weak_conn = std::weak_ptr<QuicConnection>(conn)] {
-                                asio::post(io_, [this, weak_conn] {
-                                    if (stopped_) return;
-                                    if (auto c = weak_conn.lock()) {
-                                        flush_outbound(c);
-                                    }
-                                });
-                            });
 
                             if (stream_handler_ || uni_stream_handler_) {
                                 conn->set_stream_created_callback([this](std::shared_ptr<QuicStream> stream) {
@@ -236,7 +243,7 @@ namespace wavex::network::quic {
     }
 
     void QuicServer::flush_outbound(const std::shared_ptr<QuicConnection> &conn) {
-        if (stopped_ || !socket_.is_open()) return;
+        if (stopped_.load() || !socket_.is_open()) return;
         auto datagrams = conn->poll_outgoing_datagrams();
         for (auto &dgram: datagrams) {
             auto buf = std::make_shared<std::string>(std::move(dgram));

@@ -57,6 +57,7 @@ namespace wavex::base {
         INFO = 2, ///< Lifecycle events: startup, listening, worker counts
         WARN = 3, ///< Recoverable issues: timeouts, retries, deprecation
         ERR = 4, ///< Request failures, socket errors, parse failures
+        ERROR = 4, ///< Alias for ERR
         FATAL = 5 ///< Unrecoverable — logs then calls std::abort()
     };
 
@@ -346,6 +347,12 @@ namespace wavex::log {
     [[noreturn]] inline void fatal(const msg_with_loc &mwl) {
         ::wavex::base::Logger::instance().log_loc(::wavex::base::LogLevel::FATAL, mwl.loc, mwl.msg);
         std::abort();
+    }
+
+    using LogLevel = ::wavex::base::LogLevel;
+
+    inline void set_level(const LogLevel level) {
+        ::wavex::base::Logger::instance().set_level(level);
     }
 } // namespace wavex::log
 

@@ -50,7 +50,7 @@ namespace wavex::network::quic {
         std::string tls_cert_file_{};
         std::string tls_key_file_{};
         std::atomic<bool> stopped_{false};
-        bool running_{false};
+        std::atomic<bool> running_{false};
 
     public:
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
@@ -83,6 +83,16 @@ namespace wavex::network::quic {
         [[nodiscard]] std::size_t connection_count() const noexcept {
             std::lock_guard lock(mtx_);
             return connections_.size();
+        }
+
+        [[nodiscard]] asio::ip::udp::endpoint local_endpoint() const {
+            asio::error_code ec;
+            auto ep = socket_.local_endpoint(ec);
+            if (ec) return {};
+            if (ep.address().is_unspecified()) {
+                ep.address(asio::ip::address_v4::loopback());
+            }
+            return ep;
         }
 
         [[nodiscard]] uint16_t local_port() const noexcept {

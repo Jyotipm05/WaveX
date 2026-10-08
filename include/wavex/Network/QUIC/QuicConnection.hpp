@@ -208,6 +208,7 @@ namespace wavex::network::quic {
         bool settings_received_{false};
         bool draining_buffered_packets_{false};
         bool http3_session_initialized_{false};
+        bool handshake_done_sent_{false};
 
     public:
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
@@ -315,6 +316,7 @@ namespace wavex::network::quic {
         CryptoStreamReassembler &reassembler_for_pkt_type(PacketType type) noexcept;
 
         bool init_tls_handshake_engine();
+        void run_tls_engine();
 
         // Inbound packet handling
         void handle_datagram(std::string_view datagram);
@@ -387,8 +389,8 @@ namespace wavex::network::quic {
         void retransmit_frame(const Frame &frame, PacketType pkt_type);
         void process_frames(const std::vector<Frame> &frames, uint64_t pn, PacketType pkt_type, std::vector<std::shared_ptr<QuicStream>> &new_streams);
         void send_initial_handshake_response();
+        void send_handshake_done();
         void flush_stream_send_queues();
-        void run_tls_engine();
         void drain_buffered_packets();
         [[nodiscard]] std::string build_quic_transport_params() const;
     };
