@@ -1,5 +1,6 @@
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
 
+#include <ranges>
 #include <wavex/Network/QUIC/QuicConnection.hpp>
 #include <wavex/Base/Logger.hpp>
 
@@ -11,18 +12,14 @@
 #endif
 
 #include <asio/co_spawn.hpp>
-#include <asio/detached.hpp>
 #include <asio/as_tuple.hpp>
 #include <asio/redirect_error.hpp>
 #include <asio/post.hpp>
 #include <future>
 
 #include <algorithm>
-#include <cstring>
 #include <filesystem>
 #include <random>
-#include <sstream>
-#include <iomanip>
 #include <fstream>
 #include <cassert>
 
@@ -318,7 +315,7 @@ namespace wavex::network::quic {
         SSL_CTX_set_ciphersuites(tls_->ctx, "TLS_AES_128_GCM_SHA256");
 
         // Ground-truth tooling: support SSLKEYLOGFILE for Wireshark / diagnostic interop
-        if (const char *keylog_path = std::getenv("SSLKEYLOGFILE")) {
+        if ([[maybe_unused]] const char *keylog_path = std::getenv("SSLKEYLOGFILE")) {
             SSL_CTX_set_keylog_callback(
                 tls_->ctx,
                 [](const SSL *, const char *line) {
@@ -413,7 +410,7 @@ namespace wavex::network::quic {
             if (!sni_hostname_.empty()) {
                 SSL_set_tlsext_host_name(tls_->ssl, sni_hostname_.c_str());
             }
-            static const unsigned char kAlpnProtos[] = "\x02h3\x05h3-29";
+            static constexpr unsigned char kAlpnProtos[] = "\x02h3\x05h3-29";
             SSL_set_alpn_protos(tls_->ssl, kAlpnProtos, sizeof(kAlpnProtos) - 1);
         }
 
@@ -461,7 +458,7 @@ namespace wavex::network::quic {
 
         tls_->initialized = true;
         wavex::log::debug("[QUIC] init_tls_handshake_engine: TLS engine initialized successfully (is_server={})",
-                         is_server_);
+                          is_server_);
         if (!is_server_) {
             run_tls_engine();
         }
@@ -1014,7 +1011,7 @@ namespace wavex::network::quic {
                 std::lock_guard lk(self->mtx_);
                 if (self->state_ != ConnectionState::Closed) {
                     wavex::log::debug("[QUIC] Idle timeout expired ({} ms) for DCID={} -> closing connection",
-                                     self->idle_timeout_.count(), self->peer_cid_.to_string());
+                                      self->idle_timeout_.count(), self->peer_cid_.to_string());
                     self->close(TransportError::NoError, "Idle timeout expired");
                 }
             }
@@ -1163,7 +1160,7 @@ namespace wavex::network::quic {
                 std::size_t hdr_len = 0;
                 if (!unpack_packet_header(remaining, hdr, hdr_len, local_cid_.length())) {
                     wavex::log::debug("[QUIC] handle_datagram: failed to unpack packet header from remaining {} bytes",
-                                     remaining.size());
+                                      remaining.size());
                     break;
                 }
 
@@ -1221,7 +1218,7 @@ namespace wavex::network::quic {
                 // Drop packet if we don't have the right keys for this level yet
                 if (!keys || !keys->valid) {
                     wavex::log::debug("[QUIC] handle_datagram: no valid keys for packet type={}! Dropping packet.",
-                                     static_cast<int>(hdr.type));
+                                      static_cast<int>(hdr.type));
                     continue;
                 }
 
@@ -1232,7 +1229,7 @@ namespace wavex::network::quic {
                 if (!CryptoSuite::unprotect_packet(*keys, hdr, packet_bytes, plaintext, largest_pn_in_space,
                                                    local_cid_.length())) {
                     wavex::log::debug("[QUIC] handle_datagram: unprotect_packet failed for packet type={} ({} bytes)!",
-                                     static_cast<int>(hdr.type), packet_bytes.size());
+                                      static_cast<int>(hdr.type), packet_bytes.size());
                     continue;
                 }
 
@@ -1291,7 +1288,7 @@ namespace wavex::network::quic {
                     std::string hex;
                     for (unsigned char c: plaintext) hex += std::format("{:02x} ", c);
                     log::warn("[QUIC] parse_frames failed for packet pn={} (plaintext_len={}) hex: {}",
-                                     hdr.packet_number, plaintext.size(), hex);
+                              hdr.packet_number, plaintext.size(), hex);
                 }
             }
 
@@ -1314,7 +1311,7 @@ namespace wavex::network::quic {
                     send_initial_handshake_response();
                     state_ = ConnectionState::Connected;
                     ConnectedCallback connected_cb; {
-                        std::lock_guard lock(mtx_);
+                        std::lock_guard lock1(mtx_);
                         connected_cb = on_connected_;
                     }
                     if (connected_cb) connected_cb();
@@ -1592,7 +1589,7 @@ namespace wavex::network::quic {
 
                 if (!queue.empty() && (conn_credit == 0 || stream_credit == 0)) {
                     wavex::log::debug("[QUIC] Flow control credit blocked on sid={} (conn_credit={}, stream_credit={})",
-                                     sid, conn_credit, stream_credit);
+                                      sid, conn_credit, stream_credit);
                     break;
                 }
 
@@ -1731,7 +1728,7 @@ namespace wavex::network::quic {
         flush_stream_send_queues();
 
         wavex::log::info("[QUIC] HTTP/3 session initialized and flushed: control_stream={}, qpack_enc={}, qpack_dec={}",
-                          control_stream_id, qpack_enc_id, qpack_dec_id);
+                         control_stream_id, qpack_enc_id, qpack_dec_id);
     }
 
     std::vector<std::string> QuicConnection::poll_outgoing_datagrams() {
@@ -1784,7 +1781,7 @@ namespace wavex::network::quic {
                 pending_outbound_datagrams_.push_back(std::move(packet));
             }
             open_streams.reserve(streams_.size());
-            for (auto &[sid, s]: streams_) {
+            for (auto &s: streams_ | std::views::values) {
                 if (s) open_streams.push_back(s);
             }
             streams_.clear();

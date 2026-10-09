@@ -16,8 +16,6 @@
 
 #include <array>
 #include <chrono>
-#include <cstddef>
-#include <cstdint>
 #include <deque>
 #include <functional>
 #include <map>
@@ -42,13 +40,11 @@
 #include <wavex/Network/QUIC/QuicConstants.hpp>
 #include <wavex/Network/QUIC/ConnectionId.hpp>
 #include <wavex/Network/QUIC/QuicFrames.hpp>
-#include <wavex/Network/QUIC/QuicPacket.hpp>
 #include <wavex/Network/QUIC/QuicCrypto.hpp>
 #include <wavex/Network/QUIC/CongestionControl.hpp>
 #include <wavex/Network/QUIC/QuicStream.hpp>
 
 namespace wavex::network::quic {
-
     /**
      * @class QuicConnection
      * @brief State machine for a single QUIC connection between two endpoints.
@@ -58,7 +54,8 @@ namespace wavex::network::quic {
         // ─── 1. Nested Types & Definitions (TOP) ───────────────────────────
         using StreamCreatedCallback = std::function<void(std::shared_ptr<QuicStream>)>;
         using OutboundCallback = std::function<void()>;
-        using ClosedCallback = std::function<void(const ConnectionId &local_cid, const ConnectionId &peer_cid, const ConnectionId &orig_dcid)>;
+        using ClosedCallback = std::function<void(const ConnectionId &local_cid, const ConnectionId &peer_cid,
+                                                  const ConnectionId &orig_dcid)>;
         using ConnectedCallback = std::function<void()>;
 
         struct CryptoStreamReassembler {
@@ -74,39 +71,55 @@ namespace wavex::network::quic {
 
             // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
             CryptoStreamReassembler() = default;
+
             ~CryptoStreamReassembler() = default;
+
             CryptoStreamReassembler(const CryptoStreamReassembler &) = default;
-            CryptoStreamReassembler &operator=(const CryptoStreamReassembler &) = default;
+
+            auto operator=(const CryptoStreamReassembler &) -> CryptoStreamReassembler & = default;
+
             CryptoStreamReassembler(CryptoStreamReassembler &&) noexcept = default;
-            CryptoStreamReassembler &operator=(CryptoStreamReassembler &&) noexcept = default;
+
+            auto operator=(CryptoStreamReassembler &&) noexcept -> CryptoStreamReassembler & = default;
 
             // ─── 4. Member Functions (LAST) ────────────────────────────────────
-            [[nodiscard]] bool insert(uint64_t offset, std::string_view data);
-            [[nodiscard]] std::string_view available() const noexcept;
+            [[nodiscard]] auto insert(uint64_t offset, std::string_view data) -> bool;
+
+            [[nodiscard]] auto available() const noexcept -> std::string_view;
+
             void consume(std::size_t bytes);
-            [[nodiscard]] bool has_available() const noexcept;
+
+            [[nodiscard]] auto has_available() const noexcept -> bool;
         };
 
         struct ReceivedPacketTracker {
             // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
-            std::vector<std::pair<uint64_t, uint64_t>> intervals{};
+            std::vector<std::pair<uint64_t, uint64_t> > intervals{};
             uint64_t largest_pn{0};
             bool has_packets{false};
             bool ack_eliciting_pending{false};
 
             // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
             ReceivedPacketTracker() = default;
+
             ~ReceivedPacketTracker() = default;
+
             ReceivedPacketTracker(const ReceivedPacketTracker &) = default;
-            ReceivedPacketTracker &operator=(const ReceivedPacketTracker &) = default;
+
+            auto operator=(const ReceivedPacketTracker &) -> ReceivedPacketTracker & = default;
+
             ReceivedPacketTracker(ReceivedPacketTracker &&) noexcept = default;
-            ReceivedPacketTracker &operator=(ReceivedPacketTracker &&) noexcept = default;
+
+            auto operator=(ReceivedPacketTracker &&) noexcept -> ReceivedPacketTracker & = default;
 
             // ─── 4. Member Functions (LAST) ────────────────────────────────────
             void add_packet(uint64_t pn, bool ack_eliciting = true);
-            [[nodiscard]] AckFrame build_ack_frame(uint64_t ack_delay = 0) const;
+
+            [[nodiscard]] auto build_ack_frame(uint64_t ack_delay = 0) const -> AckFrame;
+
             void mark_ack_sent() noexcept { ack_eliciting_pending = false; }
-            [[nodiscard]] bool needs_ack() const noexcept { return has_packets && ack_eliciting_pending; }
+            [[nodiscard]] auto needs_ack() const noexcept -> bool { return has_packets && ack_eliciting_pending; }
+
             void reset() noexcept {
                 intervals.clear();
                 largest_pn = 0;
@@ -129,11 +142,16 @@ namespace wavex::network::quic {
 
             // ─── 3. Constructors & Destructor ────
             TlsCtx() = default;
+
             ~TlsCtx();
+
             TlsCtx(const TlsCtx &) = delete;
-            TlsCtx &operator=(const TlsCtx &) = delete;
+
+            auto operator=(const TlsCtx &) -> TlsCtx & = delete;
+
             TlsCtx(TlsCtx &&other) noexcept;
-            TlsCtx &operator=(TlsCtx &&other) noexcept;
+
+            auto operator=(TlsCtx &&other) noexcept -> TlsCtx &;
         };
 
     private:
@@ -143,7 +161,7 @@ namespace wavex::network::quic {
         std::unique_ptr<asio::steady_timer> idle_timer_{};
         mutable std::recursive_mutex mtx_{};
         asio::ip::udp::endpoint peer_endpoint_{};
-        std::unordered_map<uint64_t, std::shared_ptr<QuicStream>> streams_{};
+        std::unordered_map<uint64_t, std::shared_ptr<QuicStream> > streams_{};
         std::unordered_map<uint64_t, uint64_t> stream_send_offsets_{};
         std::unordered_map<uint64_t, uint64_t> stream_data_sent_{};
         std::unordered_map<uint64_t, std::string> stream_send_queues_{};
@@ -151,8 +169,8 @@ namespace wavex::network::quic {
         std::deque<std::string> pending_outbound_datagrams_{};
         std::deque<std::string> buffered_handshake_packets_{};
         std::deque<std::string> buffered_one_rtt_packets_{};
-        std::deque<std::shared_ptr<QuicStream>> accepted_streams_{};
-        std::optional<std::function<void(std::shared_ptr<QuicStream>)>> stream_acceptor_{};
+        std::deque<std::shared_ptr<QuicStream> > accepted_streams_{};
+        std::optional<std::function<void(std::shared_ptr<QuicStream>)> > stream_acceptor_{};
         StreamCreatedCallback on_stream_created_{};
         OutboundCallback on_outbound_{};
         ClosedCallback on_closed_{};
@@ -219,36 +237,41 @@ namespace wavex::network::quic {
             bool is_server = true,
             asio::any_io_executor executor = {},
             ConnectionId initial_dcid = {}) noexcept;
+
         ~QuicConnection();
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
-        [[nodiscard]] asio::any_io_executor get_executor() const noexcept { return executor_; }
+        [[nodiscard]] auto get_executor() const noexcept -> asio::any_io_executor { return executor_; }
         void set_executor(asio::any_io_executor ex) noexcept { executor_ = std::move(ex); }
-        [[nodiscard]] const ConnectionId &local_cid() const noexcept { return local_cid_; }
-        [[nodiscard]] const ConnectionId &peer_cid() const noexcept { return peer_cid_; }
-        [[nodiscard]] const asio::ip::udp::endpoint &peer_endpoint() const noexcept { return peer_endpoint_; }
-        [[nodiscard]] ConnectionState state() const noexcept { return state_; }
-        [[nodiscard]] bool is_connected() const noexcept { return state_ == ConnectionState::Connected; }
-        [[nodiscard]] const CongestionController &congestion_controller() const noexcept { return congestion_controller_; }
-        [[nodiscard]] CongestionController &congestion_controller() noexcept { return congestion_controller_; }
+        [[nodiscard]] auto local_cid() const noexcept -> const ConnectionId & { return local_cid_; }
+        [[nodiscard]] auto peer_cid() const noexcept -> const ConnectionId & { return peer_cid_; }
+        [[nodiscard]] auto peer_endpoint() const noexcept -> const asio::ip::udp::endpoint & { return peer_endpoint_; }
+        [[nodiscard]] auto state() const noexcept -> ConnectionState { return state_; }
+        [[nodiscard]] auto is_connected() const noexcept -> bool { return state_ == ConnectionState::Connected; }
+
+        [[nodiscard]] auto congestion_controller() const noexcept -> const CongestionController & {
+            return congestion_controller_;
+        }
+
+        [[nodiscard]] auto congestion_controller() noexcept -> CongestionController & { return congestion_controller_; }
 
         void set_stream_created_callback(StreamCreatedCallback cb) {
-            std::lock_guard lock(mtx_);
+            std::scoped_lock lock(mtx_);
             on_stream_created_ = std::move(cb);
         }
 
         void set_outbound_callback(OutboundCallback cb) {
-            std::lock_guard lock(mtx_);
+            std::scoped_lock lock(mtx_);
             on_outbound_ = std::move(cb);
         }
 
         void set_closed_callback(ClosedCallback cb) {
-            std::lock_guard lock(mtx_);
+            std::scoped_lock lock(mtx_);
             on_closed_ = std::move(cb);
         }
 
         void set_connected_callback(ConnectedCallback cb) {
-            std::lock_guard lock(mtx_);
+            std::scoped_lock lock(mtx_);
             on_connected_ = std::move(cb);
             if (state_ == ConnectionState::Connected && on_connected_) {
                 on_connected_();
@@ -256,47 +279,47 @@ namespace wavex::network::quic {
         }
 
         void set_sni_hostname(std::string sni) {
-            std::lock_guard lock(mtx_);
+            std::scoped_lock lock(mtx_);
             sni_hostname_ = std::move(sni);
         }
 
         void set_idle_timeout(std::chrono::milliseconds timeout) noexcept {
-            std::lock_guard lock(mtx_);
+            std::scoped_lock lock(mtx_);
             idle_timeout_ = timeout;
         }
 
-        [[nodiscard]] std::size_t stream_count() const noexcept {
-            std::lock_guard lock(mtx_);
+        [[nodiscard]] auto stream_count() const noexcept -> std::size_t {
+            std::scoped_lock lock(mtx_);
             return streams_.size();
         }
 
-        [[nodiscard]] bool can_send() const noexcept {
-            std::lock_guard lock(mtx_);
+        [[nodiscard]] auto can_send() const noexcept -> bool {
+            std::scoped_lock lock(mtx_);
             return congestion_controller_.can_send() && (data_sent_ < max_data_);
         }
 
-        [[nodiscard]] bool is_peer_address_validated() const noexcept {
-            std::lock_guard lock(mtx_);
+        [[nodiscard]] auto is_peer_address_validated() const noexcept -> bool {
+            std::scoped_lock lock(mtx_);
             return peer_address_validated_;
         }
 
-        [[nodiscard]] uint64_t max_data() const noexcept {
-            std::lock_guard lock(mtx_);
+        [[nodiscard]] auto max_data() const noexcept -> uint64_t {
+            std::scoped_lock lock(mtx_);
             return max_data_;
         }
 
-        [[nodiscard]] uint64_t max_stream_data() const noexcept {
-            std::lock_guard lock(mtx_);
+        [[nodiscard]] auto max_stream_data() const noexcept -> uint64_t {
+            std::scoped_lock lock(mtx_);
             return max_stream_data_;
         }
 
-        [[nodiscard]] uint64_t data_sent() const noexcept {
-            std::lock_guard lock(mtx_);
+        [[nodiscard]] auto data_sent() const noexcept -> uint64_t {
+            std::scoped_lock lock(mtx_);
             return data_sent_;
         }
 
         void set_max_peer_streams(uint64_t max_bidi, uint64_t max_uni) noexcept {
-            std::lock_guard lock(mtx_);
+            std::scoped_lock lock(mtx_);
             max_peer_bidi_streams_ = max_bidi;
             max_peer_uni_streams_ = max_uni;
         }
@@ -304,54 +327,66 @@ namespace wavex::network::quic {
         void refresh_idle_timer();
 
         void set_tls_credentials(std::string cert_file, std::string key_file) {
-            std::lock_guard lock(mtx_);
+            std::scoped_lock lock(mtx_);
             tls_cert_file_ = std::move(cert_file);
             tls_key_file_ = std::move(key_file);
         }
 
-        [[nodiscard]] uint32_t current_write_level() const noexcept { return current_write_level_; }
-        [[nodiscard]] uint32_t current_read_level() const noexcept { return current_read_level_; }
+        [[nodiscard]] auto current_write_level() const noexcept -> uint32_t { return current_write_level_; }
+        [[nodiscard]] auto current_read_level() const noexcept -> uint32_t { return current_read_level_; }
 
-        CryptoStreamReassembler &reassembler_for_level(uint32_t level) noexcept;
-        CryptoStreamReassembler &reassembler_for_pkt_type(PacketType type) noexcept;
+        auto reassembler_for_level(uint32_t level) noexcept -> CryptoStreamReassembler &;
 
-        bool init_tls_handshake_engine();
+        auto reassembler_for_pkt_type(PacketType type) noexcept -> CryptoStreamReassembler &;
+
+        auto init_tls_handshake_engine() -> bool;
+
         void run_tls_engine();
 
         // Inbound packet handling
         void handle_datagram(std::string_view datagram);
 
         // Stream management
-        std::shared_ptr<QuicStream> create_stream(bool bidirectional = true);
-        std::shared_ptr<QuicStream> get_or_create_stream(uint64_t stream_id);
+        auto create_stream(bool bidirectional = true) -> std::shared_ptr<QuicStream>;
+
+        auto get_or_create_stream(uint64_t stream_id) -> std::shared_ptr<QuicStream>;
+
         void close_stream(uint64_t stream_id);
 
         // Accept a new stream asynchronously
-        asio::awaitable<std::shared_ptr<QuicStream>> accept_stream();
+        auto accept_stream() -> asio::awaitable<std::shared_ptr<QuicStream> >;
 
         // Send stream payload
         void queue_stream_data(uint64_t stream_id, std::string_view data, bool fin);
 
         // RFC 9114 HTTP/3 Control & QPACK Stream Helpers
-        uint64_t open_unidirectional_stream();
+        auto open_unidirectional_stream() -> uint64_t;
+
         void write_stream(uint64_t stream_id, std::string_view data, bool fin = false);
+
         void write_stream(uint64_t stream_id, const std::vector<uint8_t> &data, bool fin = false);
+
         void initialize_http3_session();
-        [[nodiscard]] bool is_http3_session_initialized() const noexcept { return http3_session_initialized_; }
+
+        [[nodiscard]] auto is_http3_session_initialized() const noexcept -> bool { return http3_session_initialized_; }
 
         // Drain outbound UDP datagrams
-        std::vector<std::string> poll_outgoing_datagrams();
+        auto poll_outgoing_datagrams() -> std::vector<std::string>;
 
         void close(TransportError err = TransportError::NoError, std::string_view reason = "");
 
         // Internal TLS engine plumbing
         void queue_crypto_frame(std::string_view data);
-        int on_tls_crypto_recv(const unsigned char **buf, size_t *bytes_read);
-        int on_tls_crypto_release(size_t bytes_read);
-        int on_tls_secret(uint32_t prot_level, int direction, const unsigned char *secret, size_t secret_len);
-        int on_tls_transport_params(const unsigned char *params, size_t params_len);
 
-        static constexpr std::size_t space_index(const PacketType type) noexcept {
+        auto on_tls_crypto_recv(const unsigned char **buf, size_t *bytes_read) -> int;
+
+        auto on_tls_crypto_release(size_t bytes_read) -> int;
+
+        auto on_tls_secret(uint32_t prot_level, int direction, const unsigned char *secret, size_t secret_len) -> int;
+
+        static auto on_tls_transport_params(const unsigned char *params, size_t params_len) -> int;
+
+        static constexpr auto space_index(const PacketType type) noexcept -> std::size_t {
             switch (type) {
                 case PacketType::Initial: return 0;
                 case PacketType::Handshake: return 1;
@@ -361,40 +396,55 @@ namespace wavex::network::quic {
             }
         }
 
-        [[nodiscard]] ReceivedPacketTracker &ack_tracker_for_pkt_type(const PacketType type) noexcept {
+        [[nodiscard]] auto ack_tracker_for_pkt_type(const PacketType type) noexcept -> ReceivedPacketTracker & {
             return ack_trackers_[space_index(type)];
         }
 
-        [[nodiscard]] const ReceivedPacketTracker &ack_tracker_for_pkt_type(const PacketType type) const noexcept {
+        [[nodiscard]] auto ack_tracker_for_pkt_type(
+            const PacketType type) const noexcept -> const ReceivedPacketTracker & {
             return ack_trackers_[space_index(type)];
         }
 
-        [[nodiscard]] uint64_t allocate_next_pn(const PacketType type) noexcept {
+        [[nodiscard]] auto allocate_next_pn(const PacketType type) noexcept -> uint64_t {
             return next_packet_number_[space_index(type)]++;
         }
 
-        [[nodiscard]] const std::vector<SentPacket> &sent_packets(std::size_t space) const noexcept {
+        [[nodiscard]] auto sent_packets(std::size_t space) const noexcept -> const std::vector<SentPacket> & {
             return sent_packets_[space];
         }
-        [[nodiscard]] uint32_t pto_count() const noexcept { return pto_count_; }
+
+        [[nodiscard]] auto pto_count() const noexcept -> uint32_t { return pto_count_; }
 
     private:
         void send_ack(uint64_t pn, PacketType type);
-        void send_ack_for_space(PacketType type);
-        void track_sent_packet(PacketType type, uint64_t pn, std::size_t bytes, std::vector<Frame> frames);
-        void on_ack_received(PacketType pkt_type, const AckFrame &ack);
-        void detect_lost_packets(std::size_t space, uint64_t largest_acked);
-        void arm_loss_detection_timer();
-        void on_loss_detection_timeout();
-        void retransmit_frame(const Frame &frame, PacketType pkt_type);
-        void process_frames(const std::vector<Frame> &frames, uint64_t pn, PacketType pkt_type, std::vector<std::shared_ptr<QuicStream>> &new_streams);
-        void send_initial_handshake_response();
-        void send_handshake_done();
-        void flush_stream_send_queues();
-        void drain_buffered_packets();
-        [[nodiscard]] std::string build_quic_transport_params() const;
-    };
 
+        void send_ack_for_space(PacketType type);
+
+        void track_sent_packet(PacketType type, uint64_t pn, std::size_t bytes, std::vector<Frame> frames);
+
+        void on_ack_received(PacketType pkt_type, const AckFrame &ack);
+
+        void detect_lost_packets(std::size_t space, uint64_t largest_acked);
+
+        void arm_loss_detection_timer();
+
+        void on_loss_detection_timeout();
+
+        void retransmit_frame(const Frame &frame, PacketType pkt_type);
+
+        void process_frames(const std::vector<Frame> &frames, uint64_t pn, PacketType pkt_type,
+                            std::vector<std::shared_ptr<QuicStream> > &new_streams);
+
+        void send_initial_handshake_response();
+
+        void send_handshake_done();
+
+        void flush_stream_send_queues();
+
+        void drain_buffered_packets();
+
+        [[nodiscard]] auto build_quic_transport_params() const -> std::string;
+    };
 } // namespace wavex::network::quic
 
 #endif // WAVEX_HAS_SSL

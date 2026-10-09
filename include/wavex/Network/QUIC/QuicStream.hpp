@@ -199,30 +199,40 @@ namespace wavex::network::quic {
                                 fire("pending-no-self", asio::error::operation_aborted, 0);
                                 return;
                             }
-                            std::lock_guard lock(s->mtx_);
-                            if (ec) {
-                                fire("pending-ec", ec, 0);
-                                return;
-                            }
-                            if (s->in_buffer_.empty()) {
-                                fire("pending-empty", s->fin_received_ ? asio::error::eof : std::error_code{}, 0);
-                                return;
-                            }
-                            std::size_t dest_len = asio::buffer_size(buffers);
-                            std::size_t to_copy = (std::min)(dest_len, s->in_buffer_.size());
+                            // Decide the result under the lock, but fire the completion handler
+                            // only AFTER releasing it. Firing resumes the awaiting coroutine
+                            // inline, and that coroutine routinely calls back into this stream
+                            // (close(), is_open(), another async_read_some, ...), all of which
+                            // lock the non-recursive mtx_. Firing while holding it deadlocks
+                            // the thread against itself.
+                            const char *site = "pending-success";
+                            std::error_code result_ec;
                             std::size_t copied = 0;
-                            for (auto b = asio::buffer_sequence_begin(buffers);
-                                 b != asio::buffer_sequence_end(buffers) && copied < to_copy; ++b) {
-                                asio::mutable_buffer mb(*b);
-                                std::size_t chunk = (std::min)(mb.size(), to_copy - copied);
-                                auto *dest = static_cast<uint8_t*>(mb.data());
-                                for (std::size_t i = 0; i < chunk; ++i) {
-                                    dest[i] = s->in_buffer_.front();
-                                    s->in_buffer_.pop_front();
+                            {
+                                std::lock_guard lock(s->mtx_);
+                                if (ec) {
+                                    site = "pending-ec";
+                                    result_ec = ec;
+                                } else if (s->in_buffer_.empty()) {
+                                    site = "pending-empty";
+                                    result_ec = s->fin_received_ ? asio::error::eof : std::error_code{};
+                                } else {
+                                    std::size_t dest_len = asio::buffer_size(buffers);
+                                    std::size_t to_copy = (std::min)(dest_len, s->in_buffer_.size());
+                                    for (auto b = asio::buffer_sequence_begin(buffers);
+                                         b != asio::buffer_sequence_end(buffers) && copied < to_copy; ++b) {
+                                        asio::mutable_buffer mb(*b);
+                                        std::size_t chunk = (std::min)(mb.size(), to_copy - copied);
+                                        auto *dest = static_cast<uint8_t*>(mb.data());
+                                        for (std::size_t i = 0; i < chunk; ++i) {
+                                            dest[i] = s->in_buffer_.front();
+                                            s->in_buffer_.pop_front();
+                                        }
+                                        copied += chunk;
+                                    }
                                 }
-                                copied += chunk;
                             }
-                            fire("pending-success", std::error_code{}, copied);
+                            fire(site, result_ec, copied);
                         });
                     };
                 },

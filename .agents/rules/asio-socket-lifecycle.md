@@ -99,3 +99,71 @@ This rule governs all Asio networking, socket options, coroutine frame lifetimes
   2. Prefer bounded execution methods (`io.run_for(100ms)`, `io.poll()`, or `io.run_one()`) when verifying asynchronous state transitions in tests.
   3. Close connection and transport objects (`conn->close()`) to ensure all background timers are canceled (`loss_timer_.cancel(ec)`) before `io_context` teardown.
 
+---
+
+## 9. Completion Handler & Coroutine Resumption Mutex Deadlock Invariant
+
+- **NEVER** invoke asynchronous completion callbacks (`shared_h`, completion tokens, or `fire(...)`) while holding a non-recursive `std::mutex` (`mtx_`).
+- In Asio, invoking a completion handler frequently resumes the awaiting coroutine inline on the current thread. Resumed coroutines routinely execute cleanup or subsequent stream operations (such as `stream->close()`, `stream->is_open()`, or another `async_read_some()`), each of which attempts to acquire `mtx_`.
+- Because `std::mutex` is non-recursive, invoking completion handlers under lock results in an immediate, silent self-deadlock on the thread.
+- **Mandatory Pattern**: Evaluate status codes, perform buffer copies, and update container state strictly inside a scoped lock block. Ensure the lock is unlocked/destroyed BEFORE invoking the completion handler:
+  ```cpp
+  const char *site = "pending-success";
+  std::error_code result_ec;
+  std::size_t copied = 0;
+  {
+      std::lock_guard lock(s->mtx_);
+      if (ec) {
+          site = "pending-ec";
+          result_ec = ec;
+      } else if (s->in_buffer_.empty()) {
+          site = "pending-empty";
+          result_ec = s->fin_received_ ? asio::error::eof : std::error_code{};
+      } else {
+          // copy data from in_buffer_ ...
+      }
+  } // Lock released here
+  fire(site, result_ec, copied); // Safe inline resumption
+  ```
+
+---
+
+## 10. `asio::co_spawn` Closure Lifetime & Local Callable Invariant
+
+- **NEVER** pass an already-invoked awaitable expression from a local callable to `asio::co_spawn`:
+  ```cpp
+  // PROHIBITED: Frame closure pointer dangles when local `handler` goes out of scope!
+  StreamHandler handler;
+  { std::lock_guard lock(mtx_); handler = stream_handler_; }
+  if (handler) asio::co_spawn(io_, handler(stream), asio::detached);
+  ```
+- `asio::awaitable<T>` is lazily evaluated (`suspend_always` on initial suspend). Invoking `handler(stream)` immediately builds the coroutine frame, holding an implicit pointer back to the closure inside the local `handler` variable. When `handler` leaves scope, its closure is destroyed, leaving dangling references (observed as `this=0x0` or SegFaults on resume).
+- **Mandatory Pattern**: Always pass the callable itself to `asio::co_spawn` so Asio owns a copy for the entire duration of the coroutine:
+  ```cpp
+  // MANDATORY: co_spawn owns the lambda and keeps the handler closure alive
+  asio::co_spawn(io_, [handler, stream]() -> asio::awaitable<void> {
+      co_await handler(stream);
+  }, asio::detached);
+  ```
+
+---
+
+## 11. Timed Asynchronous Post Stack Capture Lifetime
+
+- **NEVER** capture local stack variables by reference (`[&stack_var]`) inside lambdas posted to an executor via `asio::post`, especially when followed by a bounded wait (`wait_for` / `wait_until`) or detached execution.
+- If the wait times out or the function exits early, the stack frame is unwound and destroyed. When the executor thread subsequently runs the posted task, it dereferences invalid stack memory.
+- **Mandatory Pattern**: State passed to `asio::post` that may outlive the caller's stack frame must be captured by value or via heap-allocated `std::shared_ptr`:
+  ```cpp
+  auto conns_ptr = std::make_shared<std::unordered_map<ConnectionId, std::shared_ptr<QuicConnection>>>(std::move(conns));
+  auto drained = std::make_shared<std::promise<void>>();
+  auto fut = drained->get_future();
+  asio::post(io_, [conns_ptr, drained] {
+      for (auto &[cid, conn] : *conns_ptr) {
+          if (conn) conn->close();
+      }
+      drained->set_value();
+  });
+  fut.wait_for(std::chrono::milliseconds(500));
+  ```
+
+

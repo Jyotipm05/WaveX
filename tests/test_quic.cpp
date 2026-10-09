@@ -30,7 +30,7 @@
 using namespace wavex::network::quic;
 namespace quic = wavex::network::quic;
 
-void test_varint() {
+static void test_varint() {
     std::cout << "[Test QUIC] VarInt encoding and decoding..." << std::endl;
 
     constexpr std::array<uint64_t, 12> test_values = {
@@ -56,7 +56,7 @@ void test_varint() {
     std::cout << "  [PASS] VarInt tests passed." << std::endl;
 }
 
-void test_connection_id() {
+static void test_connection_id() {
     std::cout << "[Test QUIC] ConnectionId operations..." << std::endl;
 
     auto cid1 = ConnectionId::random(8);
@@ -78,7 +78,7 @@ void test_connection_id() {
     std::cout << "  [PASS] ConnectionId tests passed." << std::endl;
 }
 
-void test_frames() {
+static void test_frames() {
     std::cout << "[Test QUIC] Frame serialization and parsing..." << std::endl;
 
     std::string buffer;
@@ -150,7 +150,7 @@ void test_frames() {
     std::cout << "  [PASS] Frame serialization and parsing passed." << std::endl;
 }
 
-void test_packet_protection() {
+static void test_packet_protection() {
     std::cout << "[Test QUIC] RFC 9001 Packet protection and crypto..." << std::endl;
 
     const auto client_dcid = ConnectionId::random(8);
@@ -191,7 +191,7 @@ void test_packet_protection() {
     std::cout << "  [PASS] Packet protection and unprotection passed." << std::endl;
 }
 
-void test_quic_stream_async() {
+static void test_quic_stream_async() {
     std::cout << "[Test QUIC] QuicStream async read/write buffering..." << std::endl;
 
     asio::io_context io;
@@ -228,7 +228,7 @@ void test_quic_stream_async() {
     std::cout << "  [PASS] QuicStream async read/write buffering passed." << std::endl;
 }
 
-void test_udp_basic_loopback() {
+static void test_udp_basic_loopback() {
     std::cout << "[Test QUIC] Basic UDP socket loopback..." << std::endl;
 
     asio::io_context io;
@@ -255,7 +255,7 @@ void test_udp_basic_loopback() {
     std::cout << "  [PASS] Basic UDP loopback passed." << std::endl;
 }
 
-void test_quic_server_client_loopback() {
+static void test_quic_server_client_loopback() {
     std::cout << "[Test QUIC] QuicServer and QuicClient UDP integration loopback..." << std::endl;
 
     asio::io_context server_io;
@@ -338,12 +338,29 @@ void test_quic_server_client_loopback() {
             }
         }
 
+        wavex::log::info("[Test][DIAG] calling client.close()...");
         client.close();
+        wavex::log::info("[Test][DIAG] client.close() returned; calling client_io.stop()...");
         client_io.stop();
+        wavex::log::info("[Test][DIAG] client_io.stop() returned");
         co_return;
     }, asio::detached);
 
-    client_io.run();
+    // DIAG: client_io.run() executes on THIS (main) thread, not server_thread -
+    // the try/catch added around server_io.run() doesn't cover it. If an
+    // exception escapes the coroutine above (e.g. from client.close()), it
+    // would propagate straight out of a bare client_io.run() call, uncaught,
+    // producing a clean abnormal exit with no "Exception: SegFault" text
+    // (that wording looks specific to an actual access violation, not a
+    // regular thrown exception) - which matches the symptom seen so far.
+    try {
+        client_io.run();
+        wavex::log::info("[Test][DIAG] client_io.run() returned normally");
+    } catch (const std::exception &e) {
+        wavex::log::error("[Test][DIAG] client_io.run() threw std::exception: {}", e.what());
+    } catch (...) {
+        wavex::log::error("[Test][DIAG] client_io.run() threw a non-std exception");
+    }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     wavex::log::info("[Test][DIAG] calling server.stop()...");
@@ -363,7 +380,7 @@ void test_quic_server_client_loopback() {
     std::cout << "  [PASS] QuicServer and QuicClient UDP integration passed." << std::endl;
 }
 
-void test_stream_id_allocation() {
+static void test_stream_id_allocation() {
     std::cout << "[Test QUIC] RFC 9000 §2.1 Stream ID allocation..." << std::endl;
     auto ep = asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 9997);
 
@@ -412,7 +429,7 @@ void test_stream_id_allocation() {
     std::cout << "  [PASS] RFC 9000 §2.1 Stream ID allocation passed." << std::endl;
 }
 
-void test_rfc9001_appendix_a() {
+static void test_rfc9001_appendix_a() {
     std::cout << "[Test QUIC] RFC 9001 Appendix A known-answer vector...\n";
 
     // RFC 9001 §A.1: Keys derived from DCID = 0x8394c8f03e515708
@@ -500,7 +517,7 @@ void test_rfc9001_appendix_a() {
     std::cout << "  [PASS] RFC 9001 Appendix A known-answer vector passed." << std::endl;
 }
 
-void test_quic_protocol() {
+static void test_quic_protocol() {
     std::cout << "[Test QUIC] Protocol definitions (endpoint, resolver, v4, v6)..." << std::endl;
     const auto p4 = quic::v4();
     const auto p6 = quic::v6();
@@ -516,7 +533,7 @@ void test_quic_protocol() {
     std::cout << "  [PASS] Protocol definitions passed." << std::endl;
 }
 
-void test_quic_socket_acceptor_tcp_syntax() {
+static void test_quic_socket_acceptor_tcp_syntax() {
     std::cout << "[Test QUIC] quic::socket and quic::acceptor standard Asio TCP-like syntax..." << std::endl;
 
     asio::io_context server_io;
@@ -589,7 +606,7 @@ void test_quic_socket_acceptor_tcp_syntax() {
     std::cout << "  [PASS] quic::socket and quic::acceptor TCP-like syntax passed." << std::endl;
 }
 
-void test_quic_socket_acceptor_coroutine() {
+static void test_quic_socket_acceptor_coroutine() {
     std::cout << "[Test QUIC] quic::socket and quic::acceptor C++20 coroutine awaitables..." << std::endl;
 
     asio::io_context server_io;
@@ -658,7 +675,7 @@ void test_quic_socket_acceptor_coroutine() {
     std::cout << "  [PASS] quic::socket and quic::acceptor C++20 coroutine awaitables passed." << std::endl;
 }
 
-void test_quic_stream_multiplexing() {
+static void test_quic_stream_multiplexing() {
     std::cout << "[Test QUIC] quic::socket stream multiplexing (open_stream)..." << std::endl;
 
     asio::io_context server_io;
@@ -723,7 +740,7 @@ void test_quic_stream_multiplexing() {
     std::cout << "  [PASS] quic::socket stream multiplexing passed." << std::endl;
 }
 
-void test_varint_edge_cases() {
+static void test_varint_edge_cases() {
     std::cout << "[Test QUIC] VarInt edge cases and truncation resilience..." << std::endl;
 
     // 1. Truncated 2-byte VarInt (prefix 0x40 says 2 bytes, but only 1 byte provided)
@@ -802,7 +819,7 @@ void test_varint_edge_cases() {
     std::cout << "  [PASS] VarInt edge cases and truncation resilience passed." << std::endl;
 }
 
-void test_connection_id_boundaries() {
+static void test_connection_id_boundaries() {
     std::cout << "[Test QUIC] ConnectionId boundary limits (0 to 20 bytes)..." << std::endl;
 
     // 1. Zero-length (empty) CID (RFC 9000 allows empty CID)
@@ -819,7 +836,7 @@ void test_connection_id_boundaries() {
 
     // 2. Minimum length (1 byte)
     {
-        const uint8_t one_byte = 0x42;
+        constexpr uint8_t one_byte = 0x42;
         const ConnectionId cid1(&one_byte, 1);
         assert(!cid1.empty());
         assert(cid1.length() == 1);
@@ -847,7 +864,7 @@ void test_connection_id_boundaries() {
 
     // 4. Clamping of over-length CID (> 20 bytes)
     {
-        const uint8_t over_bytes[25] = {0};
+        constexpr uint8_t over_bytes[25] = {0};
         const ConnectionId over_cid(over_bytes, 25);
         assert(over_cid.length() == 20); // Clamped to MAX_CONNECTION_ID_LEN
     }
@@ -870,7 +887,7 @@ void test_connection_id_boundaries() {
     std::cout << "  [PASS] ConnectionId boundary limits passed." << std::endl;
 }
 
-void test_malformed_packets_and_fuzzing() {
+static void test_malformed_packets_and_fuzzing() {
     std::cout << "[Test QUIC] Malformed packet parser resilience & fuzzing..." << std::endl;
     wavex::log::set_level(wavex::log::LogLevel::ERROR);
 
@@ -979,7 +996,7 @@ void test_malformed_packets_and_fuzzing() {
     std::cout << "  [PASS] Malformed packet parser resilience & fuzzing passed." << std::endl;
 }
 
-void test_rfc9002_loss_and_recovery() {
+static void test_rfc9002_loss_and_recovery() {
     std::cout << "[Test QUIC] RFC 9002 Loss detection and ACK range processing..." << std::endl;
 
     // Emulate packet sequence with multiple lost packet intervals:
@@ -1060,7 +1077,7 @@ void test_rfc9002_loss_and_recovery() {
     std::cout << "  [PASS] RFC 9002 Loss detection and ACK range processing passed." << std::endl;
 }
 
-void test_congestion_controller() {
+static void test_congestion_controller() {
     std::cout << "[Test QUIC] RFC 9002 Congestion Control & RTT estimator..." << std::endl;
 
     CongestionController cc;
@@ -1134,7 +1151,7 @@ void test_congestion_controller() {
     std::cout << "  [PASS] RFC 9002 Congestion Control & RTT estimator passed." << std::endl;
 }
 
-void test_quic_packet_fuzzer() {
+static void test_quic_packet_fuzzer() {
     std::cout << "[Test QUIC] Pre-authentication packet parser fuzz harness..." << std::endl;
     wavex::log::set_level(wavex::log::LogLevel::ERROR);
 
@@ -1209,7 +1226,7 @@ void test_quic_packet_fuzzer() {
     std::cout << "  [PASS] Pre-authentication packet parser fuzz harness passed (2500 mutations)." << std::endl;
 }
 
-void test_quic_tls_ctx_move_and_accept_stream() {
+static void test_quic_tls_ctx_move_and_accept_stream() {
     std::cout << "[Test QUIC] TlsCtx move safety (A14) and accept_stream() single-delivery (A10, A11, B3)..." << std::endl;
 
     // 1. A14: TlsCtx move constructor and move assignment nulling out source
@@ -1332,7 +1349,7 @@ void test_quic_tls_ctx_move_and_accept_stream() {
     std::cout << "  [PASS] TlsCtx move safety (A14) and accept_stream() single-delivery (A10, A11, B3) passed." << std::endl;
 }
 
-void test_quic_lifecycle_idle_eviction_and_crypto_cap() {
+static void test_quic_lifecycle_idle_eviction_and_crypto_cap() {
     std::cout << "[Test QUIC] Lifecycle: Idle timeout (B1), stream eviction (B2), and CRYPTO cap (B7)..." << std::endl;
 
     // 1. B7: CRYPTO reassembly buffer 64KB cap
@@ -1414,7 +1431,7 @@ void test_quic_lifecycle_idle_eviction_and_crypto_cap() {
     std::cout << "  [PASS] Lifecycle: Idle timeout (B1), stream eviction (B2), and CRYPTO cap (B7) passed." << std::endl;
 }
 
-void test_quic_stream_limits_and_coroutine_termination() {
+static void test_quic_stream_limits_and_coroutine_termination() {
     std::cout << "[Test QUIC] Stream limits (B8), coroutine termination (B6), and acceptor cleanup (B5)..." << std::endl;
 
     // 1. B8: Enforce stream count limits
@@ -1511,7 +1528,7 @@ void test_quic_stream_limits_and_coroutine_termination() {
     std::cout << "  [PASS] Stream limits (B8), coroutine termination (B6), and acceptor cleanup (B5) passed." << std::endl;
 }
 
-void test_quic_critical_mtu_flow_control_anti_amplification() {
+static void test_quic_critical_mtu_flow_control_anti_amplification() {
     std::cout << "[Test QUIC] MTU splitting (A3), Flow control (A4), and Anti-amplification (D1)..." << std::endl;
 
     // 1. A3: Large response splitting into MTU-sized packets (<= 1150 bytes per frame)
