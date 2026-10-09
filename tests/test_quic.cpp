@@ -278,7 +278,13 @@ void test_quic_server_client_loopback() {
         [[maybe_unused]] bool server_received_stream = true;
         char buf[256];
         auto [ec, n] = co_await stream->async_read_some(asio::buffer(buf), asio::as_tuple(asio::use_awaitable));
+        wavex::log::info("[Test][DIAG] resumed: ec={} n={} bufcap={} this={}", ec.message(), n, sizeof(buf),
+                          static_cast<const void*>(&server_received_msg));
         if (!ec && n > 0) {
+            if (n > sizeof(buf)) {
+                wavex::log::error("[Test][DIAG] CORRUPTED n={} exceeds bufcap={} - skipping assign to avoid segfault", n, sizeof(buf));
+                co_return;
+            }
             server_received_msg.assign(buf, n);
             // Echo back
             const std::string echo = "ECHO: " + server_received_msg;
@@ -291,7 +297,18 @@ void test_quic_server_client_loopback() {
 
     // Start server in background thread
     std::thread server_thread([&server_io] {
-        server_io.run();
+        // DIAG: an exception escaping run() with no catch here would call
+        // std::terminate() and kill the whole process silently (no "Exception:
+        // SegFault"-style message, no crash text at all) - indistinguishable
+        // from a hang unless we catch and log it here first.
+        try {
+            server_io.run();
+            wavex::log::info("[Test][DIAG] server_io.run() returned normally");
+        } catch (const std::exception &e) {
+            wavex::log::error("[Test][DIAG] server_io.run() threw std::exception: {}", e.what());
+        } catch (...) {
+            wavex::log::error("[Test][DIAG] server_io.run() threw a non-std exception");
+        }
     });
 
     // Client connects
@@ -311,8 +328,14 @@ void test_quic_server_client_loopback() {
 
         char buf[256];
         auto [rec, rn] = co_await stream->async_read_some(asio::buffer(buf), asio::as_tuple(asio::use_awaitable));
+        wavex::log::info("[Test][DIAG] client echo-read resumed: rec={} rn={} bufcap={}", rec.message(), rn, sizeof(buf));
         if (!rec && rn > 0) {
-            client_received_echo.assign(buf, rn);
+            if (rn > sizeof(buf)) {
+                wavex::log::error("[Test][DIAG] CORRUPTED rn={} exceeds bufcap={} - skipping assign", rn, sizeof(buf));
+            } else {
+                client_received_echo.assign(buf, rn);
+                wavex::log::info("[Test][DIAG] client_received_echo set to \"{}\"", client_received_echo);
+            }
         }
 
         client.close();
@@ -323,9 +346,16 @@ void test_quic_server_client_loopback() {
     client_io.run();
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    wavex::log::info("[Test][DIAG] calling server.stop()...");
     server.stop();
+    wavex::log::info("[Test][DIAG] server.stop() returned; calling server_io.stop()...");
     server_io.stop();
+    wavex::log::info("[Test][DIAG] server_io.stop() returned; joining server_thread...");
     if (server_thread.joinable()) server_thread.join();
+    wavex::log::info("[Test][DIAG] server_thread joined");
+
+    wavex::log::info("[Test][DIAG] final: connected={} server_received_msg=\"{}\" client_received_echo=\"{}\"",
+                      connected, server_received_msg, client_received_echo);
 
     assert(connected);
     assert(server_received_msg == "Ping over QUIC UDP!");

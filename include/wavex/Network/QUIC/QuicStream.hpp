@@ -17,6 +17,7 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -128,11 +129,27 @@ namespace wavex::network::quic {
                 [weak_self, buffers]<typename T0>(T0 handler) {
                     using HandlerType = std::decay_t<T0>;
                     auto shared_h = std::make_shared<HandlerType>(std::move(handler));
+                    // DIAG: a completion handler must fire exactly once. If anything below
+                    // fires it twice, the second call resumes an already-completed/destroyed
+                    // coroutine, which looks like "random garbage" at the resume site - the
+                    // exact symptom under investigation. This guard converts that into a loud,
+                    // attributable log instead of a silent segfault.
+                    auto fire_count = std::make_shared<std::atomic<int>>(0);
+                    auto fire = [shared_h, fire_count](const char *site, std::error_code ec, std::size_t bytes) {
+                        int prev = fire_count->fetch_add(1);
+                        if (prev != 0) {
+                            wavex::log::error(
+                                "[QUIC][DIAG] async_read_some: shared_h invoked {} time(s) already! site={} ec={} bytes={} - SUPPRESSING to avoid resuming a dead coroutine",
+                                prev + 1, site, ec.message(), bytes);
+                            return;
+                        }
+                        (*shared_h)(ec, bytes);
+                    };
                     auto self = weak_self.lock();
                     if (!self) {
                         auto executor = asio::get_associated_executor(*shared_h);
-                        asio::post(executor, [shared_h] {
-                            (*shared_h)(asio::error::operation_aborted, 0);
+                        asio::post(executor, [fire] {
+                            fire("no-self", asio::error::operation_aborted, 0);
                         });
                         return;
                     }
@@ -140,8 +157,8 @@ namespace wavex::network::quic {
 
                     std::lock_guard lock(self->mtx_);
                     if (!self->is_open_ && self->in_buffer_.empty()) {
-                        asio::post(executor, [shared_h] {
-                            (*shared_h)(asio::error::eof, 0);
+                        asio::post(executor, [fire] {
+                            fire("not-open", asio::error::eof, 0);
                         });
                         return;
                     }
@@ -161,34 +178,34 @@ namespace wavex::network::quic {
                             }
                             copied += chunk;
                         }
-                        asio::post(executor, [shared_h, copied] {
-                            (*shared_h)(std::error_code{}, copied);
+                        asio::post(executor, [fire, copied] {
+                            fire("fast-path", std::error_code{}, copied);
                         });
                         return;
                     }
 
                     if (self->fin_received_) {
-                        asio::post(executor, [shared_h] {
-                            (*shared_h)(asio::error::eof, 0);
+                        asio::post(executor, [fire] {
+                            fire("fin-received", asio::error::eof, 0);
                         });
                         return;
                     }
 
                     // Register pending read: wake callback posts to reader's executor where data is copied under lock
-                    self->pending_read_ = [weak_self, buffers, shared_h, executor](std::error_code ec, std::size_t) {
-                        asio::post(executor, [weak_self, buffers, shared_h, ec] {
+                    self->pending_read_ = [weak_self, buffers, fire, executor](std::error_code ec, std::size_t) {
+                        asio::post(executor, [weak_self, buffers, fire, ec] {
                             auto s = weak_self.lock();
                             if (!s) {
-                                (*shared_h)(asio::error::operation_aborted, 0);
+                                fire("pending-no-self", asio::error::operation_aborted, 0);
                                 return;
                             }
                             std::lock_guard lock(s->mtx_);
                             if (ec) {
-                                (*shared_h)(ec, 0);
+                                fire("pending-ec", ec, 0);
                                 return;
                             }
                             if (s->in_buffer_.empty()) {
-                                (*shared_h)(s->fin_received_ ? asio::error::eof : std::error_code{}, 0);
+                                fire("pending-empty", s->fin_received_ ? asio::error::eof : std::error_code{}, 0);
                                 return;
                             }
                             std::size_t dest_len = asio::buffer_size(buffers);
@@ -205,7 +222,7 @@ namespace wavex::network::quic {
                                 }
                                 copied += chunk;
                             }
-                            (*shared_h)(std::error_code{}, copied);
+                            fire("pending-success", std::error_code{}, copied);
                         });
                     };
                 },

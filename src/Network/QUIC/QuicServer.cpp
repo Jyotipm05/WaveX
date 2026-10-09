@@ -69,13 +69,22 @@ namespace wavex::network::quic {
             return;
         }
 
-        std::promise<void> drained;
-        auto fut = drained.get_future();
-        asio::post(io_, [&conns, &drained] {
-            for (auto &[cid, conn] : conns) {
+        // conns/drained are posted by shared_ptr, not by reference: fut.wait_for()
+        // below only waits UP TO 500ms and its result is discarded, so stop() can
+        // return before the posted task ever runs (e.g. if the io thread is busy
+        // draining a burst of in-flight packets). If the lambda captured conns/
+        // drained by reference, that would leave it holding dangling references
+        // into this function's stack frame the moment stop() returns on timeout -
+        // a use-after-free whenever the task finally does run.
+        auto conns_ptr = std::make_shared<std::unordered_map<ConnectionId, std::shared_ptr<QuicConnection>>>(
+            std::move(conns));
+        auto drained = std::make_shared<std::promise<void>>();
+        auto fut = drained->get_future();
+        asio::post(io_, [conns_ptr, drained] {
+            for (auto &[cid, conn] : *conns_ptr) {
                 if (conn) conn->close();
             }
-            drained.set_value();
+            drained->set_value();
         });
         fut.wait_for(std::chrono::milliseconds(500));
     }
@@ -198,7 +207,15 @@ namespace wavex::network::quic {
                                             uni_handler = uni_stream_handler_;
                                         }
                                         if (uni_handler) {
-                                            asio::co_spawn(io_, uni_handler(stream), asio::detached);
+                                            // NOTE: must pass the callable itself (not uni_handler(stream)) so
+                                            // co_spawn owns a copy for the coroutine's lifetime. Calling
+                                            // uni_handler(stream) here only creates the (lazily-suspended)
+                                            // awaitable frame, whose implicit closure pointer would dangle the
+                                            // moment the local `uni_handler` variable goes out of scope below -
+                                            // a use-after-free on first resume.
+                                            asio::co_spawn(io_, [uni_handler, stream]() -> asio::awaitable<void> {
+                                                co_await uni_handler(stream);
+                                            }, asio::detached);
                                         } else {
                                             asio::co_spawn(io_, [stream]() -> asio::awaitable<void> {
                                                 char buf[1024];
@@ -220,7 +237,16 @@ namespace wavex::network::quic {
                                             handler = stream_handler_;
                                         }
                                         if (handler) {
-                                            asio::co_spawn(io_, handler(stream), asio::detached);
+                                            // See NOTE above (uni_handler case): pass the callable itself, not
+                                            // handler(stream), so co_spawn owns a copy for the coroutine's full
+                                            // lifetime instead of dangling once the local `handler` goes out of
+                                            // scope. This was the root cause of the async_read_some fast-path
+                                            // segfault: the coroutine's captured reference to the handler's own
+                                            // closure (e.g. server_received_msg in test_quic.cpp) was already a
+                                            // dangling pointer by the time the completion handler resumed it.
+                                            asio::co_spawn(io_, [handler, stream]() -> asio::awaitable<void> {
+                                                co_await handler(stream);
+                                            }, asio::detached);
                                         }
                                     }
                                 });
