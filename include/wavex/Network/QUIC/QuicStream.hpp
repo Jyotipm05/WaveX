@@ -107,6 +107,14 @@ namespace wavex::network::quic {
         void set_executor(executor_type ex) noexcept { executor_ = std::move(ex); }
         [[nodiscard]] auto stream_id() const noexcept -> uint64_t { return stream_id_; }
 
+        [[nodiscard]] auto connection() const noexcept -> std::shared_ptr<QuicConnection>;
+        [[nodiscard]] auto user_context() const noexcept -> std::shared_ptr<void>;
+
+        template<typename T>
+        [[nodiscard]] auto connection_context() const noexcept -> std::shared_ptr<T> {
+            return std::static_pointer_cast<T>(user_context());
+        }
+
         [[nodiscard]] auto is_open() const noexcept -> bool;
 
         [[nodiscard]] auto is_fin_received() const noexcept -> bool;

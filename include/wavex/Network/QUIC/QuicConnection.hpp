@@ -172,6 +172,7 @@ namespace wavex::network::quic {
         std::deque<std::string> buffered_handshake_packets_{};
         std::deque<std::string> buffered_one_rtt_packets_{};
         std::deque<std::shared_ptr<QuicStream> > accepted_streams_{};
+        std::shared_ptr<void> user_context_{};
         std::optional<std::function<void(std::shared_ptr<QuicStream>)> > stream_acceptor_{};
         StreamCreatedCallback on_stream_created_{};
         OutboundCallback on_outbound_{};
@@ -288,6 +289,16 @@ namespace wavex::network::quic {
         void set_idle_timeout(std::chrono::milliseconds timeout) noexcept {
             std::scoped_lock lock(mtx_);
             idle_timeout_ = timeout;
+        }
+
+        void set_user_context(std::shared_ptr<void> ctx) noexcept {
+            std::scoped_lock lock(mtx_);
+            user_context_ = std::move(ctx);
+        }
+
+        [[nodiscard]] auto user_context() const noexcept -> std::shared_ptr<void> {
+            std::scoped_lock lock(mtx_);
+            return user_context_;
         }
 
         [[nodiscard]] auto stream_count() const noexcept -> std::size_t {

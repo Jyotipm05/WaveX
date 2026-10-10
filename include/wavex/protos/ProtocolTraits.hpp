@@ -51,6 +51,11 @@ namespace wavex::protos {
         struct connection_context {
         };
 
+        template<typename Stream>
+        static auto &get_connection_context(Stream &, connection_context &fallback) noexcept {
+            return fallback;
+        }
+
         /// True if the protocol requires a connection-level opening exchange.
         static constexpr bool has_connection_preface = false;
 
@@ -102,6 +107,11 @@ template<>
 struct wavex::protos::protocol_traits<wavex::protos::http::http1codec> {
     struct connection_context {
     };
+
+    template<typename Stream>
+    static auto &get_connection_context(Stream &, connection_context &fallback) noexcept {
+        return fallback;
+    }
 
     static constexpr bool has_connection_preface = false;
     static constexpr bool has_tcp_transport = true;
@@ -163,6 +173,11 @@ struct wavex::protos::protocol_traits<wavex::protos::http::http1codec> {
 template<>
 struct wavex::protos::protocol_traits<wavex::protos::http::http2codec> {
     using connection_context = http::http2::connection_context;
+
+    template<typename Stream>
+    static auto &get_connection_context(Stream &, connection_context &fallback) noexcept {
+        return fallback;
+    }
 
     static constexpr bool has_connection_preface = true;
     static constexpr bool has_tcp_transport = true;
@@ -253,6 +268,7 @@ struct wavex::protos::protocol_traits<wavex::protos::http::http2codec> {
 // ─── HTTP/3 Specialization ───────────────────────────────────────────────────
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
 #include <wavex/protos/http/http3codec.hpp>
+#include <wavex/Network/QUIC/QuicConnection.hpp>
 
 template<>
 struct wavex::protos::protocol_traits<wavex::protos::http::http3codec> {
@@ -266,6 +282,30 @@ struct wavex::protos::protocol_traits<wavex::protos::http::http3codec> {
 
     // HTTP/3 requires a QUIC/UDP listener alongside the TCP/TLS listener.
     static constexpr bool has_quic_transport = true;
+
+    template<typename Stream>
+    static auto &get_connection_context(Stream &stream, connection_context &fallback) {
+        if constexpr (requires { stream->connection(); }) {
+            if (auto conn = stream->connection()) {
+                auto ctx = std::static_pointer_cast<connection_context>(conn->user_context());
+                if (!ctx) {
+                    ctx = std::make_shared<connection_context>();
+                    conn->set_user_context(ctx);
+                }
+                return *ctx;
+            }
+        } else if constexpr (requires { stream.connection(); }) {
+            if (auto conn = stream.connection()) {
+                auto ctx = std::static_pointer_cast<connection_context>(conn->user_context());
+                if (!ctx) {
+                    ctx = std::make_shared<connection_context>();
+                    conn->set_user_context(ctx);
+                }
+                return *ctx;
+            }
+        }
+        return fallback;
+    }
 
     template<typename Stream>
     static asio::awaitable<bool> on_connection_start(Stream &, std::string &) {

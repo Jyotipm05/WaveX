@@ -191,7 +191,8 @@ namespace wavex::server {
         std::string stream_buf;
         stream_buf.reserve(8192);
         std::size_t stream_buf_consumed = 0;
-        typename CustTraits::connection_context conn_ctx{};
+        typename CustTraits::connection_context default_conn_ctx{};
+        auto &conn_ctx = CustTraits::get_connection_context(stream, default_conn_ctx);
         auto executor = co_await asio::this_coro::executor;
 
         try {

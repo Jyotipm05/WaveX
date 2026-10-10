@@ -921,6 +921,7 @@ namespace wavex::protos::http {
             uint64_t max_field_section_size{65536};
             uint64_t peer_qpack_max_table_capacity{0};
             uint64_t peer_qpack_blocked_streams{0};
+            uint64_t goaway_stream_id{0};
             bool settings_sent{false};
             bool settings_received{false};
             bool goaway_received{false};
@@ -1655,6 +1656,11 @@ namespace wavex::protos::http {
                             }
                             ctx->settings_received = true;
                         } else if (hdr.type == static_cast<uint64_t>(frame_type::GOAWAY)) {
+                            std::size_t g_cursor = 0;
+                            uint64_t goaway_sid = 0;
+                            if (VarInt::decode(payload, g_cursor, goaway_sid)) {
+                                ctx->goaway_stream_id = goaway_sid;
+                            }
                             ctx->goaway_received = true;
                         }
 

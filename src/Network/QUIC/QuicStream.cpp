@@ -34,6 +34,17 @@ namespace wavex::network::quic {
         return asio::any_io_executor(asio::system_executor{});
     }
 
+    std::shared_ptr<QuicConnection> QuicStream::connection() const noexcept {
+        return conn_.lock();
+    }
+
+    std::shared_ptr<void> QuicStream::user_context() const noexcept {
+        if (auto c = conn_.lock()) {
+            return c->user_context();
+        }
+        return nullptr;
+    }
+
     bool QuicStream::is_open() const noexcept {
         std::lock_guard lock(mtx_);
         return is_open_;

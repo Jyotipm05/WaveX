@@ -23,6 +23,8 @@
 #include <asio/io_context.hpp>
 #include <asio/ip/tcp.hpp>
 #include <asio/steady_timer.hpp>
+#include <asio/co_spawn.hpp>
+#include <asio/detached.hpp>
 
 namespace h3 = wavex::protos::http::http3;
 namespace qpk = wavex::protos::http::http3::qpack;
@@ -660,7 +662,7 @@ void test_http3_body_truncation_prevention_c1() {
     assert(res_complete == http3codec::result::success);
     assert(parsed_req.body == "hello world");
 
-    std::cout << "  [PASS] C1: Request body truncation properly prevented.\n";
+    std::cout << "  [PASS] C1: Request body truncation properly prevented." << std::endl;
 }
 
 void test_http3_malformed_request_rejection_c8() {
@@ -769,7 +771,7 @@ void test_http3_malformed_request_rejection_c8() {
         assert(res == http3codec::result::error);
     }
 
-    std::cout << "  [PASS] C8: Malformed request rejection passed.\n";
+    std::cout << "  [PASS] C8: Malformed request rejection passed." << std::endl;
 }
 
 void test_http3_qpack_huffman_literal_names_c5() {
@@ -809,7 +811,120 @@ void test_http3_qpack_huffman_literal_names_c5() {
     assert(req.headers_storage[0].first == "www.example.com");
     assert(req.headers_storage[0].second == "custom");
 
-    std::cout << "  [PASS] C5: QPACK Huffman literal names decoded successfully.\n";
+    std::cout << "  [PASS] C5: QPACK Huffman literal names decoded successfully." << std::endl;
+}
+
+void test_http3_session_unidirectional_routing_c7() {
+    std::cout << "[Test HTTP/3] C7: Unidirectional Control, Encoder and Decoder routing & dynamic table session...\n";
+
+    asio::io_context io;
+    auto ep = asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 9999);
+    auto server_conn = std::make_shared<quic::QuicConnection>(
+        quic::ConnectionId::random(8), quic::ConnectionId::random(8), ep, true, io.get_executor());
+
+    // 1. Connection-level context initially absent, then initialized
+    assert(server_conn->user_context() == nullptr);
+    auto ctx = std::make_shared<h3::connection_context>();
+    server_conn->set_user_context(ctx);
+    assert(server_conn->user_context() == ctx);
+
+    // 2. Client-initiated unidirectional Stream 2 (sid & 0x03 == 2) -> Control Stream
+    auto ctrl_stream = server_conn->get_or_create_stream(2);
+    assert(ctrl_stream != nullptr);
+
+    // Wire data for Control Stream: Type 0x00 followed by SETTINGS frame and GOAWAY frame
+    std::string ctrl_wire;
+    quic::VarInt::encode(0x00, ctrl_wire); // Type 0x00 = Control Stream
+
+    // SETTINGS payload: QPACK_MAX_TABLE_CAPACITY = 4096 (id=1), MAX_FIELD_SECTION_SIZE = 32768 (id=6)
+    std::string settings_payload;
+    quic::VarInt::encode(0x01, settings_payload);
+    quic::VarInt::encode(4096, settings_payload);
+    quic::VarInt::encode(0x06, settings_payload);
+    quic::VarInt::encode(32768, settings_payload);
+    ctrl_wire.append(h3::encoder::encode_frame(frame_type::SETTINGS, settings_payload));
+
+    // GOAWAY payload: Stream ID = 100
+    std::string goaway_payload;
+    quic::VarInt::encode(100, goaway_payload);
+    ctrl_wire.append(h3::encoder::encode_frame(frame_type::GOAWAY, goaway_payload));
+
+    ctrl_stream->push_inbound(ctrl_wire, false);
+
+    // Spawn unidirectional session handler for Control Stream
+    asio::co_spawn(io, [ctrl_stream, ctx]() -> asio::awaitable<void> {
+        co_await h3::session_handler::handle_unidirectional_stream(ctrl_stream, ctx);
+    }, asio::detached);
+    io.poll();
+
+    // Verify Control Stream frames parsed into connection_context
+    assert(ctx->settings_received == true);
+    assert(ctx->peer_qpack_max_table_capacity == 4096);
+    assert(ctx->max_field_section_size == 32768);
+    assert(ctx->goaway_received == true);
+    assert(ctx->goaway_stream_id == 100);
+
+    // 3. Client-initiated unidirectional Stream 6 (sid & 0x03 == 2) -> QPACK Encoder Stream
+    auto enc_stream = server_conn->get_or_create_stream(6);
+    assert(enc_stream != nullptr);
+
+    std::string enc_wire;
+    quic::VarInt::encode(0x02, enc_wire); // Type 0x02 = QPACK Encoder Stream
+
+    // Encoder instruction: Insert with Literal Name (01Hxxxxx)
+    qpk::encoder::encode_insert_with_literal_name(enc_wire, "x-routed-header", "c7-verified");
+
+    enc_stream->push_inbound(enc_wire, false);
+
+    // Spawn handler for Encoder Stream
+    asio::co_spawn(io, [enc_stream, ctx]() -> asio::awaitable<void> {
+        co_await h3::session_handler::handle_unidirectional_stream(enc_stream, ctx);
+    }, asio::detached);
+    io.poll();
+
+    // Verify dynamic table in connection_context received the instruction!
+    assert(ctx->decode_table.count() == 1);
+    const auto *entry = ctx->decode_table.get_by_absolute_index(0);
+    assert(entry != nullptr);
+    assert(entry->name == "x-routed-header");
+    assert(entry->value == "c7-verified");
+
+    // 4. Verify request stream (sid=0 bidi) uses the connection's session_context and parses the dynamic header!
+    auto bidi_stream = server_conn->get_or_create_stream(0);
+    assert(bidi_stream != nullptr);
+    assert(bidi_stream->connection() == server_conn);
+
+    h3::connection_context fallback;
+    auto &retrieved_ctx = wavex::protos::protocol_traits<wavex::protos::http::http3codec>::get_connection_context(bidi_stream, fallback);
+    assert(&retrieved_ctx == ctx.get());
+
+    // Build HTTP/3 request referencing the dynamic table entry
+    std::string req_fields;
+    // Prefix: RIC = 1, Delta Base = 0
+    h3::qpack::encoder::encode_prefix(req_fields, 1, 1, 4096);
+    h3::qpack::encoder::encode_indexed_static(req_fields, 17); // :method GET
+    h3::qpack::encoder::encode_indexed_static(req_fields, 1);  // :path /
+    h3::qpack::encoder::encode_indexed_static(req_fields, 23); // :scheme https
+    // Indexed Field Line - Dynamic Table (Relative Index 0 -> Absolute Index = 1 - 1 - 0 = 0)
+    h3::qpack::encoder::encode_indexed_dynamic(req_fields, 0);
+
+    std::string req_frame = h3::encoder::encode_frame(frame_type::HEADERS, req_fields);
+    h3::request req;
+    std::size_t consumed = 0;
+    auto parse_res = http3codec::parse_request(req_frame, req, consumed, retrieved_ctx);
+    assert(parse_res == http3codec::result::success);
+    assert(req.headers_storage.size() == 1);
+    assert(req.headers_storage[0].first == "x-routed-header");
+    assert(req.headers_storage[0].second == "c7-verified");
+
+    ctrl_stream->close();
+    enc_stream->close();
+    bidi_stream->close();
+    server_conn->close();
+    io.stop();
+    io.poll();
+
+    std::cout << "  [PASS] C7: Control, encoder and decoder streams successfully routed and decoded." << std::endl;
 }
 
 int main() {
@@ -829,6 +944,7 @@ int main() {
         test_http3_body_truncation_prevention_c1();
         test_http3_malformed_request_rejection_c8();
         test_http3_qpack_huffman_literal_names_c5();
+        test_http3_session_unidirectional_routing_c7();
         std::cout << "=== All HTTP/3 Tests PASSED ===\n";
         return 0;
     } catch (const std::exception &ex) {
