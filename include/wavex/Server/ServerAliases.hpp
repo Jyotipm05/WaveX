@@ -18,16 +18,14 @@
 #include <wavex/Server/ServerCore.hpp>
 
 namespace wavex::server {
-
-    using Http1Server  = Server<wavex::protos::http::http1codec, wavex::engine::Http1Router>;
-    using http1server  = Http1Server;
-    using Http2Server  = Server<wavex::protos::http::http2codec, wavex::engine::Http2Router>;
-    using http2server  = Http2Server;
+    using Http1Server = Server<protos::http::http1codec, engine::Http1Router>;
+    using http1server = Http1Server;
+    using Http2Server = Server<protos::http::http2codec, engine::Http2Router>;
+    using http2server = Http2Server;
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
-    using Http3Server  = Server<wavex::protos::http::http3codec, wavex::engine::Http3Router>;
-    using http3server  = Http3Server;
+    using Http3Server = Server<protos::http::http3codec, engine::Http3Router>;
+    using http3server = Http3Server;
 #endif
-    using HttpServer   = Http1Server;
-    using httpserver   = HttpServer;
-
+    using HttpServer = Http1Server;
+    using httpserver = HttpServer;
 } // namespace wavex::server

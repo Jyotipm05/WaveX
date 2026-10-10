@@ -16,14 +16,11 @@
 #include <string>
 #include <string_view>
 #include <cstdint>
-#include <cstddef>
 
 #include <wavex/Network/QUIC/QuicConstants.hpp>
 #include <wavex/Network/QUIC/ConnectionId.hpp>
-#include <wavex/Network/QUIC/VarInt.hpp>
 
 namespace wavex::network::quic {
-
     struct PacketHeader {
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
         std::string token{};
@@ -40,9 +37,9 @@ namespace wavex::network::quic {
     };
 
     void pack_packet_header(const PacketHeader &hdr, std::string &out);
-    bool unpack_packet_header(std::string_view raw, PacketHeader &hdr, std::size_t &hdr_len, std::size_t expected_dcid_len = 8) noexcept;
 
+    auto unpack_packet_header(std::string_view raw, PacketHeader &hdr, std::size_t &hdr_len,
+                              std::size_t expected_dcid_len = 8) noexcept -> bool;
 } // namespace wavex::network::quic
 
 #endif // WAVEX_HAS_SSL
-

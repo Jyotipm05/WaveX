@@ -104,8 +104,11 @@ namespace wavex::server {
         ~RingQueue() = default;
 
         RingQueue(RingQueue &&) noexcept = default;
+
         RingQueue &operator=(RingQueue &&) noexcept = default;
+
         RingQueue(const RingQueue &) = default;
+
         RingQueue &operator=(const RingQueue &) = default;
 
         // ─── 3. Member Functions ─────────────────────────────────────────────
@@ -222,8 +225,11 @@ namespace wavex::server {
         }
 
         BlockingThreadPool(const BlockingThreadPool &) = delete;
+
         BlockingThreadPool &operator=(const BlockingThreadPool &) = delete;
+
         BlockingThreadPool(BlockingThreadPool &&) = delete;
+
         BlockingThreadPool &operator=(BlockingThreadPool &&) = delete;
 
         // ─── 4. Member Functions ─────────────────────────────────────────────

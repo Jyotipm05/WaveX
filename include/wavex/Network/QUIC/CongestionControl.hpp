@@ -24,7 +24,6 @@
 #include <wavex/Network/QUIC/QuicFrames.hpp>
 
 namespace wavex::network::quic {
-
     /**
      * @struct RttStats
      * @brief RFC 9002 §5 RTT Measurement and Estimator.
@@ -34,14 +33,15 @@ namespace wavex::network::quic {
         std::chrono::microseconds latest_rtt{0};
         std::chrono::microseconds min_rtt{std::chrono::microseconds::max()};
         std::chrono::microseconds smoothed_rtt{std::chrono::microseconds(333000)}; // Initial RFC 9002 default: 333ms
-        std::chrono::microseconds rttvar{std::chrono::microseconds(166500)};       // Initial RFC 9002 default: 333ms / 2
+        std::chrono::microseconds rttvar{std::chrono::microseconds(166500)}; // Initial RFC 9002 default: 333ms / 2
         bool first_rtt_sample{true};
 
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         constexpr RttStats() = default;
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
-        void update_rtt(std::chrono::microseconds latest, std::chrono::microseconds ack_delay = std::chrono::microseconds{0}) noexcept {
+        void update_rtt(std::chrono::microseconds latest,
+                        std::chrono::microseconds ack_delay = std::chrono::microseconds{0}) noexcept {
             latest_rtt = latest;
             if (min_rtt > latest) {
                 min_rtt = latest;
@@ -59,7 +59,9 @@ namespace wavex::network::quic {
                 adjusted_rtt = latest - ack_delay;
             }
             // rttvar = 3/4 * rttvar + 1/4 * |smoothed_rtt - adjusted_rtt|
-            const auto diff = (smoothed_rtt > adjusted_rtt) ? (smoothed_rtt - adjusted_rtt) : (adjusted_rtt - smoothed_rtt);
+            const auto diff = (smoothed_rtt > adjusted_rtt)
+                                  ? (smoothed_rtt - adjusted_rtt)
+                                  : (adjusted_rtt - smoothed_rtt);
             rttvar = (rttvar * 3 + diff) / 4;
             // smoothed_rtt = 7/8 * smoothed_rtt + 1/8 * adjusted_rtt
             smoothed_rtt = (smoothed_rtt * 7 + adjusted_rtt) / 8;
@@ -82,10 +84,13 @@ namespace wavex::network::quic {
 
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         SentPacket() = default;
+
         SentPacket(uint64_t pn, std::size_t bytes, PacketType pt,
                    std::chrono::steady_clock::time_point ts = std::chrono::steady_clock::now())
             : time_sent(ts), packet_number(pn), bytes_sent(bytes),
-              packet_type(pt), ack_eliciting(true), in_flight(true) {}
+              packet_type(pt), ack_eliciting(true), in_flight(true) {
+        }
+
         SentPacket(uint64_t pn, std::size_t bytes, PacketType pt,
                    std::vector<Frame> frames,
                    std::chrono::steady_clock::time_point ts = std::chrono::steady_clock::now())
@@ -93,7 +98,8 @@ namespace wavex::network::quic {
               retransmittable_frames(std::move(frames)),
               packet_type(pt),
               ack_eliciting(!retransmittable_frames.empty()),
-              in_flight(true) {}
+              in_flight(true) {
+        }
     };
 
     /**
@@ -104,9 +110,10 @@ namespace wavex::network::quic {
     public:
         // ─── 1. Nested Types & Definitions (TOP) ───────────────────────────
         static constexpr uint64_t kMaxDatagramSize = 1200;
-        static constexpr uint64_t kInitialWindow = 14720; // RFC 9002 §7.2: 10 * 1472 or min(10 * max_datagram_size, ...)
+        static constexpr uint64_t kInitialWindow = 14720;
+        // RFC 9002 §7.2: 10 * 1472 or min(10 * max_datagram_size, ...)
         static constexpr uint64_t kMinimumWindow = 2 * kMaxDatagramSize; // 2400
-        static constexpr uint64_t kPacketThreshold = 3;   // RFC 9002 §6.1.1
+        static constexpr uint64_t kPacketThreshold = 3; // RFC 9002 §6.1.1
 
     private:
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
@@ -120,6 +127,7 @@ namespace wavex::network::quic {
     public:
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         CongestionController() = default;
+
         ~CongestionController() = default;
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
@@ -158,7 +166,8 @@ namespace wavex::network::quic {
         }
 
         void on_congestion_event(std::chrono::steady_clock::time_point sent_time,
-                                 std::chrono::steady_clock::time_point event_time = std::chrono::steady_clock::now()) noexcept {
+                                 std::chrono::steady_clock::time_point event_time = std::chrono::steady_clock::now())
+            noexcept {
             if (sent_time <= recovery_start_time_) {
                 return; // Already accounted for in current recovery period
             }
@@ -174,12 +183,11 @@ namespace wavex::network::quic {
             in_recovery_ = false;
         }
 
-        void update_rtt(std::chrono::microseconds rtt_sample, std::chrono::microseconds ack_delay = std::chrono::microseconds{0}) noexcept {
+        void update_rtt(std::chrono::microseconds rtt_sample,
+                        std::chrono::microseconds ack_delay = std::chrono::microseconds{0}) noexcept {
             rtt_stats_.update_rtt(rtt_sample, ack_delay);
         }
     };
-
 } // namespace wavex::network::quic
 
 #endif // WAVEX_HAS_SSL
-

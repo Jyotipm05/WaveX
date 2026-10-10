@@ -101,12 +101,19 @@ namespace wavex::protos::http {
 
             // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
             frame_header() = default;
+
             constexpr frame_header(uint32_t l, uint32_t sid, frame_type t, uint8_t f) noexcept
-                : length(l), stream_id(sid), type(t), flags(f) {}
+                : length(l), stream_id(sid), type(t), flags(f) {
+            }
+
             ~frame_header() = default;
+
             frame_header(const frame_header &) = default;
+
             frame_header &operator=(const frame_header &) = default;
+
             frame_header(frame_header &&) noexcept = default;
+
             frame_header &operator=(frame_header &&) noexcept = default;
 
             // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
@@ -393,6 +400,11 @@ namespace wavex::protos::http {
                                     if (code_part == e.code) {
                                         out.push_back(static_cast<char>(sym));
                                         bits -= e.bits;
+                                        if (bits == 0) {
+                                            current = 0;
+                                        } else {
+                                            current &= (1U << bits) - 1U;
+                                        }
                                         matched = true;
                                         break;
                                     }
@@ -447,11 +459,18 @@ namespace wavex::protos::http {
 
                     // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
                     entry() = default;
-                    entry(std::string n, std::string v) : name(std::move(n)), value(std::move(v)) {}
+
+                    entry(std::string n, std::string v) : name(std::move(n)), value(std::move(v)) {
+                    }
+
                     ~entry() = default;
+
                     entry(const entry &) = default;
+
                     entry &operator=(const entry &) = default;
+
                     entry(entry &&) noexcept = default;
+
                     entry &operator=(entry &&) noexcept = default;
 
                     // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
@@ -471,10 +490,15 @@ namespace wavex::protos::http {
                 explicit dynamic_table(const std::size_t max_capacity = 4096)
                     : max_capacity_(max_capacity) {
                 }
+
                 ~dynamic_table() = default;
+
                 dynamic_table(const dynamic_table &) = default;
+
                 dynamic_table &operator=(const dynamic_table &) = default;
+
                 dynamic_table(dynamic_table &&) noexcept = default;
+
                 dynamic_table &operator=(dynamic_table &&) noexcept = default;
 
                 // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
@@ -574,7 +598,7 @@ namespace wavex::protos::http {
                         if (raw_name.starts_with(':')) continue; // Skip pseudo-headers already handled
                         std::string name;
                         name.reserve(raw_name.size());
-                        for (const char c : raw_name) {
+                        for (const char c: raw_name) {
                             name.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
                         }
                         const auto [idx, exact] = find_static(name, value);
@@ -620,7 +644,7 @@ namespace wavex::protos::http {
                         if (raw_name.starts_with(':')) continue;
                         std::string name;
                         name.reserve(raw_name.size());
-                        for (const char c : raw_name) {
+                        for (const char c: raw_name) {
                             name.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
                         }
                         const auto [idx, exact] = find_static(name, value);
@@ -730,10 +754,15 @@ namespace wavex::protos::http {
 
             // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
             connection_context() = default;
+
             ~connection_context() = default;
+
             connection_context(const connection_context &) = default;
+
             connection_context &operator=(const connection_context &) = default;
+
             connection_context(connection_context &&) noexcept = default;
+
             connection_context &operator=(connection_context &&) noexcept = default;
         };
 
@@ -752,7 +781,7 @@ namespace wavex::protos::http {
             std::string scheme_storage{};
             std::string authority_storage{};
             std::string body_storage{};
-            std::vector<std::pair<std::string, std::string>> headers_storage{};
+            std::vector<std::pair<std::string, std::string> > headers_storage{};
             uint32_t stream_id{1}; ///< HTTP/2 Stream Identifier
             http::method method_type{method::UNKNOWN};
 
@@ -855,7 +884,7 @@ namespace wavex::protos::http {
             std::string_view status_text{"OK"};
             // Internal backing storage for decoded strings
             std::string body_storage{};
-            std::vector<std::pair<std::string, std::string>> headers_storage{};
+            std::vector<std::pair<std::string, std::string> > headers_storage{};
             unsigned int status_code{200};
             uint32_t stream_id{1}; ///< Target HTTP/2 Stream Identifier
 
@@ -1677,12 +1706,14 @@ namespace wavex::protos::http {
         }
 
         /** @brief Parse raw buffer into an HTTP/2 request using a persistent dynamic table. */
-        static result parse_request(const std::string_view buffer, request &req, std::size_t &bytes_consumed, dynamic_table &dt) {
+        static result parse_request(const std::string_view buffer, request &req, std::size_t &bytes_consumed,
+                                    dynamic_table &dt) {
             return parser::parse_request(buffer, req, bytes_consumed, dt);
         }
 
         /** @brief Parse raw buffer into an HTTP/2 request using a connection context. */
-        static result parse_request(const std::string_view buffer, request &req, std::size_t &bytes_consumed, connection_context &ctx) {
+        static result parse_request(const std::string_view buffer, request &req, std::size_t &bytes_consumed,
+                                    connection_context &ctx) {
             return parser::parse_request(buffer, req, bytes_consumed, ctx);
         }
 
@@ -1692,12 +1723,14 @@ namespace wavex::protos::http {
         }
 
         /** @brief Parse raw buffer into an HTTP/2 response using a persistent dynamic table. */
-        static result parse_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed, dynamic_table &dt) {
+        static result parse_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed,
+                                     dynamic_table &dt) {
             return parser::parse_response(buffer, res, bytes_consumed, dt);
         }
 
         /** @brief Parse raw buffer into an HTTP/2 response using a connection context. */
-        static result parse_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed, connection_context &ctx) {
+        static result parse_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed,
+                                     connection_context &ctx) {
             return parser::parse_response(buffer, res, bytes_consumed, ctx);
         }
 
@@ -1707,12 +1740,14 @@ namespace wavex::protos::http {
         }
 
         /** @brief Decode a raw HTTP/2 response buffer using a persistent dynamic table. */
-        static result decode_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed, dynamic_table &dt) {
+        static result decode_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed,
+                                      dynamic_table &dt) {
             return decoder::decode_response(buffer, res, bytes_consumed, dt);
         }
 
         /** @brief Decode a raw HTTP/2 response buffer using a connection context. */
-        static result decode_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed, connection_context &ctx) {
+        static result decode_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed,
+                                      connection_context &ctx) {
             return decoder::decode_response(buffer, res, bytes_consumed, ctx);
         }
 

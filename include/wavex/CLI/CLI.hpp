@@ -46,10 +46,15 @@ namespace wavex::cli {
 
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         Option() = default;
+
         ~Option() = default;
+
         Option(const Option &) = default;
+
         Option &operator=(const Option &) = default;
+
         Option(Option &&) noexcept = default;
+
         Option &operator=(Option &&) noexcept = default;
     };
 
@@ -65,10 +70,15 @@ namespace wavex::cli {
 
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         ParseResult() = default;
+
         ~ParseResult() = default;
+
         ParseResult(const ParseResult &) = default;
+
         ParseResult &operator=(const ParseResult &) = default;
+
         ParseResult(ParseResult &&) noexcept = default;
+
         ParseResult &operator=(ParseResult &&) noexcept = default;
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
@@ -99,9 +109,13 @@ namespace wavex::cli {
         }
 
         ~CliParser() = default;
+
         CliParser(const CliParser &) = default;
+
         CliParser &operator=(const CliParser &) = default;
+
         CliParser(CliParser &&) noexcept = default;
+
         CliParser &operator=(CliParser &&) noexcept = default;
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
@@ -235,7 +249,7 @@ namespace wavex::cli {
                     } else {
                         if (has_eq) {
                             opt->value = std::string(val_part);
-                        } else if (i + 1 < args.size() && !args[i + 1].starts_with("-")) {
+                        } else if (i + 1 < args.size() && !args[i + 1].starts_with('-')) {
                             opt->value = std::string(args[++i]);
                         } else {
                             res.success = false;
@@ -245,7 +259,7 @@ namespace wavex::cli {
                     }
                 }
                 // Short option: -n or -n=value or -n value
-                else if (arg.starts_with("-") && arg.size() > 1) {
+                else if (arg.starts_with('-') && arg.size() > 1) {
                     char short_char = arg[1];
                     auto *opt = find_short_option_mut(short_char);
                     if (!opt) {
@@ -264,7 +278,7 @@ namespace wavex::cli {
                             } else {
                                 opt->value = std::string(arg.substr(2));
                             }
-                        } else if (i + 1 < args.size() && !args[i + 1].starts_with("-")) {
+                        } else if (i + 1 < args.size() && !args[i + 1].starts_with('-')) {
                             opt->value = std::string(args[++i]);
                         } else {
                             res.success = false;
@@ -330,7 +344,7 @@ namespace wavex::cli {
          * @brief Get option value as int with fallback.
          */
         [[nodiscard]] int get_int(const std::string &name, int default_val = 0) const {
-            std::string val = get_string(name);
+            const std::string val = get_string(name);
             if (val.empty()) return default_val;
             try {
                 return std::stoi(val);
@@ -343,7 +357,7 @@ namespace wavex::cli {
          * @brief Get option value as size_t with fallback.
          */
         [[nodiscard]] std::size_t get_size_t(const std::string &name, std::size_t default_val = 0) const {
-            std::string val = get_string(name);
+            const std::string val = get_string(name);
             if (val.empty()) return default_val;
             try {
                 return static_cast<std::size_t>(std::stoull(val));
@@ -356,15 +370,15 @@ namespace wavex::cli {
          * @brief Get option value as boolean.
          */
         [[nodiscard]] bool get_bool(const std::string &name) const {
-            std::string val = get_string(name);
+            const std::string val = get_string(name);
             return (val == "true" || val == "1" || val == "yes" || val == "ON");
         }
 
         /**
          * @brief Get option value as double with fallback.
          */
-        [[nodiscard]] double get_double(const std::string &name, double default_val = 0.0) const {
-            std::string val = get_string(name);
+        [[nodiscard]] double get_double(const std::string &name, const double default_val = 0.0) const {
+            const std::string val = get_string(name);
             if (val.empty()) return default_val;
             try {
                 return std::stod(val);
@@ -471,7 +485,5 @@ namespace wavex::cli {
             }
             return nullptr;
         }
-
-
     };
 } // namespace wavex::cli

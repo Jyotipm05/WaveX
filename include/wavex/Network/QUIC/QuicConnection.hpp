@@ -136,6 +136,7 @@ namespace wavex::network::quic {
             uint32_t current_write_level{0};
             uint32_t current_read_level{0};
             bool initialized{false};
+            bool owns_ctx{true};
 #else
             bool initialized{false};
 #endif
@@ -157,6 +158,7 @@ namespace wavex::network::quic {
     private:
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
         std::unique_ptr<TlsCtx> tls_{};
+        SSL_CTX *shared_ssl_ctx_{nullptr};
         std::unique_ptr<asio::steady_timer> loss_detection_timer_{};
         std::unique_ptr<asio::steady_timer> idle_timer_{};
         mutable std::recursive_mutex mtx_{};
@@ -330,6 +332,11 @@ namespace wavex::network::quic {
             std::scoped_lock lock(mtx_);
             tls_cert_file_ = std::move(cert_file);
             tls_key_file_ = std::move(key_file);
+        }
+
+        void set_shared_ssl_ctx(SSL_CTX *shared_ctx) noexcept {
+            std::scoped_lock lock(mtx_);
+            shared_ssl_ctx_ = shared_ctx;
         }
 
         [[nodiscard]] auto current_write_level() const noexcept -> uint32_t { return current_write_level_; }

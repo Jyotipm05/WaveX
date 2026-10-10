@@ -18,7 +18,6 @@
 
 #include <array>
 #include <cstdint>
-#include <cstddef>
 #include <string>
 #include <string_view>
 
@@ -26,7 +25,6 @@
 #include <wavex/Network/QUIC/QuicPacket.hpp>
 
 namespace wavex::network::quic {
-
     struct ProtectionKeys {
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
         std::array<uint8_t, 32> secret{};
@@ -37,31 +35,29 @@ namespace wavex::network::quic {
     };
 
     struct CryptoSuite {
-        static bool derive_initial_secrets(
+        static auto derive_initial_secrets(
             const ConnectionId &client_dcid,
             ProtectionKeys &client_keys,
-            ProtectionKeys &server_keys) noexcept;
+            ProtectionKeys &server_keys) noexcept -> bool;
 
-        static bool expand_quic_keys(
+        static auto expand_quic_keys(
             const uint8_t *secret, std::size_t secret_len,
-            ProtectionKeys &keys) noexcept;
+            ProtectionKeys &keys) noexcept -> bool;
 
-        static bool protect_packet(
+        static auto protect_packet(
             const ProtectionKeys &keys,
             PacketHeader &hdr,
             std::string_view plaintext,
-            std::string &ciphertext_out) noexcept;
+            std::string &ciphertext_out) noexcept -> bool;
 
-        static bool unprotect_packet(
+        static auto unprotect_packet(
             const ProtectionKeys &keys,
             PacketHeader &hdr,
             std::string_view packet_bytes,
             std::string &plaintext_out,
             uint64_t largest_pn = 0,
-            std::size_t expected_dcid_len = 8) noexcept;
+            std::size_t expected_dcid_len = 8) noexcept -> bool;
     };
-
 } // namespace wavex::network::quic
 
 #endif // WAVEX_HAS_SSL
-

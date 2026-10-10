@@ -26,10 +26,8 @@
 #include <typeindex>
 #include <unordered_map>
 #include <utility>
-#include <atomic>
 
 namespace wavex::base {
-
     using SubscriptionId = std::uint64_t;
 
     /**
@@ -55,7 +53,8 @@ namespace wavex::base {
         Subscription() noexcept = default;
 
         Subscription(std::function<void()> unbind) noexcept
-            : unbind_(std::move(unbind)), active_(true) {}
+            : unbind_(std::move(unbind)), active_(true) {
+        }
 
         ~Subscription() {
             reset();
@@ -77,6 +76,7 @@ namespace wavex::base {
         }
 
         Subscription(const Subscription &) = delete;
+
         Subscription &operator=(const Subscription &) = delete;
 
         // ─── 3. Member Functions ─────────────────────────────────────────────
@@ -128,8 +128,10 @@ namespace wavex::base {
             SubscriptionId id{0};
 
             ListenerEntry() = default;
+
             ListenerEntry(SubscriptionId sid, Handler h)
-                : handler(std::move(h)), id(sid) {}
+                : handler(std::move(h)), id(sid) {
+            }
         };
 
         // ─── 2. Member Variables (Arranged for minimum padding) ──────────────
@@ -140,11 +142,15 @@ namespace wavex::base {
     public:
         // ─── 3. Constructors & Destructor ────────────────────────────────────
         Event() = default;
+
         ~Event() = default;
 
         Event(const Event &) = delete;
+
         Event &operator=(const Event &) = delete;
+
         Event(Event &&) = delete;
+
         Event &operator=(Event &&) = delete;
 
         // ─── 4. Member Functions ─────────────────────────────────────────────
@@ -205,17 +211,16 @@ namespace wavex::base {
          * @param args Arguments to pass to all listeners.
          */
         void emit(Args... args) const {
-            std::vector<Handler> snapshot;
-            {
+            std::vector<Handler> snapshot; {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (listeners_.empty()) [[unlikely]] return;
                 snapshot.reserve(listeners_.size());
-                for (const auto &entry : listeners_) {
+                for (const auto &entry: listeners_) {
                     snapshot.push_back(entry.handler);
                 }
             }
 
-            for (const auto &fn : snapshot) {
+            for (const auto &fn: snapshot) {
                 if (fn) [[likely]] {
                     fn(args...);
                 }
@@ -277,16 +282,20 @@ namespace wavex::base {
     private:
         // ─── 1. Member Variables (Arranged for minimum padding) ──────────────
         mutable std::mutex mutex_;
-        std::unordered_map<std::type_index, std::shared_ptr<void>> channels_;
+        std::unordered_map<std::type_index, std::shared_ptr<void> > channels_;
 
     public:
         // ─── 2. Constructors & Destructor ────────────────────────────────────
         EventBus() = default;
+
         ~EventBus() = default;
 
         EventBus(const EventBus &) = delete;
+
         EventBus &operator=(const EventBus &) = delete;
+
         EventBus(EventBus &&) = delete;
+
         EventBus &operator=(EventBus &&) = delete;
 
         // ─── 3. Member Functions ─────────────────────────────────────────────
@@ -328,12 +337,11 @@ namespace wavex::base {
          */
         template<typename EventType>
         void publish(const EventType &event) {
-            std::shared_ptr<Event<const EventType &>> holder_copy;
-            {
+            std::shared_ptr<Event<const EventType &> > holder_copy; {
                 std::lock_guard<std::mutex> lock(mutex_);
                 auto it = channels_.find(typeid(EventType));
                 if (it == channels_.end()) [[unlikely]] return;
-                holder_copy = std::static_pointer_cast<Event<const EventType &>>(it->second);
+                holder_copy = std::static_pointer_cast<Event<const EventType &> >(it->second);
             }
             if (holder_copy) [[likely]] {
                 holder_copy->emit(event);
@@ -351,7 +359,7 @@ namespace wavex::base {
             std::lock_guard<std::mutex> lock(mutex_);
             auto it = channels_.find(typeid(EventType));
             if (it == channels_.end()) return false;
-            auto holder = std::static_pointer_cast<Event<const EventType &>>(it->second);
+            auto holder = std::static_pointer_cast<Event<const EventType &> >(it->second);
             return holder->unsubscribe(id);
         }
 
@@ -363,7 +371,7 @@ namespace wavex::base {
             std::lock_guard<std::mutex> lock(mutex_);
             auto it = channels_.find(std::type_index(typeid(EventType)));
             if (it == channels_.end()) return 0;
-            auto holder = std::static_pointer_cast<Event<const EventType &>>(it->second);
+            auto holder = std::static_pointer_cast<Event<const EventType &> >(it->second);
             return holder->subscriber_count();
         }
 
@@ -389,11 +397,11 @@ namespace wavex::base {
             const auto key = std::type_index(typeid(EventType));
             auto it = channels_.find(key);
             if (it == channels_.end()) {
-                auto holder = std::make_shared<Event<const EventType &>>();
+                auto holder = std::make_shared<Event<const EventType &> >();
                 channels_[key] = holder;
                 return *holder;
             }
-            return *std::static_pointer_cast<Event<const EventType &>>(it->second);
+            return *std::static_pointer_cast<Event<const EventType &> >(it->second);
         }
     };
 
@@ -412,8 +420,10 @@ namespace wavex::base {
 
         // ─── 2. Constructors & Destructor ────────────────────────────────────
         ServerShutdownEvent() = default;
-        explicit ServerShutdownEvent(std::chrono::milliseconds t) : timeout(t) {}
+
+        explicit ServerShutdownEvent(std::chrono::milliseconds t) : timeout(t) {
+        }
+
         ~ServerShutdownEvent() = default;
     };
-
 } // namespace wavex::base

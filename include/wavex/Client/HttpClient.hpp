@@ -351,7 +351,7 @@ namespace wavex::client {
          * @param dest_path Target file path.
          * @return True if written successfully, false otherwise.
          */
-        bool save_to_file(const std::string &dest_path) const;
+        [[nodiscard]] bool save_to_file(const std::string &dest_path) const;
 
         template<typename PathLike>
             requires (!std::is_convertible_v<PathLike, const std::string &>)
@@ -361,7 +361,7 @@ namespace wavex::client {
 
         // Implicit conversions for backward compatibility
         operator wavex::protos::http::Http1Response() const {
-            wavex::protos::http::Http1Response res;
+            Http1Response res;
             res.status(status_code_);
             for (const auto &[k, v]: headers_storage_) {
                 res.set(k, v);
@@ -371,7 +371,7 @@ namespace wavex::client {
         }
 
         operator wavex::protos::http::Http2Response() const {
-            wavex::protos::http::Http2Response res;
+            Http2Response res;
             res.status(status_code_);
             for (const auto &[k, v]: headers_storage_) {
                 res.set(k, v);

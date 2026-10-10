@@ -82,7 +82,7 @@ namespace wavex::engine {
          * @brief Creates a distinct, local HttpRouter instance.
          * @return A new local HttpRouter instance independent of the process-wide singleton.
          */
-        static HttpRouter make_instance() {
+        static auto make_instance() -> HttpRouter {
             return HttpRouter{};
         }
 
@@ -353,4 +353,3 @@ namespace wavex::engine {
     using http3router = Http3Router;
 #endif
 } // namespace wavex::engine
-

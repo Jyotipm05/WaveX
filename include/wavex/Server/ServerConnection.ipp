@@ -37,7 +37,6 @@
 #endif
 
 namespace wavex::server {
-
     template<typename Codec, typename RouterType>
     asio::awaitable<void> Server<Codec, RouterType>::accept_loop() {
         while (state_.load(std::memory_order_acquire) == ServerState::Running) {
@@ -47,7 +46,7 @@ namespace wavex::server {
                 std::ignore = socket.set_option(asio::ip::tcp::no_delay(true), nd_ec);
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
                 if (tls_enabled_ && ssl_ctx_) {
-                    auto stream = std::make_shared<asio::ssl::stream<asio::ip::tcp::socket>>(
+                    auto stream = std::make_shared<asio::ssl::stream<asio::ip::tcp::socket> >(
                         std::move(socket), *ssl_ctx_);
                     pool_.spawn_coroutine(handle_connection(std::move(stream)));
                     continue;
@@ -78,7 +77,8 @@ namespace wavex::server {
     template<typename Stream>
     asio::awaitable<void> Server<Codec, RouterType>::drain_and_abort(Stream &s) {
         // QUIC streams handle their own graceful teardown — drain is TCP-only
-        if constexpr (requires {
+        if constexpr (requires
+        {
             { get_stream_socket(s).available(std::declval<asio::error_code &>()) } -> std::integral;
         }) {
             auto &sock = get_stream_socket(s);
@@ -167,7 +167,8 @@ namespace wavex::server {
             Stream &s;
             bool closed{false};
 
-            explicit TransportGuard(Stream &stream) : s(stream) {}
+            explicit TransportGuard(Stream &stream) : s(stream) {
+            }
 
             ~TransportGuard() {
                 close();
@@ -196,7 +197,8 @@ namespace wavex::server {
         try {
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
             // Asynchronously perform TLS handshake on worker thread if SSL stream
-            if constexpr (requires {
+            if constexpr (requires
+            {
                 stream.async_handshake(asio::ssl::stream_base::server, asio::use_awaitable);
             }) {
                 asio::error_code hec;
@@ -214,7 +216,8 @@ namespace wavex::server {
 
             unsigned request_count = 0;
             while (state_.load(std::memory_order_acquire) != ServerState::Stopped) {
-                if (state_.load(std::memory_order_acquire) == ServerState::ShuttingDown && stream_buf.empty()) [[unlikely]] {
+                if (state_.load(std::memory_order_acquire) == ServerState::ShuttingDown && stream_buf.empty()) [[
+                    unlikely]] {
                     break;
                 }
 
@@ -225,7 +228,8 @@ namespace wavex::server {
 
                 while (p_res == CustomCodec::result::incomplete &&
                        state_.load(std::memory_order_acquire) != ServerState::Stopped) {
-                    if (state_.load(std::memory_order_acquire) == ServerState::ShuttingDown && stream_buf.empty()) [[unlikely]] {
+                    if (state_.load(std::memory_order_acquire) == ServerState::ShuttingDown && stream_buf.empty()) [[
+                        unlikely]] {
                         co_return;
                     }
 
@@ -292,7 +296,7 @@ namespace wavex::server {
                 ++request_count;
                 const bool keep = CustTraits::keep_alive(req, request_count, max_keep_alive_requests_);
                 const unsigned remaining =
-                    request_count < max_keep_alive_requests_ ? max_keep_alive_requests_ - request_count : 0;
+                        request_count < max_keep_alive_requests_ ? max_keep_alive_requests_ - request_count : 0;
 
                 // Hard cap: reject requests that overflow query param or header limits
                 if (req.has_query_param_overflow()) [[unlikely]] {
@@ -333,7 +337,7 @@ namespace wavex::server {
                     if constexpr (requires { req.set_params(match->params); }) {
                         req.set_params(match->params);
                     } else {
-                        for (const auto &[k, v] : match->params) {
+                        for (const auto &[k, v]: match->params) {
                             req.params.insert_or_assign(k, v);
                         }
                     }
@@ -343,37 +347,37 @@ namespace wavex::server {
                 if constexpr (requires { res.set_write_sink({}); }) {
                     res.set_write_sink([weak_stream](const std::string_view data,
                                                      const std::chrono::milliseconds timeout)
-                        -> asio::awaitable<std::expected<void, std::error_code>> {
-                        auto s = weak_stream.lock();
-                        if (!s) [[unlikely]] {
-                            co_return std::unexpected(std::make_error_code(std::errc::broken_pipe));
-                        }
-                        auto ex = co_await asio::this_coro::executor;
-                        asio::steady_timer timer(ex, timeout);
-                        bool timed_out = false;
-                        timer.async_wait([&](const std::error_code ec) {
-                            if (!ec) {
-                                timed_out = true;
-                                std::error_code cancel_ec;
-                                std::ignore = s->lowest_layer().cancel(cancel_ec);
+                    -> asio::awaitable<std::expected<void, std::error_code> > {
+                            auto s = weak_stream.lock();
+                            if (!s) [[unlikely]] {
+                                co_return std::unexpected(std::make_error_code(std::errc::broken_pipe));
                             }
+                            auto ex = co_await asio::this_coro::executor;
+                            asio::steady_timer timer(ex, timeout);
+                            bool timed_out = false;
+                            timer.async_wait([&](const std::error_code ec) {
+                                if (!ec) {
+                                    timed_out = true;
+                                    std::error_code cancel_ec;
+                                    std::ignore = s->lowest_layer().cancel(cancel_ec);
+                                }
+                            });
+
+                            auto [write_ec, bytes_written] = co_await asio::async_write(
+                                *s, asio::buffer(data), asio::as_tuple(asio::use_awaitable));
+                            (void) timer.cancel();
+
+                            if (timed_out || write_ec == asio::error::operation_aborted) [[unlikely]] {
+                                std::error_code close_ec;
+                                std::ignore = s->lowest_layer().close(close_ec);
+                                co_return std::unexpected(std::make_error_code(std::errc::timed_out));
+                            }
+
+                            if (write_ec) [[unlikely]] {
+                                co_return std::unexpected(write_ec);
+                            }
+                            co_return std::expected<void, std::error_code>{};
                         });
-
-                        auto [write_ec, bytes_written] = co_await asio::async_write(
-                            *s, asio::buffer(data), asio::as_tuple(asio::use_awaitable));
-                        (void) timer.cancel();
-
-                        if (timed_out || write_ec == asio::error::operation_aborted) [[unlikely]] {
-                            std::error_code close_ec;
-                            std::ignore = s->lowest_layer().close(close_ec);
-                            co_return std::unexpected(std::make_error_code(std::errc::timed_out));
-                        }
-
-                        if (write_ec) [[unlikely]] {
-                            co_return std::unexpected(write_ec);
-                        }
-                        co_return std::expected<void, std::error_code>{};
-                    });
                 }
 
                 res.status(match ? 200 : 404);
@@ -419,12 +423,12 @@ namespace wavex::server {
                 // Check shutdown state after handler execution
                 // (in case the handler itself invoked server.exit() or external shutdown event)
                 const bool is_shutting_down =
-                    state_.load(std::memory_order_acquire) == ServerState::ShuttingDown;
+                        state_.load(std::memory_order_acquire) == ServerState::ShuttingDown;
                 const bool effective_keep = keep && !is_shutting_down;
 
                 const unsigned short alt_svc_port = (has_quic_transport || alt_svc_port_ > 0)
-                                                    ? (alt_svc_port_ > 0 ? alt_svc_port_ : port_)
-                                                    : 0;
+                                                        ? (alt_svc_port_ > 0 ? alt_svc_port_ : port_)
+                                                        : 0;
                 CustTraits::prepare_response(req, res, effective_keep,
                                              static_cast<unsigned>(keep_alive_timeout_.count()),
                                              remaining, alt_svc_port);
@@ -502,5 +506,4 @@ namespace wavex::server {
         if (!res.is_sent()) co_await handler(req, res);
         co_return;
     }
-
 } // namespace wavex::server

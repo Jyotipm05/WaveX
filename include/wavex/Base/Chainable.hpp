@@ -37,10 +37,15 @@ namespace wavex {
     public:
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         Chainable() = default;
+
         ~Chainable() = default;
+
         Chainable(const Chainable &) = default;
+
         Chainable &operator=(const Chainable &) = default;
+
         Chainable(Chainable &&) noexcept = default;
+
         Chainable &operator=(Chainable &&) noexcept = default;
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
@@ -180,9 +185,13 @@ namespace wavex {
         }
 
         ~ConditionalChainable() = default;
+
         ConditionalChainable(const ConditionalChainable &) = default;
+
         ConditionalChainable &operator=(const ConditionalChainable &) = default;
+
         ConditionalChainable(ConditionalChainable &&) noexcept = default;
+
         ConditionalChainable &operator=(ConditionalChainable &&) noexcept = default;
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
@@ -219,10 +228,15 @@ namespace wavex {
     struct KeepAlivePolicy : public Chainable {
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         KeepAlivePolicy() = default;
+
         ~KeepAlivePolicy() = default;
+
         KeepAlivePolicy(const KeepAlivePolicy &) = default;
+
         KeepAlivePolicy &operator=(const KeepAlivePolicy &) = default;
+
         KeepAlivePolicy(KeepAlivePolicy &&) noexcept = default;
+
         KeepAlivePolicy &operator=(KeepAlivePolicy &&) noexcept = default;
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────

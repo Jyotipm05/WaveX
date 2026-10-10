@@ -146,5 +146,3 @@ namespace wavex::protos::http {
     using http3response = Http3Response;
 #endif
 } // namespace wavex::protos::http
-
-

@@ -97,15 +97,18 @@ namespace wavex::memory {
     public:
         // ─── 3. Constructors & Destructor ────────────────────────────────────
         RequestArena() noexcept
-            : buf_{}, mr_(buf_.data(), buf_.size(), &get_thread_local_pool()) {
+            : mr_(buf_.data(), buf_.size(), &get_thread_local_pool()) {
         }
 
         ~RequestArena() = default;
 
         // Non-copyable, non-movable — lifetime is tied to the request block.
         RequestArena(const RequestArena &) = delete;
+
         RequestArena &operator=(const RequestArena &) = delete;
+
         RequestArena(RequestArena &&) = delete;
+
         RequestArena &operator=(RequestArena &&) = delete;
 
         // ─── 4. Member Functions ─────────────────────────────────────────────

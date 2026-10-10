@@ -17,21 +17,20 @@
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
 
 #include <cstdint>
-#include <cstddef>
 #include <string>
 #include <string_view>
 
 namespace wavex::network::quic {
-
     struct VarInt {
         // ─── 4. Member Functions (LAST) ────────────────────────────────────
         [[nodiscard]] static std::size_t encoded_size(uint64_t val) noexcept;
-        static void encode(uint64_t val, std::string &out);
-        static std::size_t encode(uint64_t val, uint8_t *out, std::size_t max_len) noexcept;
-        static bool decode(std::string_view buf, std::size_t &cursor, uint64_t &val) noexcept;
-    };
 
+        static void encode(uint64_t val, std::string &out);
+
+        static auto encode(uint64_t val, uint8_t *out, std::size_t max_len) noexcept -> std::size_t;
+
+        static auto decode(std::string_view buf, std::size_t &cursor, uint64_t &val) noexcept -> bool;
+    };
 } // namespace wavex::network::quic
 
 #endif // WAVEX_HAS_SSL
-

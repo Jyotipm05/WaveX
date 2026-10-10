@@ -18,9 +18,7 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -38,11 +36,9 @@
 #include <asio/ip/tcp.hpp>
 #include <asio/post.hpp>
 
-#include <wavex/Network/QUIC/QuicConstants.hpp>
 #include <wavex/Base/Logger.hpp>
 
 namespace wavex::network::quic {
-
     class QuicConnection;
 
     struct StreamChunk {
@@ -52,8 +48,10 @@ namespace wavex::network::quic {
 
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         StreamChunk() = default;
+
         StreamChunk(uint64_t off, std::string d)
-            : offset(off), data(std::move(d)) {}
+            : offset(off), data(std::move(d)) {
+        }
     };
 
     /**
@@ -90,36 +88,52 @@ namespace wavex::network::quic {
 
     public:
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
-        QuicStream(const std::shared_ptr<QuicConnection> &conn, uint64_t stream_id, asio::any_io_executor executor = {}) noexcept;
+        QuicStream(const std::shared_ptr<QuicConnection> &conn, uint64_t stream_id,
+                   asio::any_io_executor executor = {}) noexcept;
+
         ~QuicStream();
+
         QuicStream(const QuicStream &) = delete;
+
         QuicStream &operator=(const QuicStream &) = delete;
+
         QuicStream(QuicStream &&) = delete;
+
         QuicStream &operator=(QuicStream &&) = delete;
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
         [[nodiscard]] executor_type get_executor() const noexcept;
+
         void set_executor(executor_type ex) noexcept { executor_ = std::move(ex); }
-        [[nodiscard]] uint64_t stream_id() const noexcept { return stream_id_; }
-        [[nodiscard]] bool is_open() const noexcept;
-        [[nodiscard]] bool is_fin_received() const noexcept;
-        [[nodiscard]] bool is_fin_sent() const noexcept;
-        [[nodiscard]] bool is_finished() const noexcept;
+        [[nodiscard]] auto stream_id() const noexcept -> uint64_t { return stream_id_; }
+
+        [[nodiscard]] auto is_open() const noexcept -> bool;
+
+        [[nodiscard]] auto is_fin_received() const noexcept -> bool;
+
+        [[nodiscard]] auto is_fin_sent() const noexcept -> bool;
+
+        [[nodiscard]] auto is_finished() const noexcept -> bool;
+
         void notify_finished_if_needed();
 
         // Stream concept methods
-        [[nodiscard]] QuicStream &lowest_layer() noexcept { return *this; }
-        [[nodiscard]] const QuicStream &lowest_layer() const noexcept { return *this; }
-        [[nodiscard]] QuicStream &next_layer() noexcept { return *this; }
-        [[nodiscard]] const QuicStream &next_layer() const noexcept { return *this; }
+        [[nodiscard]] auto lowest_layer() noexcept -> QuicStream & { return *this; }
+        [[nodiscard]] auto lowest_layer() const noexcept -> const QuicStream & { return *this; }
+        [[nodiscard]] auto next_layer() noexcept -> QuicStream & { return *this; }
+        [[nodiscard]] auto next_layer() const noexcept -> const QuicStream & { return *this; }
 
-        std::error_code cancel(std::error_code &ec) noexcept;
-        std::error_code shutdown(asio::ip::tcp::socket::shutdown_type type, std::error_code &ec) noexcept;
-        std::error_code close(std::error_code &ec) noexcept;
+        auto cancel(std::error_code &ec) noexcept -> std::error_code;
+
+        auto shutdown(asio::ip::tcp::socket::shutdown_type type, std::error_code &ec) noexcept -> std::error_code;
+
+        auto close(std::error_code &ec) noexcept -> std::error_code;
+
         void close() noexcept;
 
-        [[nodiscard]] std::size_t available(std::error_code &ec) const noexcept;
-        std::size_t read_some(const asio::mutable_buffer &buffer, std::error_code &ec) noexcept;
+        [[nodiscard]] auto available(std::error_code &ec) const noexcept -> std::size_t;
+
+        auto read_some(const asio::mutable_buffer &buffer, std::error_code &ec) noexcept -> std::size_t;
 
         // Async read initiation
         template<typename MutableBufferSequence, typename Token>
@@ -134,18 +148,17 @@ namespace wavex::network::quic {
                     // coroutine, which looks like "random garbage" at the resume site - the
                     // exact symptom under investigation. This guard converts that into a loud,
                     // attributable log instead of a silent segfault.
-                    auto fire_count = std::make_shared<std::atomic<int>>(0);
+                    auto fire_count = std::make_shared<std::atomic<int> >(0);
                     auto fire = [shared_h, fire_count](const char *site, std::error_code ec, std::size_t bytes) {
-                        int prev = fire_count->fetch_add(1);
-                        if (prev != 0) {
-                            wavex::log::error(
+                        if (int prev = fire_count->fetch_add(1); prev != 0) {
+                            log::error(
                                 "[QUIC][DIAG] async_read_some: shared_h invoked {} time(s) already! site={} ec={} bytes={} - SUPPRESSING to avoid resuming a dead coroutine",
                                 prev + 1, site, ec.message(), bytes);
                             return;
                         }
                         (*shared_h)(ec, bytes);
                     };
-                    auto self = weak_self.lock();
+                    const auto self = weak_self.lock();
                     if (!self) {
                         auto executor = asio::get_associated_executor(*shared_h);
                         asio::post(executor, [fire] {
@@ -155,7 +168,7 @@ namespace wavex::network::quic {
                     }
                     auto executor = asio::get_associated_executor(*shared_h, self->get_executor());
 
-                    std::lock_guard lock(self->mtx_);
+                    std::lock_guard stream_lock(self->mtx_);
                     if (!self->is_open_ && self->in_buffer_.empty()) {
                         asio::post(executor, [fire] {
                             fire("not-open", asio::error::eof, 0);
@@ -164,14 +177,14 @@ namespace wavex::network::quic {
                     }
 
                     if (!self->in_buffer_.empty()) {
-                        std::size_t dest_len = asio::buffer_size(buffers);
-                        std::size_t to_copy = (std::min)(dest_len, self->in_buffer_.size());
+                        const std::size_t dest_len = asio::buffer_size(buffers);
+                        const std::size_t to_copy = (std::min)(dest_len, self->in_buffer_.size());
                         std::size_t copied = 0;
                         for (auto b = asio::buffer_sequence_begin(buffers);
                              b != asio::buffer_sequence_end(buffers) && copied < to_copy; ++b) {
                             asio::mutable_buffer mb(*b);
                             std::size_t chunk = (std::min)(mb.size(), to_copy - copied);
-                            auto *dest = static_cast<uint8_t*>(mb.data());
+                            auto *dest = static_cast<uint8_t *>(mb.data());
                             for (std::size_t i = 0; i < chunk; ++i) {
                                 dest[i] = self->in_buffer_.front();
                                 self->in_buffer_.pop_front();
@@ -194,7 +207,7 @@ namespace wavex::network::quic {
                     // Register pending read: wake callback posts to reader's executor where data is copied under lock
                     self->pending_read_ = [weak_self, buffers, fire, executor](std::error_code ec, std::size_t) {
                         asio::post(executor, [weak_self, buffers, fire, ec] {
-                            auto s = weak_self.lock();
+                            const auto s = weak_self.lock();
                             if (!s) {
                                 fire("pending-no-self", asio::error::operation_aborted, 0);
                                 return;
@@ -205,11 +218,10 @@ namespace wavex::network::quic {
                             // (close(), is_open(), another async_read_some, ...), all of which
                             // lock the non-recursive mtx_. Firing while holding it deadlocks
                             // the thread against itself.
-                            const char *site = "pending-success";
+                            auto site = "pending-success";
                             std::error_code result_ec;
-                            std::size_t copied = 0;
-                            {
-                                std::lock_guard lock(s->mtx_);
+                            std::size_t copied = 0; {
+                                std::lock_guard pending_lock(s->mtx_);
                                 if (ec) {
                                     site = "pending-ec";
                                     result_ec = ec;
@@ -223,7 +235,7 @@ namespace wavex::network::quic {
                                          b != asio::buffer_sequence_end(buffers) && copied < to_copy; ++b) {
                                         asio::mutable_buffer mb(*b);
                                         std::size_t chunk = (std::min)(mb.size(), to_copy - copied);
-                                        auto *dest = static_cast<uint8_t*>(mb.data());
+                                        auto *dest = static_cast<uint8_t *>(mb.data());
                                         for (std::size_t i = 0; i < chunk; ++i) {
                                             dest[i] = s->in_buffer_.front();
                                             s->in_buffer_.pop_front();
@@ -264,7 +276,7 @@ namespace wavex::network::quic {
                     for (auto b = asio::buffer_sequence_begin(buffers);
                          b != asio::buffer_sequence_end(buffers); ++b) {
                         asio::const_buffer cb(*b);
-                        payload.append(static_cast<const char*>(cb.data()), cb.size());
+                        payload.append(static_cast<const char *>(cb.data()), cb.size());
                     }
 
                     std::error_code ec = self->write_outbound(payload, false);
@@ -278,23 +290,26 @@ namespace wavex::network::quic {
 
         // Internal plumbing
         void push_inbound(uint64_t offset, std::string_view data, bool fin);
+
         void push_inbound(std::string_view data, bool fin);
+
         std::error_code write_outbound(std::string_view data, bool fin);
 
         [[nodiscard]] bool has_final_size_error() const noexcept {
             std::lock_guard lock(mtx_);
             return final_size_error_;
         }
+
         [[nodiscard]] std::optional<uint64_t> final_size() const noexcept {
             std::lock_guard lock(mtx_);
             return final_size_;
         }
+
         [[nodiscard]] uint64_t recv_offset() const noexcept {
             std::lock_guard lock(mtx_);
             return recv_offset_;
         }
     };
-
 } // namespace wavex::network::quic
 
 #endif // WAVEX_HAS_SSL

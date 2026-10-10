@@ -14,6 +14,8 @@
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/post.hpp>
+#include <filesystem>
+#include <fstream>
 #include <future>
 
 namespace wavex::network::quic {
@@ -39,10 +41,17 @@ namespace wavex::network::quic {
 
     QuicServer::~QuicServer() {
         stop();
+        if (shared_ssl_ctx_) {
+            SSL_CTX_free(shared_ssl_ctx_);
+            shared_ssl_ctx_ = nullptr;
+        }
     }
 
     void QuicServer::start() {
         if (!socket_.is_open() || stopped_.load()) return;
+        if (!shared_ssl_ctx_ && !tls_cert_file_.empty() && !tls_key_file_.empty()) {
+            init_shared_ssl_ctx();
+        }
         running_.store(true);
         do_receive();
     }
@@ -103,8 +112,8 @@ namespace wavex::network::quic {
                     return;
                 }
 
-                wavex::log::info("[QuicServer] Received {} bytes from {}",
-                                 bytes_recvd, sender_endpoint_.address().to_string());
+                wavex::log::debug("[QuicServer] Received {} bytes from {}",
+                                  bytes_recvd, sender_endpoint_.address().to_string());
 
                 const std::string_view datagram(reinterpret_cast<const char *>(recv_buf_.data()), bytes_recvd);
                 PacketHeader hdr;
@@ -181,15 +190,13 @@ namespace wavex::network::quic {
                                 });
                             });
 
-                            std::string cert = tls_cert_file_;
-                            std::string key = tls_key_file_;
-                            if (!cert.empty() && !key.empty()) {
-                                conn->set_tls_credentials(std::move(cert), std::move(key));
-                                if (!conn->init_tls_handshake_engine()) {
-                                    wavex::log::error("[QUIC] Failed to init_tls_handshake_engine for new incoming connection!");
-                                }
-                            } else {
-                                wavex::log::warn("[QUIC] New incoming connection without TLS credentials: cert='{}' key='{}'", cert, key);
+                            if (shared_ssl_ctx_) {
+                                conn->set_shared_ssl_ctx(shared_ssl_ctx_);
+                            } else if (!tls_cert_file_.empty() && !tls_key_file_.empty()) {
+                                conn->set_tls_credentials(tls_cert_file_, tls_key_file_);
+                            }
+                            if (!conn->init_tls_handshake_engine()) {
+                                wavex::log::error("[QUIC] Failed to init_tls_handshake_engine for new incoming connection!");
                             }
                             connections_[server_cid] = conn;
                             connections_[hdr.dcid] = conn;
@@ -282,6 +289,95 @@ namespace wavex::network::quic {
                 }
             );
         }
+    }
+
+    void QuicServer::init_shared_ssl_ctx() {
+        if (shared_ssl_ctx_) {
+            SSL_CTX_free(shared_ssl_ctx_);
+            shared_ssl_ctx_ = nullptr;
+        }
+        if (tls_cert_file_.empty() || tls_key_file_.empty()) return;
+
+        shared_ssl_ctx_ = SSL_CTX_new(TLS_server_method());
+        if (!shared_ssl_ctx_) {
+            wavex::log::error("[QuicServer] SSL_CTX_new failed for shared server context");
+            return;
+        }
+
+        SSL_CTX_set_min_proto_version(shared_ssl_ctx_, TLS1_3_VERSION);
+        SSL_CTX_set_max_proto_version(shared_ssl_ctx_, TLS1_3_VERSION);
+        SSL_CTX_set_ciphersuites(shared_ssl_ctx_, "TLS_AES_128_GCM_SHA256");
+
+        if ([[maybe_unused]] const char *keylog_path = std::getenv("SSLKEYLOGFILE")) {
+            SSL_CTX_set_keylog_callback(
+                shared_ssl_ctx_,
+                [](const SSL *, const char *line) {
+                    if (const char *path = std::getenv("SSLKEYLOGFILE")) {
+                        if (std::ofstream ofs(path, std::ios::app); ofs.is_open()) {
+                            ofs << line << "\n";
+                        }
+                    }
+                });
+        }
+
+        std::string cert_file = tls_cert_file_;
+        std::string key_file = tls_key_file_;
+        std::error_code ec;
+        if (!std::filesystem::exists(cert_file, ec)) {
+#ifdef PROJECT_DIR
+            std::string alt = std::string(PROJECT_DIR) + "/" + cert_file;
+            if (std::filesystem::exists(alt, ec)) cert_file = alt;
+#endif
+            if (!std::filesystem::exists(cert_file, ec) &&
+                std::filesystem::exists("../" + tls_cert_file_, ec)) {
+                cert_file = "../" + tls_cert_file_;
+            }
+        }
+        if (!std::filesystem::exists(key_file, ec)) {
+#ifdef PROJECT_DIR
+            std::string alt = std::string(PROJECT_DIR) + "/" + key_file;
+            if (std::filesystem::exists(alt, ec)) key_file = alt;
+#endif
+            if (!std::filesystem::exists(key_file, ec) && std::filesystem::exists("../" + tls_key_file_, ec)) {
+                key_file = "../" + tls_key_file_;
+            }
+        }
+
+        if (SSL_CTX_use_certificate_file(shared_ssl_ctx_, cert_file.c_str(), SSL_FILETYPE_PEM) != 1) {
+            wavex::log::error("[QuicServer] SSL_CTX_use_certificate_file failed for '{}'", cert_file);
+            SSL_CTX_free(shared_ssl_ctx_);
+            shared_ssl_ctx_ = nullptr;
+            return;
+        }
+        if (SSL_CTX_use_PrivateKey_file(shared_ssl_ctx_, key_file.c_str(), SSL_FILETYPE_PEM) != 1) {
+            wavex::log::error("[QuicServer] SSL_CTX_use_PrivateKey_file failed for '{}'", key_file);
+            SSL_CTX_free(shared_ssl_ctx_);
+            shared_ssl_ctx_ = nullptr;
+            return;
+        }
+
+        SSL_CTX_set_alpn_select_cb(
+            shared_ssl_ctx_,
+            [](SSL *, const unsigned char **out, unsigned char *outlen,
+               const unsigned char *in, unsigned int inlen, void *) -> int {
+                unsigned int i = 0;
+                while (i < inlen) {
+                    const unsigned char proto_len = in[i++];
+                    if (i + proto_len > inlen) break;
+                    const std::string_view proto(reinterpret_cast<const char *>(in + i), proto_len);
+                    if (proto == "h3" || proto == "h3-29") {
+                        *out = in + i;
+                        *outlen = proto_len;
+                        return SSL_TLSEXT_ERR_OK;
+                    }
+                    i += proto_len;
+                }
+                return SSL_TLSEXT_ERR_NOACK;
+            },
+            nullptr);
+
+        wavex::log::info("[QuicServer] Initialized shared server SSL_CTX with cert '{}' and key '{}'",
+                         cert_file, key_file);
     }
 
 } // namespace wavex::network::quic

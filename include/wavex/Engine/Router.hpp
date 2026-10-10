@@ -227,7 +227,7 @@ namespace wavex::engine {
          *         unique across translation units and C++20 module boundaries by
          *         C++ ODR inline rules.
          */
-        static Router &instance() {
+        static auto instance() -> Router & {
             static Router s_instance;
             return s_instance;
         }
@@ -236,7 +236,7 @@ namespace wavex::engine {
          * @brief Creates a distinct, local Router instance.
          * @return A new local Router instance independent of the process-wide singleton.
          */
-        static Router make_instance() {
+        static auto make_instance() -> Router {
             return Router{};
         }
 
@@ -410,12 +410,12 @@ namespace wavex::engine {
         }
 
         /// Access the currently active 404 Not Found handler
-        [[nodiscard]] const NotFoundHandler &not_found_handler() const noexcept {
+        [[nodiscard]] auto not_found_handler() const noexcept -> const NotFoundHandler & {
             return not_found_handler_;
         }
 
         /// Access the currently active 404 Not Found handler (mutable)
-        [[nodiscard]] NotFoundHandler &not_found_handler() noexcept {
+        [[nodiscard]] auto not_found_handler() noexcept -> NotFoundHandler & {
             return not_found_handler_;
         }
 
@@ -453,7 +453,7 @@ namespace wavex::engine {
          *         middleware chain as a std::span) on success, or std::nullopt
          *         if no route matches.
          */
-        [[nodiscard]] std::optional<RouteMatch> resolve(MethodType m, const std::string_view path) const {
+        [[nodiscard]] auto resolve(MethodType m, const std::string_view path) const -> std::optional<RouteMatch> {
             if (!frozen_) [[unlikely]] {
                 freeze();
             }
@@ -480,7 +480,8 @@ namespace wavex::engine {
                         } else [[unlikely]] {
                             // Rare overflow path (> 16 segments)
                             if (seg_overflow.empty()) {
-                                seg_overflow.assign(seg_buf.begin(), seg_buf.begin() + seg_count);
+                                seg_overflow.assign(seg_buf.begin(),
+                                                    std::next(seg_buf.begin(), static_cast<std::ptrdiff_t>(seg_count)));
                             }
                             seg_overflow.emplace_back(normalized.substr(start, actual_end - start));
                         }
@@ -574,7 +575,7 @@ namespace wavex::engine {
          * @param path Path to normalize.
          * @return Owned, normalized copy of `path`.
          */
-        static std::string normalize_path(const std::string_view path) {
+        static auto normalize_path(const std::string_view path) -> std::string {
             if (path.empty() || path == "/") return "/";
             std::string p(path);
             if (p.front() != '/') [[unlikely]] p.insert(p.begin(), '/');
@@ -606,7 +607,8 @@ namespace wavex::engine {
          * @return A view of the normalized path — either `path` unchanged
          *         (zero-copy fast path) or `scratch`.
          */
-        [[nodiscard]] static std::string_view normalize_path_view(const std::string_view path, std::string &scratch) {
+        [[nodiscard]] static auto normalize_path_view(const std::string_view path,
+                                                      std::string &scratch) -> std::string_view {
             if (path.empty() || path == "/") return "/";
 
             const bool needs_front = path.front() != '/';
@@ -632,7 +634,7 @@ namespace wavex::engine {
          * @param path Normalized path (see normalize_path_view()).
          * @return Segments as views into `path`; empty for "/" or an empty path.
          */
-        [[nodiscard]] static std::vector<std::string_view> split_path_view(std::string_view path) {
+        [[nodiscard]] static auto split_path_view(std::string_view path) -> std::vector<std::string_view> {
             std::vector<std::string_view> segments;
             if (path.empty() || path == "/") return segments;
 
@@ -670,7 +672,7 @@ namespace wavex::engine {
          * @param segment Single path segment (e.g. "users", ":id", "{id:[0-9]+}", "*rest").
          * @return The existing or newly created child node for `segment`.
          */
-        Node *insert_segment(Node *parent, std::string_view segment) {
+        auto insert_segment(Node *parent, std::string_view segment) -> Node * {
             // 1. Check if param segment: :name
             if (!segment.empty() && segment[0] == ':') {
                 std::string pname(segment.substr(1)); // direct-init: string_view -> string ctor is explicit
@@ -771,10 +773,10 @@ namespace wavex::engine {
          * @return The matching leaf node (with a non-empty handler map), or
          *         nullptr if no match exists under `node`.
          */
-        const Node *resolve_node(const Node *node,
-                                 const std::span<const std::string_view> &segments,
-                                 const size_t depth,
-                                 base::FlatMap<std::string_view, std::string_view> &params) const {
+        auto resolve_node(const Node *node,
+                          const std::span<const std::string_view> &segments,
+                          const size_t depth,
+                          base::FlatMap<std::string_view, std::string_view> &params) const -> const Node * {
             const size_t seg_count = segments.size();
             [[assume(depth <= seg_count)]];
             if (depth == seg_count) {

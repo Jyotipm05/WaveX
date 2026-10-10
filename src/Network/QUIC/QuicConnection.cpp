@@ -4,6 +4,8 @@
 #include <wavex/Network/QUIC/QuicConnection.hpp>
 #include <wavex/Base/Logger.hpp>
 
+#include "wavex/Network/QUIC/VarInt.hpp"
+
 #if defined(min)
 #undef min
 #endif
@@ -32,7 +34,7 @@ namespace wavex::network::quic {
             SSL_free(ssl);
             ssl = nullptr;
         }
-        if (ctx) {
+        if (ctx && owns_ctx) {
             SSL_CTX_free(ctx);
             ctx = nullptr;
         }
@@ -43,10 +45,12 @@ namespace wavex::network::quic {
           ctx(std::exchange(other.ctx, nullptr)),
           current_write_level(other.current_write_level),
           current_read_level(other.current_read_level),
-          initialized(other.initialized) {
+          initialized(other.initialized),
+          owns_ctx(other.owns_ctx) {
         other.current_write_level = 0;
         other.current_read_level = 0;
         other.initialized = false;
+        other.owns_ctx = true;
     }
 
     QuicConnection::TlsCtx &QuicConnection::TlsCtx::operator=(TlsCtx &&other) noexcept {
@@ -55,7 +59,7 @@ namespace wavex::network::quic {
                 SSL_free(ssl);
                 ssl = nullptr;
             }
-            if (ctx) {
+            if (ctx && owns_ctx) {
                 SSL_CTX_free(ctx);
                 ctx = nullptr;
             }
@@ -64,10 +68,12 @@ namespace wavex::network::quic {
             current_write_level = other.current_write_level;
             current_read_level = other.current_read_level;
             initialized = other.initialized;
+            owns_ctx = other.owns_ctx;
 
             other.current_write_level = 0;
             other.current_read_level = 0;
             other.initialized = false;
+            other.owns_ctx = true;
         }
         return *this;
     }
@@ -302,98 +308,104 @@ namespace wavex::network::quic {
         if (tls_ && tls_->initialized) return true;
         if (!tls_) tls_ = std::make_unique<TlsCtx>();
 
-        tls_->ctx = SSL_CTX_new(is_server_ ? TLS_server_method() : TLS_client_method());
-        if (!tls_->ctx) {
-            wavex::log::error("[QUIC] init_tls_handshake_engine: SSL_CTX_new failed");
-            return false;
-        }
-
-        SSL_CTX_set_min_proto_version(tls_->ctx, TLS1_3_VERSION);
-        SSL_CTX_set_max_proto_version(tls_->ctx, TLS1_3_VERSION);
-
-        // Standard TLS 1.3 cipher suite preferred for QUIC
-        SSL_CTX_set_ciphersuites(tls_->ctx, "TLS_AES_128_GCM_SHA256");
-
-        // Ground-truth tooling: support SSLKEYLOGFILE for Wireshark / diagnostic interop
-        if ([[maybe_unused]] const char *keylog_path = std::getenv("SSLKEYLOGFILE")) {
-            SSL_CTX_set_keylog_callback(
-                tls_->ctx,
-                [](const SSL *, const char *line) {
-                    if (const char *path = std::getenv("SSLKEYLOGFILE")) {
-                        if (std::ofstream ofs(path, std::ios::app); ofs.is_open()) {
-                            ofs << line << "\n";
-                        }
-                    }
-                });
-        }
-
-        if (is_server_) {
-            if (!tls_cert_file_.empty() && !tls_key_file_.empty()) {
-                std::string cert_file = tls_cert_file_;
-                std::string key_file = tls_key_file_;
-                std::error_code ec;
-                if (!std::filesystem::exists(cert_file, ec)) {
-#ifdef PROJECT_DIR
-                    std::string alt = std::string(PROJECT_DIR) + "/" + cert_file;
-                    if (std::filesystem::exists(alt, ec)) cert_file = alt;
-#endif
-                    if (!std::filesystem::exists(cert_file, ec) &&
-                        std::filesystem::exists("../" + tls_cert_file_, ec)) {
-                        cert_file = "../" + tls_cert_file_;
-                    }
-                }
-                if (!std::filesystem::exists(key_file, ec)) {
-#ifdef PROJECT_DIR
-                    std::string alt = std::string(PROJECT_DIR) + "/" + key_file;
-                    if (std::filesystem::exists(alt, ec)) key_file = alt;
-#endif
-                    if (!std::filesystem::exists(key_file, ec) && std::filesystem::exists("../" + tls_key_file_, ec)) {
-                        key_file = "../" + tls_key_file_;
-                    }
-                }
-
-                if (SSL_CTX_use_certificate_file(tls_->ctx, cert_file.c_str(), SSL_FILETYPE_PEM) != 1) {
-                    wavex::log::error("[QUIC] init_tls_handshake_engine: SSL_CTX_use_certificate_file failed for '{}'",
-                                      cert_file);
-                    return false;
-                }
-                if (SSL_CTX_use_PrivateKey_file(tls_->ctx, key_file.c_str(), SSL_FILETYPE_PEM) != 1) {
-                    wavex::log::error("[QUIC] init_tls_handshake_engine: SSL_CTX_use_PrivateKey_file failed for '{}'",
-                                      key_file);
-                    return false;
-                }
-                wavex::log::debug("[QUIC] init_tls_handshake_engine: loaded cert '{}' and key '{}'", cert_file,
-                                  key_file);
-            } else {
-                wavex::log::warn(
-                    "[QUIC] init_tls_handshake_engine: is_server=true but cert ('{}') or key ('{}') is empty!",
-                    tls_cert_file_, tls_key_file_);
+        if (shared_ssl_ctx_) {
+            tls_->ctx = shared_ssl_ctx_;
+            tls_->owns_ctx = false;
+        } else {
+            tls_->ctx = SSL_CTX_new(is_server_ ? TLS_server_method() : TLS_client_method());
+            tls_->owns_ctx = true;
+            if (!tls_->ctx) {
+                wavex::log::error("[QUIC] init_tls_handshake_engine: SSL_CTX_new failed");
+                return false;
             }
 
-            // ALPN selection callback for server (mandated by RFC 9001 §8.1)
-            SSL_CTX_set_alpn_select_cb(
-                tls_->ctx,
-                [](SSL * /*ssl*/,
-                   const unsigned char **out,
-                   unsigned char *outlen,
-                   const unsigned char *in,
-                   unsigned int inlen,
-                   void * /*arg*/) -> int {
-                    unsigned int i = 0;
-                    while (i < inlen) {
-                        const unsigned char proto_len = in[i++];
-                        if (i + proto_len > inlen) break;
-                        const std::string_view proto(reinterpret_cast<const char *>(in + i), proto_len);
-                        if (proto == "h3" || proto == "h3-29") {
-                            *out = in + i;
-                            *outlen = proto_len;
-                            return SSL_TLSEXT_ERR_OK;
+            SSL_CTX_set_min_proto_version(tls_->ctx, TLS1_3_VERSION);
+            SSL_CTX_set_max_proto_version(tls_->ctx, TLS1_3_VERSION);
+
+            // Standard TLS 1.3 cipher suite preferred for QUIC
+            SSL_CTX_set_ciphersuites(tls_->ctx, "TLS_AES_128_GCM_SHA256");
+
+            // Ground-truth tooling: support SSLKEYLOGFILE for Wireshark / diagnostic interop
+            if ([[maybe_unused]] const char *keylog_path = std::getenv("SSLKEYLOGFILE")) {
+                SSL_CTX_set_keylog_callback(
+                    tls_->ctx,
+                    [](const SSL *, const char *line) {
+                        if (const char *path = std::getenv("SSLKEYLOGFILE")) {
+                            if (std::ofstream ofs(path, std::ios::app); ofs.is_open()) {
+                                ofs << line << "\n";
+                            }
                         }
-                        i += proto_len;
+                    });
+            }
+
+            if (is_server_) {
+                if (!tls_cert_file_.empty() && !tls_key_file_.empty()) {
+                    std::string cert_file = tls_cert_file_;
+                    std::string key_file = tls_key_file_;
+                    std::error_code ec;
+                    if (!std::filesystem::exists(cert_file, ec)) {
+#ifdef PROJECT_DIR
+                        std::string alt = std::string(PROJECT_DIR) + "/" + cert_file;
+                        if (std::filesystem::exists(alt, ec)) cert_file = alt;
+#endif
+                        if (!std::filesystem::exists(cert_file, ec) &&
+                            std::filesystem::exists("../" + tls_cert_file_, ec)) {
+                            cert_file = "../" + tls_cert_file_;
+                        }
                     }
-                    return SSL_TLSEXT_ERR_NOACK;
-                },
-                nullptr);
+                    if (!std::filesystem::exists(key_file, ec)) {
+#ifdef PROJECT_DIR
+                        std::string alt = std::string(PROJECT_DIR) + "/" + key_file;
+                        if (std::filesystem::exists(alt, ec)) key_file = alt;
+#endif
+                        if (!std::filesystem::exists(key_file, ec) && std::filesystem::exists("../" + tls_key_file_, ec)) {
+                            key_file = "../" + tls_key_file_;
+                        }
+                    }
+
+                    if (SSL_CTX_use_certificate_file(tls_->ctx, cert_file.c_str(), SSL_FILETYPE_PEM) != 1) {
+                        wavex::log::error("[QUIC] init_tls_handshake_engine: SSL_CTX_use_certificate_file failed for '{}'",
+                                          cert_file);
+                        return false;
+                    }
+                    if (SSL_CTX_use_PrivateKey_file(tls_->ctx, key_file.c_str(), SSL_FILETYPE_PEM) != 1) {
+                        wavex::log::error("[QUIC] init_tls_handshake_engine: SSL_CTX_use_PrivateKey_file failed for '{}'",
+                                          key_file);
+                        return false;
+                    }
+                    wavex::log::debug("[QUIC] init_tls_handshake_engine: loaded cert '{}' and key '{}'", cert_file,
+                                      key_file);
+                } else {
+                    wavex::log::warn(
+                        "[QUIC] init_tls_handshake_engine: is_server=true but cert ('{}') or key ('{}') is empty!",
+                        tls_cert_file_, tls_key_file_);
+                }
+
+                // ALPN selection callback for server (mandated by RFC 9001 §8.1)
+                SSL_CTX_set_alpn_select_cb(
+                    tls_->ctx,
+                    [](SSL * /*ssl*/,
+                       const unsigned char **out,
+                       unsigned char *outlen,
+                       const unsigned char *in,
+                       unsigned int inlen,
+                       void * /*arg*/) -> int {
+                        unsigned int i = 0;
+                        while (i < inlen) {
+                            const unsigned char proto_len = in[i++];
+                            if (i + proto_len > inlen) break;
+                            const std::string_view proto(reinterpret_cast<const char *>(in + i), proto_len);
+                            if (proto == "h3" || proto == "h3-29") {
+                                *out = in + i;
+                                *outlen = proto_len;
+                                return SSL_TLSEXT_ERR_OK;
+                            }
+                            i += proto_len;
+                        }
+                        return SSL_TLSEXT_ERR_NOACK;
+                    },
+                    nullptr);
+            }
         }
 
         tls_->ssl = SSL_new(tls_->ctx);
@@ -555,11 +567,11 @@ namespace wavex::network::quic {
             if (prot_level == 2) {
                 // OSSL_RECORD_PROTECTION_LEVEL_HANDSHAKE
                 handshake_keys_local_ = keys;
-                wavex::log::info("[QUIC] on_tls_secret: handshake_keys_local_ set (write)");
+                wavex::log::debug("[QUIC] on_tls_secret: handshake_keys_local_ set (write)");
             } else if (prot_level >= 3) {
                 // OSSL_RECORD_PROTECTION_LEVEL_APPLICATION
                 one_rtt_keys_local_ = keys;
-                wavex::log::info("[QUIC] on_tls_secret: one_rtt_keys_local_ set (write)");
+                wavex::log::debug("[QUIC] on_tls_secret: one_rtt_keys_local_ set (write)");
             }
         } else {
             // 0 = read (peer/receiver)
@@ -567,13 +579,13 @@ namespace wavex::network::quic {
             if (prot_level == 2) {
                 // OSSL_RECORD_PROTECTION_LEVEL_HANDSHAKE
                 handshake_keys_peer_ = keys;
-                wavex::log::info("[QUIC] on_tls_secret: handshake_keys_peer_ set (read)");
+                wavex::log::debug("[QUIC] on_tls_secret: handshake_keys_peer_ set (read)");
                 drain_buffered_packets();
             } else if (prot_level >= 3) {
                 // OSSL_RECORD_PROTECTION_LEVEL_APPLICATION
                 one_rtt_keys_peer_ = keys;
-                wavex::log::info(
-                    "[QUIC] on_tls_secret: one_rtt_keys_peer_ set (read) - CRITICAL!");
+                wavex::log::debug(
+                    "[QUIC] on_tls_secret: one_rtt_keys_peer_ set (read)");
                 drain_buffered_packets();
             }
         }

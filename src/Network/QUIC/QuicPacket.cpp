@@ -13,8 +13,9 @@
 
 #include <wavex/Network/QUIC/QuicPacket.hpp>
 
-namespace wavex::network::quic {
+#include "wavex/Network/QUIC/VarInt.hpp"
 
+namespace wavex::network::quic {
     void pack_packet_header(const PacketHeader &hdr, std::string &out) {
         if (hdr.is_long) {
             uint8_t first = 0xc0; // Long packet (form bit = 1, fixed bit = 1)
@@ -135,7 +136,6 @@ namespace wavex::network::quic {
         hdr_len = cursor;
         return true;
     }
-
 } // namespace wavex::network::quic
 
 #endif // WAVEX_HAS_SSL

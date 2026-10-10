@@ -153,11 +153,18 @@ namespace wavex::protos::http {
 
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         header() = default;
-        constexpr header(std::string_view n, std::string_view v) noexcept : name(n), value(v) {}
+
+        constexpr header(std::string_view n, std::string_view v) noexcept : name(n), value(v) {
+        }
+
         ~header() = default;
+
         header(const header &) = default;
+
         header &operator=(const header &) = default;
+
         header(header &&) noexcept = default;
+
         header &operator=(header &&) noexcept = default;
     };
 
@@ -173,10 +180,15 @@ namespace wavex::protos::http {
 
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         message_base() = default;
+
         ~message_base() = default;
+
         message_base(const message_base &) = default;
+
         message_base &operator=(const message_base &) = default;
+
         message_base(message_base &&) noexcept = default;
+
         message_base &operator=(message_base &&) noexcept = default;
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
@@ -202,10 +214,15 @@ namespace wavex::protos::http {
 
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         request() = default;
+
         ~request() = default;
+
         request(const request &) = default;
+
         request &operator=(const request &) = default;
+
         request(request &&) noexcept = default;
+
         request &operator=(request &&) noexcept = default;
     };
 
@@ -217,10 +234,15 @@ namespace wavex::protos::http {
 
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         response() = default;
+
         ~response() = default;
+
         response(const response &) = default;
+
         response &operator=(const response &) = default;
+
         response(response &&) noexcept = default;
+
         response &operator=(response &&) noexcept = default;
     };
 
@@ -331,7 +353,7 @@ namespace wavex::protos::http {
             // ── Headers ──────────────────────────────────────────────────────────
             if (const result r = parse_headers(buffer, cursor, req.headers);
                 r != result::success) [[unlikely]]
-                return r;
+                    return r;
 
             // ── Body ─────────────────────────────────────────────────────────────
             return extract_body(buffer, cursor, req, bytes_consumed, /*is_request=*/true);
@@ -384,7 +406,7 @@ namespace wavex::protos::http {
             // ── Headers ──────────────────────────────────────────────────────────
             if (const result r = parse_headers(buffer, cursor, res.headers);
                 r != result::success) [[unlikely]]
-                return r;
+                    return r;
 
             // RFC 7230 §3.3.3: 1xx, 204, and 304 responses MUST NOT contain a message body.
             if ((res.status_code >= 100 && res.status_code < 200) ||
@@ -453,11 +475,12 @@ namespace wavex::protos::http {
          * calling get_header() twice (two separate O(n) scans).
          */
         static result extract_body(const std::string_view buffer,
-                                    const std::size_t cursor,
-                                    message_base &msg,
-                                    std::size_t &bytes_consumed,
-                                    const bool is_request = false) {
-            [[assume(cursor <= buffer.size())]];
+                                   const std::size_t cursor,
+                                   message_base &msg,
+                                   std::size_t &bytes_consumed,
+                                   const bool is_request = false) {
+            const std::size_t buf_size = buffer.size();
+            [[assume(cursor <= buf_size)]];
 
             // Single pass: find both interesting headers at once
             std::optional<std::string_view> te, cl;
@@ -481,10 +504,10 @@ namespace wavex::protos::http {
                 // or Content-Length, message body length is zero.
                 content_length = 0;
             } else {
-                content_length = buffer.size() - cursor;
+                content_length = buf_size - cursor;
             }
 
-            if (buffer.size() - cursor < content_length) [[unlikely]] {
+            if (buf_size - cursor < content_length) [[unlikely]] {
                 return result::incomplete;
             }
 

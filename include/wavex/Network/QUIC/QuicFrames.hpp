@@ -14,23 +14,20 @@
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
 
 #include <cstdint>
-#include <cstddef>
 #include <string>
 #include <string_view>
 #include <variant>
 #include <vector>
 
-#include <wavex/Network/QUIC/QuicConstants.hpp>
-
 namespace wavex::network::quic {
-
     // ─── Individual Frame Structures ──────────────────────────────────────
 
     struct PaddingFrame {
         uint32_t length{1};
     };
 
-    struct PingFrame {};
+    struct PingFrame {
+    };
 
     struct AckRange {
         uint64_t gap{0};
@@ -108,7 +105,8 @@ namespace wavex::network::quic {
         bool is_application{false};
     };
 
-    struct HandshakeDoneFrame {};
+    struct HandshakeDoneFrame {
+    };
 
     // ─── Frame Variant ────────────────────────────────────────────────────
     using Frame = std::variant<
@@ -132,8 +130,8 @@ namespace wavex::network::quic {
 
     // ─── Serialization/Parsing Interface ──────────────────────────────────
     void serialize_frame(const Frame &frame, std::string &out);
-    bool parse_frames(std::string_view payload, std::vector<Frame> &out_frames);
 
+    auto parse_frames(std::string_view payload, std::vector<Frame> &out_frames) -> bool;
 } // namespace wavex::network::quic
 
 #endif // WAVEX_HAS_SSL

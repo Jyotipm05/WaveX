@@ -18,7 +18,6 @@
 #include <cstddef>
 
 namespace wavex::network::quic {
-
     // ─── Version Constants ────────────────────────────────────────────────
     inline constexpr uint32_t QUIC_VERSION_1 = 0x00000001;
     inline constexpr uint32_t QUIC_VERSION_NEGOTIATION = 0x00000000;
@@ -112,7 +111,6 @@ namespace wavex::network::quic {
             default: return 2;
         }
     }
-
 } // namespace wavex::network::quic
 
 #endif // WAVEX_HAS_SSL

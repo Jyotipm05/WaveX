@@ -22,7 +22,6 @@
 
 #include <string>
 #include <string_view>
-#include <ranges>
 #include <utility>
 #include <nlohmann/json.hpp>
 

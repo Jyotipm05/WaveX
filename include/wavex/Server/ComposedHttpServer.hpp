@@ -30,7 +30,6 @@
 #include <wavex/Server/TlsConfig.hpp>
 
 namespace wavex::server {
-
     /**
      * @class ComposedHttpServer
      * @brief High-level composed server running HTTP/1.1 & HTTP/2 over TCP/TLS and HTTP/3 over QUIC/UDP concurrently on the same port.
@@ -45,15 +44,15 @@ namespace wavex::server {
         // ─── 2. Member Variables (Arranged for minimum padding) ──────────────
         Http2Router owned_h2_router_{};
         Http3Router owned_h3_router_{};
-        Http2Router *h2_router_{nullptr};                     // 8 bytes
-        Http3Router *h3_router_{nullptr};                     // 8 bytes
+        Http2Router *h2_router_{nullptr}; // 8 bytes
+        Http3Router *h3_router_{nullptr}; // 8 bytes
         std::unique_ptr<network::quic::QuicServer> quic_server_{nullptr}; // 8 bytes
-        std::string address_{"0.0.0.0"};                      // complex (32 bytes)
-        TlsConfig tls_config_{};                              // complex
-        Http2Server server_;                                  // complex
-        unsigned short port_{0};                              // 2 bytes
-        bool tls_enabled_{false};                             // 1 byte
-        bool allow_insecure_{false};                          // 1 byte
+        std::string address_{"0.0.0.0"}; // complex (32 bytes)
+        TlsConfig tls_config_{}; // complex
+        Http2Server server_; // complex
+        unsigned short port_{0}; // 2 bytes
+        bool tls_enabled_{false}; // 1 byte
+        bool allow_insecure_{false}; // 1 byte
 
     public:
         // ─── 3. Constructors & Destructor ────────────────────────────────────
@@ -91,8 +90,11 @@ namespace wavex::server {
         ~ComposedHttpServer() = default;
 
         ComposedHttpServer(const ComposedHttpServer &) = delete;
+
         ComposedHttpServer &operator=(const ComposedHttpServer &) = delete;
+
         ComposedHttpServer(ComposedHttpServer &&) = delete;
+
         ComposedHttpServer &operator=(ComposedHttpServer &&) = delete;
 
         // ─── 4. Member Functions ─────────────────────────────────────────────
@@ -104,7 +106,7 @@ namespace wavex::server {
         [[nodiscard]] const Http2Server &tcp_server() const noexcept { return server_; }
 
         void enable_tls(std::string cert_file = "ssl/test.crt",
-                       std::string key_file = "ssl/test.key") {
+                        std::string key_file = "ssl/test.key") {
             tls_config_.cert_file = std::move(cert_file);
             tls_config_.key_file = std::move(key_file);
             tls_enabled_ = true;
@@ -119,7 +121,7 @@ namespace wavex::server {
 
         [[nodiscard]] bool is_tls_enabled() const noexcept { return tls_enabled_ || server_.is_tls_enabled(); }
         [[nodiscard]] bool is_acceptor_open() const noexcept { return server_.is_acceptor_open(); }
-        [[nodiscard]] bool is_http3_enabled() const noexcept { return true; }
+        [[nodiscard]] static bool is_http3_enabled() noexcept { return true; }
 
         void allow_insecure(bool allow = true) noexcept {
             allow_insecure_ = allow;
@@ -143,23 +145,23 @@ namespace wavex::server {
                 std::string cert_path = tls_config_.cert_file;
                 std::string key_path = tls_config_.key_file;
                 std::error_code ec;
-                if (!wavex::utils::fs_utils::exists(cert_path, ec)) {
+                if (!utils::fs_utils::exists(cert_path, ec)) {
 #ifdef PROJECT_DIR
                     std::string alt = std::string(PROJECT_DIR) + "/" + cert_path;
                     if (wavex::utils::fs_utils::exists(alt, ec)) cert_path = alt;
 #endif
                     if (!wavex::utils::fs_utils::exists(cert_path, ec) &&
-                        wavex::utils::fs_utils::exists("../" + tls_config_.cert_file, ec)) {
+                        utils::fs_utils::exists("../" + tls_config_.cert_file, ec)) {
                         cert_path = "../" + tls_config_.cert_file;
                     }
                 }
-                if (!wavex::utils::fs_utils::exists(key_path, ec)) {
+                if (!utils::fs_utils::exists(key_path, ec)) {
 #ifdef PROJECT_DIR
                     std::string alt = std::string(PROJECT_DIR) + "/" + key_path;
                     if (wavex::utils::fs_utils::exists(alt, ec)) key_path = alt;
 #endif
-                    if (!wavex::utils::fs_utils::exists(key_path, ec) &&
-                        wavex::utils::fs_utils::exists("../" + tls_config_.key_file, ec)) {
+                    if (!utils::fs_utils::exists(key_path, ec) &&
+                        utils::fs_utils::exists("../" + tls_config_.key_file, ec)) {
                         key_path = "../" + tls_config_.key_file;
                     }
                 }
@@ -170,14 +172,14 @@ namespace wavex::server {
 
             quic_server_->set_uni_stream_handler(
                 [session_ctx](std::shared_ptr<network::quic::QuicStream> stream)
-                    -> asio::awaitable<void> {
+            -> asio::awaitable<void> {
                     co_await protos::http::http3codec::session_handler::handle_unidirectional_stream(
                         std::move(stream), session_ctx);
                 });
 
             quic_server_->set_stream_handler(
-                [this, session_ctx](std::shared_ptr<network::quic::QuicStream> stream)
-                    -> asio::awaitable<void> {
+                [this](std::shared_ptr<network::quic::QuicStream> stream)
+            -> asio::awaitable<void> {
                     if (!stream) co_return;
                     if ((stream->stream_id() & 0x03) == 0x00) {
                         if (server_.pool().worker_count() == 0) {
@@ -191,7 +193,7 @@ namespace wavex::server {
                 });
 
             quic_server_->start();
-            wavex::log::info("[WaveX] ComposedHttpServer QUIC/UDP listener active on {}:{}", address_, port_);
+            log::info("[WaveX] ComposedHttpServer QUIC/UDP listener active on {}:{}", address_, port_);
 
             server_.run();
 
@@ -227,138 +229,167 @@ namespace wavex::server {
         template<typename Handler>
         ComposedHttpServer &get(const std::string_view pattern, Handler &&h) {
             auto h_copy = h;
-            h2_router_->get(pattern, [h_copy](Http2Router::RequestType &req, Http2Router::ResponseType &res) -> asio::awaitable<void> {
-                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h_copy), Http2Router::RequestType &, Http2Router::ResponseType &>) {
+            h2_router_->get(pattern, [h_copy](Http2Router::RequestType &req,
+                                              Http2Router::ResponseType &res) -> asio::awaitable<void> {
+                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h_copy), Http2Router::RequestType &,
+                    Http2Router::ResponseType &>) {
                     co_await h_copy(req, res);
                 } else {
                     h_copy(req, res);
                     co_return;
                 }
             });
-            h3_router_->get(pattern, [h = std::forward<Handler>(h)](Http3Router::RequestType &req, Http3Router::ResponseType &res) -> asio::awaitable<void> {
-                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h), Http3Router::RequestType &, Http3Router::ResponseType &>) {
-                    co_await h(req, res);
-                } else {
-                    h(req, res);
-                    co_return;
-                }
-            });
+            h3_router_->get(pattern, [h = std::forward<Handler>(h)](Http3Router::RequestType &req,
+                                                                    Http3Router::ResponseType &res) -> asio::awaitable<
+                        void> {
+                                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h),
+                                    Http3Router::RequestType &, Http3Router::ResponseType &>) {
+                                    co_await h(req, res);
+                                } else {
+                                    h(req, res);
+                                    co_return;
+                                }
+                            });
             return *this;
         }
 
         template<typename Handler>
         ComposedHttpServer &post(const std::string_view pattern, Handler &&h) {
             auto h_copy = h;
-            h2_router_->post(pattern, [h_copy](Http2Router::RequestType &req, Http2Router::ResponseType &res) -> asio::awaitable<void> {
-                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h_copy), Http2Router::RequestType &, Http2Router::ResponseType &>) {
+            h2_router_->post(pattern, [h_copy](Http2Router::RequestType &req,
+                                               Http2Router::ResponseType &res) -> asio::awaitable<void> {
+                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h_copy), Http2Router::RequestType &,
+                    Http2Router::ResponseType &>) {
                     co_await h_copy(req, res);
                 } else {
                     h_copy(req, res);
                     co_return;
                 }
             });
-            h3_router_->post(pattern, [h = std::forward<Handler>(h)](Http3Router::RequestType &req, Http3Router::ResponseType &res) -> asio::awaitable<void> {
-                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h), Http3Router::RequestType &, Http3Router::ResponseType &>) {
-                    co_await h(req, res);
-                } else {
-                    h(req, res);
-                    co_return;
-                }
-            });
+            h3_router_->post(
+                pattern, [h = std::forward<Handler>(h)](Http3Router::RequestType &req,
+                                                        Http3Router::ResponseType &res) -> asio::awaitable<void> {
+                    if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h), Http3Router::RequestType &,
+                        Http3Router::ResponseType &>) {
+                        co_await h(req, res);
+                    } else {
+                        h(req, res);
+                        co_return;
+                    }
+                });
             return *this;
         }
 
         template<typename Handler>
         ComposedHttpServer &put(const std::string_view pattern, Handler &&h) {
             auto h_copy = h;
-            h2_router_->put(pattern, [h_copy](Http2Router::RequestType &req, Http2Router::ResponseType &res) -> asio::awaitable<void> {
-                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h_copy), Http2Router::RequestType &, Http2Router::ResponseType &>) {
+            h2_router_->put(pattern, [h_copy](Http2Router::RequestType &req,
+                                              Http2Router::ResponseType &res) -> asio::awaitable<void> {
+                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h_copy), Http2Router::RequestType &,
+                    Http2Router::ResponseType &>) {
                     co_await h_copy(req, res);
                 } else {
                     h_copy(req, res);
                     co_return;
                 }
             });
-            h3_router_->put(pattern, [h = std::forward<Handler>(h)](Http3Router::RequestType &req, Http3Router::ResponseType &res) -> asio::awaitable<void> {
-                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h), Http3Router::RequestType &, Http3Router::ResponseType &>) {
-                    co_await h(req, res);
-                } else {
-                    h(req, res);
-                    co_return;
-                }
-            });
+            h3_router_->put(pattern, [h = std::forward<Handler>(h)](Http3Router::RequestType &req,
+                                                                    Http3Router::ResponseType &res) -> asio::awaitable<
+                        void> {
+                                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h),
+                                    Http3Router::RequestType &, Http3Router::ResponseType &>) {
+                                    co_await h(req, res);
+                                } else {
+                                    h(req, res);
+                                    co_return;
+                                }
+                            });
             return *this;
         }
 
         template<typename Handler>
         ComposedHttpServer &del(const std::string_view pattern, Handler &&h) {
             auto h_copy = h;
-            h2_router_->del(pattern, [h_copy](Http2Router::RequestType &req, Http2Router::ResponseType &res) -> asio::awaitable<void> {
-                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h_copy), Http2Router::RequestType &, Http2Router::ResponseType &>) {
+            h2_router_->del(pattern, [h_copy](Http2Router::RequestType &req,
+                                              Http2Router::ResponseType &res) -> asio::awaitable<void> {
+                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h_copy), Http2Router::RequestType &,
+                    Http2Router::ResponseType &>) {
                     co_await h_copy(req, res);
                 } else {
                     h_copy(req, res);
                     co_return;
                 }
             });
-            h3_router_->del(pattern, [h = std::forward<Handler>(h)](Http3Router::RequestType &req, Http3Router::ResponseType &res) -> asio::awaitable<void> {
-                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h), Http3Router::RequestType &, Http3Router::ResponseType &>) {
-                    co_await h(req, res);
-                } else {
-                    h(req, res);
-                    co_return;
-                }
-            });
+            h3_router_->del(pattern, [h = std::forward<Handler>(h)](Http3Router::RequestType &req,
+                                                                    Http3Router::ResponseType &res) -> asio::awaitable<
+                        void> {
+                                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h),
+                                    Http3Router::RequestType &, Http3Router::ResponseType &>) {
+                                    co_await h(req, res);
+                                } else {
+                                    h(req, res);
+                                    co_return;
+                                }
+                            });
             return *this;
         }
 
         template<typename Handler>
         ComposedHttpServer &patch(const std::string_view pattern, Handler &&h) {
             auto h_copy = h;
-            h2_router_->patch(pattern, [h_copy](Http2Router::RequestType &req, Http2Router::ResponseType &res) -> asio::awaitable<void> {
-                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h_copy), Http2Router::RequestType &, Http2Router::ResponseType &>) {
+            h2_router_->patch(pattern, [h_copy](Http2Router::RequestType &req,
+                                                Http2Router::ResponseType &res) -> asio::awaitable<void> {
+                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h_copy), Http2Router::RequestType &,
+                    Http2Router::ResponseType &>) {
                     co_await h_copy(req, res);
                 } else {
                     h_copy(req, res);
                     co_return;
                 }
             });
-            h3_router_->patch(pattern, [h = std::forward<Handler>(h)](Http3Router::RequestType &req, Http3Router::ResponseType &res) -> asio::awaitable<void> {
-                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h), Http3Router::RequestType &, Http3Router::ResponseType &>) {
-                    co_await h(req, res);
-                } else {
-                    h(req, res);
-                    co_return;
-                }
-            });
+            h3_router_->patch(
+                pattern, [h = std::forward<Handler>(h)](Http3Router::RequestType &req,
+                                                        Http3Router::ResponseType &res) -> asio::awaitable<void> {
+                    if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h), Http3Router::RequestType &,
+                        Http3Router::ResponseType &>) {
+                        co_await h(req, res);
+                    } else {
+                        h(req, res);
+                        co_return;
+                    }
+                });
             return *this;
         }
 
         template<typename Handler>
         ComposedHttpServer &query(const std::string_view pattern, Handler &&h) {
             auto h_copy = h;
-            h2_router_->query(pattern, [h_copy](Http2Router::RequestType &req, Http2Router::ResponseType &res) -> asio::awaitable<void> {
-                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h_copy), Http2Router::RequestType &, Http2Router::ResponseType &>) {
+            h2_router_->query(pattern, [h_copy](Http2Router::RequestType &req,
+                                                Http2Router::ResponseType &res) -> asio::awaitable<void> {
+                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h_copy), Http2Router::RequestType &,
+                    Http2Router::ResponseType &>) {
                     co_await h_copy(req, res);
                 } else {
                     h_copy(req, res);
                     co_return;
                 }
             });
-            h3_router_->query(pattern, [h = std::forward<Handler>(h)](Http3Router::RequestType &req, Http3Router::ResponseType &res) -> asio::awaitable<void> {
-                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h), Http3Router::RequestType &, Http3Router::ResponseType &>) {
-                    co_await h(req, res);
-                } else {
-                    h(req, res);
-                    co_return;
-                }
-            });
+            h3_router_->query(
+                pattern, [h = std::forward<Handler>(h)](Http3Router::RequestType &req,
+                                                        Http3Router::ResponseType &res) -> asio::awaitable<void> {
+                    if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h), Http3Router::RequestType &,
+                        Http3Router::ResponseType &>) {
+                        co_await h(req, res);
+                    } else {
+                        h(req, res);
+                        co_return;
+                    }
+                });
             return *this;
         }
     };
 
     using composed_http_server = ComposedHttpServer;
-
 } // namespace wavex::server
 
 #endif // WAVEX_HAS_SSL

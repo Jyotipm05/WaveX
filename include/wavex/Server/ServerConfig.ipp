@@ -18,7 +18,6 @@
 #include <wavex/Utils/BinaryFile.hpp>
 
 namespace wavex::server {
-
     template<typename Codec, typename RouterType>
     void Server<Codec, RouterType>::enable_signal_handling(bool enable) noexcept {
         enable_signals_ = enable;
@@ -161,15 +160,15 @@ namespace wavex::server {
     void Server<Codec, RouterType>::set_not_found(std::string body,
                                                   std::string content_type) {
         server_not_found_handler_ =
-            [b = std::move(body), ct = std::move(content_type)](
-                RequestType &, ResponseType &res) -> asio::awaitable<void> {
-                res.status(404);
-                if (!ct.empty()) {
-                    res.set("Content-Type", ct);
-                }
-                res.send(b);
-                co_return;
-            };
+                [b = std::move(body), ct = std::move(content_type)](
+            RequestType &, ResponseType &res) -> asio::awaitable<void> {
+                    res.status(404);
+                    if (!ct.empty()) {
+                        res.set("Content-Type", ct);
+                    }
+                    res.send(b);
+                    co_return;
+                };
     }
 
     template<typename Codec, typename RouterType>
@@ -191,5 +190,4 @@ namespace wavex::server {
     bool Server<Codec, RouterType>::is_acceptor_open() const noexcept {
         return acceptor_.is_open();
     }
-
 } // namespace wavex::server

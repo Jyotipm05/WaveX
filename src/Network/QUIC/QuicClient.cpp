@@ -138,7 +138,7 @@ namespace wavex::network::quic {
             asio::buffer(recv_buf_), server_endpoint_,
             [this](const std::error_code ec, const std::size_t bytes_recvd) {
                 if (ec || bytes_recvd == 0) return;
-                wavex::log::info("[QuicClient] Received {} bytes from server", bytes_recvd);
+                wavex::log::debug("[QuicClient] Received {} bytes from server", bytes_recvd);
                 const std::string_view datagram(reinterpret_cast<const char *>(recv_buf_.data()), bytes_recvd);
                 if (connection_) {
                     connection_->handle_datagram(datagram);
@@ -162,7 +162,7 @@ namespace wavex::network::quic {
                         if (ec && ec != asio::error::operation_aborted) {
                             wavex::log::warn("[QuicClient] send error: {}", ec.message());
                         } else {
-                            wavex::log::info("[QuicClient] Sent {} bytes to server", bytes_sent);
+                            wavex::log::debug("[QuicClient] Sent {} bytes to server", bytes_sent);
                         }
                     }
                 );

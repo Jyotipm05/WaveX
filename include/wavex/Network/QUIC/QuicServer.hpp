@@ -9,7 +9,6 @@
 
 #include <array>
 #include <atomic>
-#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -26,7 +25,6 @@
 #include <wavex/Network/QUIC/QuicStream.hpp>
 
 namespace wavex::network::quic {
-
     /**
      * @class QuicServer
      * @brief Asynchronous UDP server hosting QUIC connections and dispatching streams.
@@ -40,9 +38,10 @@ namespace wavex::network::quic {
     private:
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
         asio::io_context &io_;
+        SSL_CTX *shared_ssl_ctx_{nullptr};
         asio::ip::udp::socket socket_;
         asio::ip::udp::endpoint sender_endpoint_{};
-        std::unordered_map<ConnectionId, std::shared_ptr<QuicConnection>> connections_{};
+        std::unordered_map<ConnectionId, std::shared_ptr<QuicConnection> > connections_{};
         mutable std::mutex mtx_{};
         std::array<uint8_t, 65536> recv_buf_{};
         StreamHandler stream_handler_{};
@@ -55,7 +54,9 @@ namespace wavex::network::quic {
     public:
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         QuicServer(asio::io_context &io, uint16_t port);
+
         QuicServer(asio::io_context &io, std::string_view host, uint16_t port);
+
         ~QuicServer();
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
@@ -73,19 +74,21 @@ namespace wavex::network::quic {
             std::lock_guard lock(mtx_);
             tls_cert_file_ = std::move(cert_file);
             tls_key_file_ = std::move(key_file);
+            init_shared_ssl_ctx();
         }
 
         void start();
+
         void stop();
 
-        [[nodiscard]] bool is_open() const noexcept { return socket_.is_open(); }
+        [[nodiscard]] auto is_open() const noexcept -> bool { return socket_.is_open(); }
 
-        [[nodiscard]] std::size_t connection_count() const noexcept {
+        [[nodiscard]] auto connection_count() const noexcept -> std::size_t {
             std::lock_guard lock(mtx_);
             return connections_.size();
         }
 
-        [[nodiscard]] asio::ip::udp::endpoint local_endpoint() const {
+        [[nodiscard]] auto local_endpoint() const -> asio::ip::udp::endpoint {
             asio::error_code ec;
             auto ep = socket_.local_endpoint(ec);
             if (ec) return {};
@@ -95,17 +98,19 @@ namespace wavex::network::quic {
             return ep;
         }
 
-        [[nodiscard]] uint16_t local_port() const noexcept {
+        [[nodiscard]] auto local_port() const noexcept -> uint16_t {
             asio::error_code ec;
-            auto ep = socket_.local_endpoint(ec);
+            const auto ep = socket_.local_endpoint(ec);
             return ec ? 0 : ep.port();
         }
 
     private:
+        void init_shared_ssl_ctx();
+
         void do_receive();
+
         void flush_outbound(const std::shared_ptr<QuicConnection> &conn);
     };
-
 } // namespace wavex::network::quic
 
 #endif // WAVEX_HAS_SSL

@@ -663,6 +663,155 @@ void test_http3_body_truncation_prevention_c1() {
     std::cout << "  [PASS] C1: Request body truncation properly prevented.\n";
 }
 
+void test_http3_malformed_request_rejection_c8() {
+    std::cout << "[Test HTTP/3] C8: Malformed request rejection per RFC 9114 §4.3 & §4.2...\n";
+
+    // 1. Valid request
+    {
+        std::string fields;
+        fields.push_back('\0'); // RIC = 0
+        fields.push_back('\0'); // Delta base = 0
+        qpk::encoder::encode_indexed_static(fields, 17); // :method GET
+        qpk::encoder::encode_indexed_static(fields, 1);  // :path /
+        qpk::encoder::encode_indexed_static(fields, 23); // :scheme https
+        std::string frame = h3::encoder::encode_frame(frame_type::HEADERS, fields);
+
+        h3::request req;
+        std::size_t consumed = 0;
+        qpk::dynamic_table dt;
+        auto res = http3codec::parse_request(frame, req, consumed, dt);
+        assert(res == http3codec::result::success);
+        assert(req.method_type == method::GET);
+        assert(req.target == "/");
+    }
+
+    // 2. Missing :path (must fail per RFC 9114 §4.3)
+    {
+        std::string fields;
+        fields.push_back('\0');
+        fields.push_back('\0');
+        qpk::encoder::encode_indexed_static(fields, 17); // :method GET
+        qpk::encoder::encode_indexed_static(fields, 23); // :scheme https
+        std::string frame = h3::encoder::encode_frame(frame_type::HEADERS, fields);
+
+        h3::request req;
+        std::size_t consumed = 0;
+        qpk::dynamic_table dt;
+        auto res = http3codec::parse_request(frame, req, consumed, dt);
+        assert(res == http3codec::result::error);
+    }
+
+    // 3. Duplicate :method (must fail per RFC 9114 §4.3)
+    {
+        std::string fields;
+        fields.push_back('\0');
+        fields.push_back('\0');
+        qpk::encoder::encode_indexed_static(fields, 17); // :method GET
+        qpk::encoder::encode_indexed_static(fields, 20); // :method POST (duplicate!)
+        qpk::encoder::encode_indexed_static(fields, 1);  // :path /
+        std::string frame = h3::encoder::encode_frame(frame_type::HEADERS, fields);
+
+        h3::request req;
+        std::size_t consumed = 0;
+        qpk::dynamic_table dt;
+        auto res = http3codec::parse_request(frame, req, consumed, dt);
+        assert(res == http3codec::result::error);
+    }
+
+    // 4. Uppercase header name (must fail per RFC 9114 §4.2)
+    {
+        std::string fields;
+        fields.push_back('\0');
+        fields.push_back('\0');
+        qpk::encoder::encode_indexed_static(fields, 17); // :method GET
+        qpk::encoder::encode_indexed_static(fields, 1);  // :path /
+        qpk::encoder::encode_literal_new_name(fields, "X-Custom-Header", "value"); // Uppercase!
+        std::string frame = h3::encoder::encode_frame(frame_type::HEADERS, fields);
+
+        h3::request req;
+        std::size_t consumed = 0;
+        qpk::dynamic_table dt;
+        auto res = http3codec::parse_request(frame, req, consumed, dt);
+        assert(res == http3codec::result::error);
+    }
+
+    // 5. Prohibited connection header (must fail per RFC 9114 §4.2)
+    {
+        std::string fields;
+        fields.push_back('\0');
+        fields.push_back('\0');
+        qpk::encoder::encode_indexed_static(fields, 17); // :method GET
+        qpk::encoder::encode_indexed_static(fields, 1);  // :path /
+        qpk::encoder::encode_literal_new_name(fields, "connection", "close"); // Prohibited!
+        std::string frame = h3::encoder::encode_frame(frame_type::HEADERS, fields);
+
+        h3::request req;
+        std::size_t consumed = 0;
+        qpk::dynamic_table dt;
+        auto res = http3codec::parse_request(frame, req, consumed, dt);
+        assert(res == http3codec::result::error);
+    }
+
+    // 6. Pseudo-header after regular header (must fail per RFC 9114 §4.3)
+    {
+        std::string fields;
+        fields.push_back('\0');
+        fields.push_back('\0');
+        qpk::encoder::encode_indexed_static(fields, 17); // :method GET
+        qpk::encoder::encode_literal_new_name(fields, "x-header", "value"); // Regular header
+        qpk::encoder::encode_indexed_static(fields, 1);  // :path / (after regular header!)
+        std::string frame = h3::encoder::encode_frame(frame_type::HEADERS, fields);
+
+        h3::request req;
+        std::size_t consumed = 0;
+        qpk::dynamic_table dt;
+        auto res = http3codec::parse_request(frame, req, consumed, dt);
+        assert(res == http3codec::result::error);
+    }
+
+    std::cout << "  [PASS] C8: Malformed request rejection passed.\n";
+}
+
+void test_http3_qpack_huffman_literal_names_c5() {
+    std::cout << "[Test HTTP/3] Issue C5: QPACK Huffman-encoded literal names decoding...\n";
+
+    // 1. Test decode_header_block with Huffman-encoded literal name (RFC 9204 §4.5.4)
+    // RFC 7541 C.4.1: "custom-key" Huffman-encoded is 8 bytes: 25 a8 49 e9 5b 18 b4 7f
+    std::string fields;
+    fields.push_back('\0'); // RIC = 0
+    fields.push_back('\0'); // Base = 0
+
+    // Add :method GET (static 17) and :path / (static 1)
+    qpk::encoder::encode_indexed_static(fields, 17);
+    qpk::encoder::encode_indexed_static(fields, 1);
+
+    // Literal Field Line with Literal Name (001 N H Name_Len(3+))
+    // RFC 7541 vector: "www.example.com" (12 bytes) -> \xf1\xe3\xc2\xe5\xf2\x3a\x6b\xa0\xab\x90\xf4\xff
+    // N=0, H=1 -> prefix byte = 0x28 | 7 = 0x2f, next byte = 12 - 7 = 5
+    fields.push_back(static_cast<char>(0x2f));
+    fields.push_back(static_cast<char>(0x05));
+    const char huff_name[] = "\xf1\xe3\xc2\xe5\xf2\x3a\x6b\xa0\xab\x90\xf4\xff";
+    fields.append(huff_name, 12);
+
+    // Value string: H=0, length 6: "custom"
+    fields.push_back(static_cast<char>(6));
+    fields.append("custom");
+
+    std::string frame = h3::encoder::encode_frame(frame_type::HEADERS, fields);
+    h3::request req;
+    std::size_t consumed = 0;
+    qpk::dynamic_table dt;
+    auto res = http3codec::parse_request(frame, req, consumed, dt);
+    assert(res == http3codec::result::success);
+    assert(req.target == "/");
+    assert(req.method_type == method::GET);
+    assert(req.headers_storage.size() == 1);
+    assert(req.headers_storage[0].first == "www.example.com");
+    assert(req.headers_storage[0].second == "custom");
+
+    std::cout << "  [PASS] C5: QPACK Huffman literal names decoded successfully.\n";
+}
+
 int main() {
     std::cout << "=== Running WaveX HTTP/3 Codec Tests ===\n";
     try {
@@ -678,6 +827,8 @@ int main() {
         test_http3_unidirectional_control_and_qpack_streams();
         test_http3_server_acceptor_guard();
         test_http3_body_truncation_prevention_c1();
+        test_http3_malformed_request_rejection_c8();
+        test_http3_qpack_huffman_literal_names_c5();
         std::cout << "=== All HTTP/3 Tests PASSED ===\n";
         return 0;
     } catch (const std::exception &ex) {

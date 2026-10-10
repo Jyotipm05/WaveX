@@ -496,7 +496,7 @@ namespace wavex::protos::http {
          * @param dest_path Target file path.
          * @return True if saved successfully, false otherwise.
          */
-        bool save_body_to_file(const std::string &dest_path) const {
+        [[nodiscard]] bool save_body_to_file(const std::string &dest_path) const {
             return utils::BinaryFile::write_all(dest_path, body_impl());
         }
 

@@ -98,254 +98,246 @@ namespace wavex::protos {
 // ─── HTTP/1.x Specialization ─────────────────────────────────────────────────
 #include <wavex/protos/http/http1codec.hpp>
 
-namespace wavex::protos {
-    template<>
-    struct protocol_traits<http::http1codec> {
-        struct connection_context {
-        };
+template<>
+struct wavex::protos::protocol_traits<wavex::protos::http::http1codec> {
+    struct connection_context {
+    };
 
-        static constexpr bool has_connection_preface = false;
-        static constexpr bool has_tcp_transport = true;
-        static constexpr bool has_quic_transport = false;
+    static constexpr bool has_connection_preface = false;
+    static constexpr bool has_tcp_transport = true;
+    static constexpr bool has_quic_transport = false;
 
-        template<typename Stream>
-        static asio::awaitable<bool> on_connection_start(Stream &, std::string &) {
-            co_return true;
+    template<typename Stream>
+    static asio::awaitable<bool> on_connection_start(Stream &, std::string &) {
+        co_return true;
+    }
+
+    template<typename Request>
+    static bool keep_alive(const Request &req, unsigned request_count, unsigned max_requests) {
+        return req.should_keep_alive() && (request_count < max_requests);
+    }
+
+    template<typename Request, typename Response>
+    static void prepare_response(const Request &, Response &res, bool keep,
+                                 const unsigned timeout_sec, unsigned remaining,
+                                 const unsigned short alt_svc_port = 0) {
+        if (keep) {
+            res.set("Connection", "keep-alive");
+            res.set("Keep-Alive",
+                    "timeout=" + std::to_string(timeout_sec) + ", max=" + std::to_string(remaining));
+        } else {
+            res.set("Connection", "close");
         }
-
-        template<typename Request>
-        static bool keep_alive(const Request &req, unsigned request_count, unsigned max_requests) {
-            return req.should_keep_alive() && (request_count < max_requests);
+        if (alt_svc_port > 0 && !res.header("alt-svc")) {
+            const auto port_str = std::to_string(alt_svc_port);
+            res.set("alt-svc", "h3=\":" + port_str + "\"; ma=2592000,h3-29=\":" + port_str + "\"; ma=2592000");
         }
-
-        template<typename Request, typename Response>
-        static void prepare_response(const Request &, Response &res, bool keep,
-                                     unsigned timeout_sec, unsigned remaining,
-                                     unsigned short alt_svc_port = 0) {
-            if (keep) {
-                res.set("Connection", "keep-alive");
-                res.set("Keep-Alive",
-                        "timeout=" + std::to_string(timeout_sec) + ", max=" + std::to_string(remaining));
-            } else {
-                res.set("Connection", "close");
-            }
-            if (alt_svc_port > 0 && !res.header("alt-svc")) {
-                const auto port_str = std::to_string(alt_svc_port);
-                res.set("alt-svc", "h3=\":" + port_str + "\"; ma=2592000,h3-29=\":" + port_str + "\"; ma=2592000");
-            }
-        }
+    }
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
-        static void configure_alpn(SSL_CTX *ctx) {
-            SSL_CTX_set_alpn_select_cb(
-                ctx,
-                [](SSL *, const unsigned char **out, unsigned char *outLen,
-                   const unsigned char *in, unsigned int inLen, void *) -> int {
-                    const unsigned char *p = in;
-                    while (p < in + inLen) {
-                        const unsigned char len = *p++;
-                        if (len == 8 && std::memcmp(p, "http/1.1", 8) == 0) {
-                            *out = p;
-                            *outLen = 8;
-                            return SSL_TLSEXT_ERR_OK;
-                        }
-                        p += len;
+    static void configure_alpn(SSL_CTX *ctx) {
+        SSL_CTX_set_alpn_select_cb(
+            ctx,
+            [](SSL *, const unsigned char **out, unsigned char *outLen,
+               const unsigned char *in, unsigned int inLen, void *) -> int {
+                const unsigned char *p = in;
+                while (p < in + inLen) {
+                    const unsigned char len = *p++;
+                    if (len == 8 && std::memcmp(p, "http/1.1", 8) == 0) {
+                        *out = p;
+                        *outLen = 8;
+                        return SSL_TLSEXT_ERR_OK;
                     }
-                    return SSL_TLSEXT_ERR_NOACK;
-                },
-                nullptr);
-        }
+                    p += len;
+                }
+                return SSL_TLSEXT_ERR_NOACK;
+            },
+            nullptr);
+    }
 #endif
-    };
-} // namespace wavex::protos
+}; // namespace wavex::protos
 
 // ─── HTTP/2 Specialization ───────────────────────────────────────────────────
 #include <wavex/protos/http/http2codec.hpp>
 
-namespace wavex::protos {
-    template<>
-    struct protocol_traits<http::http2codec> {
-        using connection_context = http::http2::connection_context;
+template<>
+struct wavex::protos::protocol_traits<wavex::protos::http::http2codec> {
+    using connection_context = http::http2::connection_context;
 
-        static constexpr bool has_connection_preface = true;
-        static constexpr bool has_tcp_transport = true;
-        static constexpr bool has_quic_transport = false;
+    static constexpr bool has_connection_preface = true;
+    static constexpr bool has_tcp_transport = true;
+    static constexpr bool has_quic_transport = false;
 
-        /**
+    /**
          * @brief RFC 7540 §3.5: validate client preface (24-byte PRI), reply with
          *        server SETTINGS + SETTINGS ACK, and strip the preface from stream_buf
          *        so the frame parser only receives raw frames.
          */
-        template<typename Stream>
-        static asio::awaitable<bool> on_connection_start(Stream &stream, std::string &stream_buf) {
-            namespace h2 = wavex::protos::http::http2;
-            while (stream_buf.size() < h2::CONNECTION_PREFACE.size() + 9) {
-                char buf[4096];
-                auto [ec, n] = co_await stream.async_read_some(
-                    asio::buffer(buf), asio::as_tuple(asio::use_awaitable));
-                if (ec || n == 0) co_return false;
-                stream_buf.append(buf, n);
-            }
-            if (!stream_buf.starts_with(h2::CONNECTION_PREFACE)) co_return false;
-
-            const std::string server_settings = h2::encoder::serialize_settings({});
-            const std::string settings_ack = h2::encoder::serialize_settings_ack();
-            std::string preface_response;
-            preface_response.reserve(server_settings.size() + settings_ack.size());
-            preface_response += server_settings;
-            preface_response += settings_ack;
-
-            asio::error_code write_ec;
-            co_await asio::async_write(
-                stream, asio::buffer(preface_response),
-                asio::redirect_error(asio::use_awaitable, write_ec));
-            if (write_ec) co_return false;
-
-            stream_buf.erase(0, h2::CONNECTION_PREFACE.size());
-            co_return true;
+    template<typename Stream>
+    static asio::awaitable<bool> on_connection_start(Stream &stream, std::string &stream_buf) {
+        namespace h2 = wavex::protos::http::http2;
+        while (stream_buf.size() < h2::CONNECTION_PREFACE.size() + 9) {
+            char buf[4096];
+            auto [ec, n] = co_await stream.async_read_some(
+                asio::buffer(buf), asio::as_tuple(asio::use_awaitable));
+            if (ec || n == 0) co_return false;
+            stream_buf.append(buf, n);
         }
+        if (!stream_buf.starts_with(h2::CONNECTION_PREFACE)) co_return false;
 
-        /// HTTP/2 connections are always persistent and multiplexed (RFC 7540 §8.1.2.2).
-        template<typename Request>
-        static bool keep_alive(const Request &, unsigned, unsigned) {
-            return true;
-        }
+        const std::string server_settings = h2::encoder::serialize_settings({});
+        const std::string settings_ack = h2::encoder::serialize_settings_ack();
+        std::string preface_response;
+        preface_response.reserve(server_settings.size() + settings_ack.size());
+        preface_response += server_settings;
+        preface_response += settings_ack;
 
-        /// RFC 7540 §8.1.2.2 forbids Connection/Keep-Alive headers in HTTP/2.
-        template<typename Request, typename Response>
-        static void prepare_response(const Request &, Response &res, bool, unsigned, unsigned,
-                                     unsigned short alt_svc_port = 0) {
-            if (alt_svc_port > 0 && !res.header("alt-svc")) {
-                const auto port_str = std::to_string(alt_svc_port);
-                res.set("alt-svc", "h3=\":" + port_str + "\"; ma=2592000,h3-29=\":" + port_str + "\"; ma=2592000");
-            }
+        asio::error_code write_ec;
+        co_await asio::async_write(
+            stream, asio::buffer(preface_response),
+            asio::redirect_error(asio::use_awaitable, write_ec));
+        if (write_ec) co_return false;
+
+        stream_buf.erase(0, h2::CONNECTION_PREFACE.size());
+        co_return true;
+    }
+
+    /// HTTP/2 connections are always persistent and multiplexed (RFC 7540 §8.1.2.2).
+    template<typename Request>
+    static bool keep_alive(const Request &, unsigned, unsigned) {
+        return true;
+    }
+
+    /// RFC 7540 §8.1.2.2 forbids Connection/Keep-Alive headers in HTTP/2.
+    template<typename Request, typename Response>
+    static void prepare_response(const Request &, Response &res, bool, unsigned, unsigned,
+                                 unsigned short alt_svc_port = 0) {
+        if (alt_svc_port > 0 && !res.header("alt-svc")) {
+            const auto port_str = std::to_string(alt_svc_port);
+            res.set("alt-svc", "h3=\":" + port_str + "\"; ma=2592000,h3-29=\":" + port_str + "\"; ma=2592000");
         }
+    }
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
-        static void configure_alpn(SSL_CTX *ctx) {
-            SSL_CTX_set_alpn_select_cb(
-                ctx,
-                [](SSL *, const unsigned char **out, unsigned char *outLen,
-                   const unsigned char *in, unsigned int inLen, void *) -> int {
-                    const unsigned char *p = in;
-                    const unsigned char *http11_start = nullptr;
-                    while (p < in + inLen) {
-                        const unsigned char len = *p++;
-                        if (len == 2 && p[0] == 'h' && p[1] == '2') {
-                            *out = p;
-                            *outLen = 2;
-                            return SSL_TLSEXT_ERR_OK;
-                        }
-                        if (len == 8 && std::memcmp(p, "http/1.1", 8) == 0) {
-                            http11_start = p;
-                        }
-                        p += len;
-                    }
-                    if (http11_start) {
-                        *out = http11_start;
-                        *outLen = 8;
+    static void configure_alpn(SSL_CTX *ctx) {
+        SSL_CTX_set_alpn_select_cb(
+            ctx,
+            [](SSL *, const unsigned char **out, unsigned char *outLen,
+               const unsigned char *in, unsigned int inLen, void *) -> int {
+                const unsigned char *p = in;
+                const unsigned char *http11_start = nullptr;
+                while (p < in + inLen) {
+                    const unsigned char len = *p++;
+                    if (len == 2 && p[0] == 'h' && p[1] == '2') {
+                        *out = p;
+                        *outLen = 2;
                         return SSL_TLSEXT_ERR_OK;
                     }
-                    return SSL_TLSEXT_ERR_ALERT_FATAL;
-                },
-                nullptr);
-        }
+                    if (len == 8 && std::memcmp(p, "http/1.1", 8) == 0) {
+                        http11_start = p;
+                    }
+                    p += len;
+                }
+                if (http11_start) {
+                    *out = http11_start;
+                    *outLen = 8;
+                    return SSL_TLSEXT_ERR_OK;
+                }
+                return SSL_TLSEXT_ERR_ALERT_FATAL;
+            },
+            nullptr);
+    }
 #endif
-    };
-
-} // namespace wavex::protos
+}; // namespace wavex::protos
 
 // ─── HTTP/3 Specialization ───────────────────────────────────────────────────
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
 #include <wavex/protos/http/http3codec.hpp>
 
-namespace wavex::protos {
-    template<>
-    struct protocol_traits<http::http3codec> {
-        using connection_context = http::http3::connection_context;
+template<>
+struct wavex::protos::protocol_traits<wavex::protos::http::http3codec> {
+    using connection_context = http::http3::connection_context;
 
-        // RFC 9114: HTTP/3 does not define a connection preface on request streams.
-        static constexpr bool has_connection_preface = false;
+    // RFC 9114: HTTP/3 does not define a connection preface on request streams.
+    static constexpr bool has_connection_preface = false;
 
-        // RFC 9114: HTTP/3 is defined exclusively over QUIC (UDP) and has no TCP framing.
-        static constexpr bool has_tcp_transport = false;
+    // RFC 9114: HTTP/3 is defined exclusively over QUIC (UDP) and has no TCP framing.
+    static constexpr bool has_tcp_transport = false;
 
-        // HTTP/3 requires a QUIC/UDP listener alongside the TCP/TLS listener.
-        static constexpr bool has_quic_transport = true;
+    // HTTP/3 requires a QUIC/UDP listener alongside the TCP/TLS listener.
+    static constexpr bool has_quic_transport = true;
 
-        template<typename Stream>
-        static asio::awaitable<bool> on_connection_start(Stream &, std::string &) {
-            co_return true;
-        }
+    template<typename Stream>
+    static asio::awaitable<bool> on_connection_start(Stream &, std::string &) {
+        co_return true;
+    }
 
-        template<typename Request>
-        static bool keep_alive(const Request &req, unsigned, unsigned) {
-            if constexpr (requires { req.version_major(); }) {
-                if (req.version_major() == 3) {
-                    return false; // In HTTP/3, each QUIC stream carries exactly one request/response
-                }
+    template<typename Request>
+    static bool keep_alive(const Request &req, unsigned, unsigned) {
+        if constexpr (requires { req.version_major(); }) {
+            if (req.version_major() == 3) {
+                return false; // In HTTP/3, each QUIC stream carries exactly one request/response
             }
-            if constexpr (requires { req.should_keep_alive(); }) {
-                return req.should_keep_alive();
-            }
-            return true;
         }
-
-        template<typename Request, typename Response>
-        static void prepare_response(const Request &req, Response &res, bool keep_alive, unsigned timeout_sec, unsigned max_req,
-                                     unsigned short = 0) {
-            if constexpr (requires { req.version_major(); }) {
-                if (req.version_major() == 1) {
-                    res.set_keep_alive(keep_alive, timeout_sec, max_req);
-                    return;
-                }
-            }
-            // RFC 9114 forbids Connection and Keep-Alive headers in native HTTP/3
+        if constexpr (requires { req.should_keep_alive(); }) {
+            return req.should_keep_alive();
         }
+        return true;
+    }
 
-        static void configure_alpn(SSL_CTX *ctx) {
-            SSL_CTX_set_alpn_select_cb(
-                ctx,
-                [](SSL *, const unsigned char **out, unsigned char *outLen,
-                   const unsigned char *in, unsigned int inLen, void *) -> int {
-                    const unsigned char *p = in;
-                    const unsigned char *h2_start = nullptr;
-                    const unsigned char *http11_start = nullptr;
+    template<typename Request, typename Response>
+    static void prepare_response(const Request &req, Response &res, bool keep_alive, unsigned timeout_sec,
+                                 unsigned max_req,
+                                 unsigned short = 0) {
+        if constexpr (requires { req.version_major(); }) {
+            if (req.version_major() == 1) {
+                res.set_keep_alive(keep_alive, timeout_sec, max_req);
+                return;
+            }
+        }
+        // RFC 9114 forbids Connection and Keep-Alive headers in native HTTP/3
+    }
 
-                    while (p < in + inLen) {
-                        const unsigned char len = *p++;
-                        if ((len == 2 && p[0] == 'h' && p[1] == '3') ||
-                            (len == 5 && std::memcmp(p, "h3-29", 5) == 0)) {
-                            *out = p;
-                            *outLen = len;
-                            return SSL_TLSEXT_ERR_OK;
-                        }
-                        if (len == 2 && p[0] == 'h' && p[1] == '2') {
-                            h2_start = p;
-                        }
-                        if (len == 8 && std::memcmp(p, "http/1.1", 8) == 0) {
-                            http11_start = p;
-                        }
-                        p += len;
-                    }
+    static void configure_alpn(SSL_CTX *ctx) {
+        SSL_CTX_set_alpn_select_cb(
+            ctx,
+            [](SSL *, const unsigned char **out, unsigned char *outLen,
+               const unsigned char *in, unsigned int inLen, void *) -> int {
+                const unsigned char *p = in;
+                const unsigned char *h2_start = nullptr;
+                const unsigned char *http11_start = nullptr;
 
-                    if (h2_start) {
-                        *out = h2_start;
-                        *outLen = 2;
+                while (p < in + inLen) {
+                    const unsigned char len = *p++;
+                    if ((len == 2 && p[0] == 'h' && p[1] == '3') ||
+                        (len == 5 && std::memcmp(p, "h3-29", 5) == 0)) {
+                        *out = p;
+                        *outLen = len;
                         return SSL_TLSEXT_ERR_OK;
                     }
-                    if (http11_start) {
-                        *out = http11_start;
-                        *outLen = 8;
-                        return SSL_TLSEXT_ERR_OK;
+                    if (len == 2 && p[0] == 'h' && p[1] == '2') {
+                        h2_start = p;
                     }
+                    if (len == 8 && std::memcmp(p, "http/1.1", 8) == 0) {
+                        http11_start = p;
+                    }
+                    p += len;
+                }
 
-                    return SSL_TLSEXT_ERR_NOACK;
-                },
-                nullptr);
-        }
-    };
+                if (h2_start) {
+                    *out = h2_start;
+                    *outLen = 2;
+                    return SSL_TLSEXT_ERR_OK;
+                }
+                if (http11_start) {
+                    *out = http11_start;
+                    *outLen = 8;
+                    return SSL_TLSEXT_ERR_OK;
+                }
 
-} // namespace wavex::protos
+                return SSL_TLSEXT_ERR_NOACK;
+            },
+            nullptr);
+    }
+}; // namespace wavex::protos
 #endif // WAVEX_HAS_SSL
-

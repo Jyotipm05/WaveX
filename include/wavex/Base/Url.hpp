@@ -43,10 +43,15 @@ namespace wavex::url {
 
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         Url() = default;
+
         ~Url() = default;
+
         Url(const Url &) = default;
+
         Url &operator=(const Url &) = default;
+
         Url(Url &&) noexcept = default;
+
         Url &operator=(Url &&) noexcept = default;
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────

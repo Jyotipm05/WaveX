@@ -52,7 +52,7 @@ namespace wavex::base {
      */
     template<typename ReqT, typename ResT>
     GenericMiddlewareFn<ReqT, ResT> keep_alive(unsigned timeout_sec = 5, unsigned max_requests = 1000) {
-        return [timeout_sec, max_requests](ReqT &req, ResT &res, Next next) -> asio::awaitable<void> {
+        return [timeout_sec, max_requests](ReqT &req, ResT &res, const Next next) -> asio::awaitable<void> {
             if (req.should_keep_alive()) {
                 res.set("Connection", "keep-alive");
                 res.set("Keep-Alive",

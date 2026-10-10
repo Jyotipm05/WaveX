@@ -15,13 +15,11 @@
 #endif
 
 #include <array>
-#include <cstdint>
 #include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
-#include <string_view>
 #include <system_error>
 #include <unordered_map>
 #include <utility>
@@ -41,7 +39,6 @@
 #include <wavex/Network/QUIC/QuicStream.hpp>
 
 namespace wavex::network::quic {
-
     /**
      * @class quic_protocol
      * @brief Protocol traits tag mimicking asio::ip::tcp / asio::ip::udp.
@@ -58,36 +55,42 @@ namespace wavex::network::quic {
 
     public:
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
-        constexpr explicit quic_protocol(int family = PF_INET) noexcept : family_(family) {}
+        constexpr explicit quic_protocol(const int family = PF_INET) noexcept : family_(family) {
+        }
+
         ~quic_protocol() = default;
 
         constexpr quic_protocol(const quic_protocol &) noexcept = default;
+
         constexpr quic_protocol &operator=(const quic_protocol &) noexcept = default;
+
         constexpr quic_protocol(quic_protocol &&) noexcept = default;
+
         constexpr quic_protocol &operator=(quic_protocol &&) noexcept = default;
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
-        [[nodiscard]] int type() const noexcept { return SOCK_DGRAM; }
-        [[nodiscard]] int protocol() const noexcept { return IPPROTO_UDP; }
-        [[nodiscard]] int family() const noexcept { return family_; }
+        [[nodiscard]] static auto type() noexcept -> int { return SOCK_DGRAM; }
+        [[nodiscard]] static auto protocol() noexcept -> int { return IPPROTO_UDP; }
+        [[nodiscard]] auto family() const noexcept -> int { return family_; }
 
         [[nodiscard]] operator asio::ip::udp() const noexcept {
             return family_ == PF_INET6 ? asio::ip::udp::v6() : asio::ip::udp::v4();
         }
 
-        [[nodiscard]] static quic_protocol v4() noexcept { return quic_protocol(PF_INET); }
-        [[nodiscard]] static quic_protocol v6() noexcept { return quic_protocol(PF_INET6); }
+        [[nodiscard]] static auto v4() noexcept -> quic_protocol { return quic_protocol(PF_INET); }
+        [[nodiscard]] static auto v6() noexcept -> quic_protocol { return quic_protocol(PF_INET6); }
 
-        friend constexpr bool operator==(const quic_protocol &p1, const quic_protocol &p2) noexcept {
+        friend constexpr auto operator==(const quic_protocol &p1, const quic_protocol &p2) noexcept -> bool {
             return p1.family_ == p2.family_;
         }
-        friend constexpr bool operator!=(const quic_protocol &p1, const quic_protocol &p2) noexcept {
+
+        friend constexpr auto operator!=(const quic_protocol &p1, const quic_protocol &p2) noexcept -> bool {
             return !(p1 == p2);
         }
     };
 
-    [[nodiscard]] inline quic_protocol v4() noexcept { return quic_protocol::v4(); }
-    [[nodiscard]] inline quic_protocol v6() noexcept { return quic_protocol::v6(); }
+    [[nodiscard]] inline auto v4() noexcept -> quic_protocol { return quic_protocol::v4(); }
+    [[nodiscard]] inline auto v6() noexcept -> quic_protocol { return quic_protocol::v6(); }
 
     /**
      * @class basic_quic_socket
@@ -103,7 +106,9 @@ namespace wavex::network::quic {
 
         struct OutboundDriver {
             virtual ~OutboundDriver() = default;
+
             virtual void send_datagram(std::string dgram, const endpoint_type &dest) = 0;
+
             virtual void close_driver() = 0;
         };
 
@@ -121,40 +126,59 @@ namespace wavex::network::quic {
     public:
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         explicit basic_quic_socket(const executor_type &ex);
+
         explicit basic_quic_socket(asio::io_context &io);
+
         basic_quic_socket(const executor_type &ex, const endpoint_type &ep);
+
         basic_quic_socket(asio::io_context &io, const endpoint_type &ep);
+
         ~basic_quic_socket();
 
         basic_quic_socket(const basic_quic_socket &) = delete;
+
         basic_quic_socket &operator=(const basic_quic_socket &) = delete;
+
         basic_quic_socket(basic_quic_socket &&) noexcept;
+
         basic_quic_socket &operator=(basic_quic_socket &&) noexcept;
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
-        [[nodiscard]] executor_type get_executor() const noexcept { return executor_; }
+        [[nodiscard]] auto get_executor() const noexcept -> executor_type { return executor_; }
         [[nodiscard]] lowest_layer_type &lowest_layer() noexcept { return *this; }
         [[nodiscard]] const lowest_layer_type &lowest_layer() const noexcept { return *this; }
 
         [[nodiscard]] bool is_open() const noexcept { return is_open_; }
+
         [[nodiscard]] uint64_t stream_id() const noexcept;
+
         [[nodiscard]] endpoint_type remote_endpoint() const;
+
         [[nodiscard]] endpoint_type remote_endpoint(std::error_code &ec) const noexcept;
+
         [[nodiscard]] endpoint_type local_endpoint() const;
+
         [[nodiscard]] endpoint_type local_endpoint(std::error_code &ec) const noexcept;
 
         void open(const protocol_type &proto = quic_protocol::v4());
+
         void open(const protocol_type &proto, std::error_code &ec) noexcept;
+
         void close();
+
         void close(std::error_code &ec) noexcept;
+
         void cancel();
+
         void cancel(std::error_code &ec) const noexcept;
+
         void shutdown(asio::ip::tcp::socket::shutdown_type what, std::error_code &ec) const noexcept;
 
         void connect(const endpoint_type &peer_ep);
+
         void connect(const endpoint_type &peer_ep, std::error_code &ec) noexcept;
 
-        template<typename ConnectToken = asio::default_completion_token_t<executor_type>>
+        template<typename ConnectToken = asio::default_completion_token_t<executor_type> >
         auto async_connect(const endpoint_type &peer_ep, ConnectToken &&token = ConnectToken{}) {
             return asio::async_initiate<ConnectToken, void(std::error_code)>(
                 [this, peer_ep]<typename T0>(T0 handler) {
@@ -185,7 +209,7 @@ namespace wavex::network::quic {
             return stream_->read_some(*first, ec);
         }
 
-        template<typename MutableBufferSequence, typename ReadToken = asio::default_completion_token_t<executor_type>>
+        template<typename MutableBufferSequence, typename ReadToken = asio::default_completion_token_t<executor_type> >
         auto async_read_some(const MutableBufferSequence &buffers, ReadToken &&token = ReadToken{}) {
             if (!stream_) {
                 return asio::async_initiate<ReadToken, void(std::error_code, std::size_t)>(
@@ -212,13 +236,13 @@ namespace wavex::network::quic {
             payload.reserve(len);
             for (auto b = asio::buffer_sequence_begin(buffers); b != asio::buffer_sequence_end(buffers); ++b) {
                 asio::const_buffer cb(*b);
-                payload.append(static_cast<const char*>(cb.data()), cb.size());
+                payload.append(static_cast<const char *>(cb.data()), cb.size());
             }
             ec = stream_->write_outbound(payload, false);
             return ec ? 0 : len;
         }
 
-        template<typename ConstBufferSequence, typename WriteToken = asio::default_completion_token_t<executor_type>>
+        template<typename ConstBufferSequence, typename WriteToken = asio::default_completion_token_t<executor_type> >
         auto async_write_some(const ConstBufferSequence &buffers, WriteToken &&token = WriteToken{}) {
             if (!stream_) {
                 return asio::async_initiate<WriteToken, void(std::error_code, std::size_t)>(
@@ -278,7 +302,7 @@ namespace wavex::network::quic {
         asio::ip::udp::socket udp_socket_;
         std::shared_ptr<AcceptorDriver> driver_{};
         endpoint_type sender_endpoint_{};
-        std::unordered_map<ConnectionId, std::shared_ptr<QuicConnection>> connections_{};
+        std::unordered_map<ConnectionId, std::shared_ptr<QuicConnection> > connections_{};
         std::deque<AcceptedStreamInfo> accept_queue_{};
         std::deque<AcceptHandlerFn> pending_accepts_{};
         std::string tls_cert_file_{};
@@ -290,41 +314,61 @@ namespace wavex::network::quic {
     public:
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         explicit basic_quic_acceptor(const executor_type &ex);
+
         explicit basic_quic_acceptor(asio::io_context &io);
+
         basic_quic_acceptor(const executor_type &ex, const endpoint_type &ep, bool reuse_addr = true);
+
         basic_quic_acceptor(asio::io_context &io, const endpoint_type &ep, bool reuse_addr = true);
+
         basic_quic_acceptor(asio::io_context &io, const endpoint_type &ep, std::string cert_file, std::string key_file);
+
         ~basic_quic_acceptor();
 
         basic_quic_acceptor(const basic_quic_acceptor &) = delete;
+
         basic_quic_acceptor &operator=(const basic_quic_acceptor &) = delete;
+
         basic_quic_acceptor(basic_quic_acceptor &&) noexcept;
+
         basic_quic_acceptor &operator=(basic_quic_acceptor &&) noexcept;
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
         [[nodiscard]] executor_type get_executor() const noexcept { return executor_; }
 
         void open(const protocol_type &proto = quic_protocol::v4());
+
         void open(const protocol_type &proto, std::error_code &ec) noexcept;
+
         void bind(const endpoint_type &ep);
+
         void bind(const endpoint_type &ep, std::error_code &ec) noexcept;
+
         void listen(int backlog = asio::socket_base::max_listen_connections);
+
         void listen(int backlog, std::error_code &ec) noexcept;
+
         void close();
+
         void close(std::error_code &ec) noexcept;
+
         void cancel();
+
         void cancel(std::error_code &ec) noexcept;
 
         [[nodiscard]] bool is_open() const noexcept { return is_open_ && udp_socket_.is_open(); }
+
         [[nodiscard]] endpoint_type local_endpoint() const;
+
         [[nodiscard]] endpoint_type local_endpoint(std::error_code &ec) const noexcept;
 
         void set_tls_credentials(std::string cert_file, std::string key_file);
 
         void accept(basic_quic_socket &peer_socket);
+
         void accept(basic_quic_socket &peer_socket, std::error_code &ec) noexcept;
 
-        template<typename AcceptToken = asio::default_completion_token_t<executor_type>>
+        template<typename AcceptToken = asio::default_completion_token_t<executor_type> >
         auto async_accept(basic_quic_socket &peer_socket, AcceptToken &&token = AcceptToken{}) {
             return asio::async_initiate<AcceptToken, void(std::error_code)>(
                 [this, &peer_socket]<typename T0>(T0 handler) {
@@ -349,7 +393,7 @@ namespace wavex::network::quic {
             );
         }
 
-        template<typename AcceptToken = asio::default_completion_token_t<executor_type>>
+        template<typename AcceptToken = asio::default_completion_token_t<executor_type> >
         auto async_accept(AcceptToken &&token = AcceptToken{}) {
             return asio::async_initiate<AcceptToken, void(std::error_code, basic_quic_socket)>(
                 [this]<typename T0>(T0 handler) {
@@ -379,9 +423,13 @@ namespace wavex::network::quic {
 
     private:
         void do_receive();
+
         void async_accept_impl(AcceptHandlerFn handler);
+
         void flush_outbound(const std::shared_ptr<QuicConnection> &conn);
-        void on_stream_ready(std::shared_ptr<QuicStream> stream, std::shared_ptr<QuicConnection> conn, endpoint_type peer_ep);
+
+        void on_stream_ready(std::shared_ptr<QuicStream> stream, std::shared_ptr<QuicConnection> conn,
+                             endpoint_type peer_ep);
     };
 
     // ─── 12. Type Aliases (Asio TCP/UDP Convention) ─────────────────────────────
@@ -391,7 +439,6 @@ namespace wavex::network::quic {
     using acceptor = basic_quic_acceptor;
     using endpoint = quic_protocol::endpoint;
     using resolver = quic_protocol::resolver;
-
 } // namespace wavex::network::quic
 
 #endif // WAVEX_HAS_SSL

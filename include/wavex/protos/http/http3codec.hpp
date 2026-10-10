@@ -29,7 +29,6 @@
 #include <array>
 #include <string>
 #include <charconv>
-#include <cstdint>
 #include <utility>
 #include <algorithm>
 #include <asio/as_tuple.hpp>
@@ -98,7 +97,10 @@ namespace wavex::protos::http {
 
             // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
             frame_header() = default;
-            constexpr frame_header(const uint64_t t, const uint64_t l) noexcept : type(t), length(l) {}
+
+            constexpr frame_header(const uint64_t t, const uint64_t l) noexcept : type(t), length(l) {
+            }
+
             ~frame_header() = default;
         };
 
@@ -110,107 +112,109 @@ namespace wavex::protos::http {
             };
 
             // RFC 9204 Appendix A — QPACK Static Table (0-indexed, entries 0..98)
-            inline constexpr std::array<static_entry, 99> STATIC_TABLE = {{
-                {":authority", ""},                                             // 0
-                {":path", "/"},                                                 // 1
-                {"age", "0"},                                                   // 2
-                {"content-disposition", ""},                                    // 3
-                {"content-length", "0"},                                        // 4
-                {"cookie", ""},                                                 // 5
-                {"date", ""},                                                   // 6
-                {"etag", ""},                                                   // 7
-                {"if-modified-since", ""},                                      // 8
-                {"if-none-match", ""},                                          // 9
-                {"last-modified", ""},                                          // 10
-                {"link", ""},                                                   // 11
-                {"location", ""},                                               // 12
-                {"referer", ""},                                                // 13
-                {"set-cookie", ""},                                             // 14
-                {":method", "CONNECT"},                                         // 15
-                {":method", "DELETE"},                                          // 16
-                {":method", "GET"},                                             // 17
-                {":method", "HEAD"},                                            // 18
-                {":method", "OPTIONS"},                                         // 19
-                {":method", "POST"},                                            // 20
-                {":method", "PUT"},                                             // 21
-                {":scheme", "http"},                                            // 22
-                {":scheme", "https"},                                           // 23
-                {":status", "103"},                                             // 24
-                {":status", "200"},                                             // 25
-                {":status", "304"},                                             // 26
-                {":status", "404"},                                             // 27
-                {":status", "503"},                                             // 28
-                {"accept", "*/*"},                                              // 29
-                {"accept", "application/dns-message"},                          // 30
-                {"accept-encoding", "gzip, deflate, br"},                       // 31
-                {"accept-ranges", "bytes"},                                     // 32
-                {"access-control-allow-headers", "cache-control"},               // 33
-                {"access-control-allow-headers", "content-type"},                // 34
-                {"access-control-allow-origin", "*"},                           // 35
-                {"cache-control", "max-age=0"},                                 // 36
-                {"cache-control", "max-age=2592000"},                           // 37
-                {"cache-control", "max-age=604800"},                            // 38
-                {"cache-control", "no-cache"},                                  // 39
-                {"cache-control", "no-store"},                                  // 40
-                {"cache-control", "public, max-age=31536000"},                  // 41
-                {"content-encoding", "br"},                                     // 42
-                {"content-encoding", "gzip"},                                   // 43
-                {"content-type", "application/dns-message"},                    // 44
-                {"content-type", "application/javascript"},                     // 45
-                {"content-type", "application/json"},                           // 46
-                {"content-type", "application/x-www-form-urlencoded"},          // 47
-                {"content-type", "image/gif"},                                  // 48
-                {"content-type", "image/jpeg"},                                 // 49
-                {"content-type", "image/png"},                                  // 50
-                {"content-type", "text/css"},                                   // 51
-                {"content-type", "text/html; charset=utf-8"},                   // 52
-                {"content-type", "text/plain"},                                 // 53
-                {"content-type", "text/plain;charset=utf-8"},                   // 54
-                {"range", "bytes=0-"},                                          // 55
-                {"strict-transport-security", "max-age=31536000"},              // 56
-                {"strict-transport-security", "max-age=31536000; includesubdomains"}, // 57
-                {"strict-transport-security", "max-age=31536000; includesubdomains; preload"}, // 58
-                {"vary", "accept-encoding"},                                    // 59
-                {"vary", "origin"},                                             // 60
-                {"x-content-type-options", "nosniff"},                          // 61
-                {"x-xss-protection", "1; mode=block"},                          // 62
-                {":status", "100"},                                             // 63
-                {":status", "204"},                                             // 64
-                {":status", "206"},                                             // 65
-                {":status", "302"},                                             // 66
-                {":status", "400"},                                             // 67
-                {":status", "403"},                                             // 68
-                {":status", "421"},                                             // 69
-                {":status", "425"},                                             // 70
-                {":status", "500"},                                             // 71
-                {"accept-language", ""},                                        // 72
-                {"access-control-allow-credentials", "FALSE"},                  // 73
-                {"access-control-allow-credentials", "TRUE"},                   // 74
-                {"access-control-allow-headers", "*"},                          // 75
-                {"access-control-allow-methods", "get"},                        // 76
-                {"access-control-allow-methods", "get, post, options"},         // 77
-                {"access-control-allow-methods", "options"},                    // 78
-                {"access-control-expose-headers", "content-length"},            // 79
-                {"access-control-request-headers", "content-type"},             // 80
-                {"access-control-request-method", "get"},                       // 81
-                {"access-control-request-method", "post"},                      // 82
-                {"alt-svc", "clear"},                                           // 83
-                {"authorization", ""},                                          // 84
-                {"content-security-policy", "script-src 'none'; object-src 'none'; base-uri 'none';"}, // 85
-                {"early-data", "1"},                                            // 86
-                {"expect-ct", ""},                                              // 87
-                {"forwarded", ""},                                              // 88
-                {"if-range", ""},                                               // 89
-                {"origin", ""},                                                 // 90
-                {"purpose", "prefetch"},                                        // 91
-                {"server", ""},                                                 // 92
-                {"timing-allow-origin", "*"},                                   // 93
-                {"upgrade-insecure-requests", "1"},                             // 94
-                {"user-agent", ""},                                             // 95
-                {"x-forwarded-for", ""},                                        // 96
-                {"x-frame-options", "deny"},                                    // 97
-                {"x-frame-options", "sameorigin"}                               // 98
-            }};
+            inline constexpr std::array<static_entry, 99> STATIC_TABLE = {
+                {
+                    {":authority", ""}, // 0
+                    {":path", "/"}, // 1
+                    {"age", "0"}, // 2
+                    {"content-disposition", ""}, // 3
+                    {"content-length", "0"}, // 4
+                    {"cookie", ""}, // 5
+                    {"date", ""}, // 6
+                    {"etag", ""}, // 7
+                    {"if-modified-since", ""}, // 8
+                    {"if-none-match", ""}, // 9
+                    {"last-modified", ""}, // 10
+                    {"link", ""}, // 11
+                    {"location", ""}, // 12
+                    {"referer", ""}, // 13
+                    {"set-cookie", ""}, // 14
+                    {":method", "CONNECT"}, // 15
+                    {":method", "DELETE"}, // 16
+                    {":method", "GET"}, // 17
+                    {":method", "HEAD"}, // 18
+                    {":method", "OPTIONS"}, // 19
+                    {":method", "POST"}, // 20
+                    {":method", "PUT"}, // 21
+                    {":scheme", "http"}, // 22
+                    {":scheme", "https"}, // 23
+                    {":status", "103"}, // 24
+                    {":status", "200"}, // 25
+                    {":status", "304"}, // 26
+                    {":status", "404"}, // 27
+                    {":status", "503"}, // 28
+                    {"accept", "*/*"}, // 29
+                    {"accept", "application/dns-message"}, // 30
+                    {"accept-encoding", "gzip, deflate, br"}, // 31
+                    {"accept-ranges", "bytes"}, // 32
+                    {"access-control-allow-headers", "cache-control"}, // 33
+                    {"access-control-allow-headers", "content-type"}, // 34
+                    {"access-control-allow-origin", "*"}, // 35
+                    {"cache-control", "max-age=0"}, // 36
+                    {"cache-control", "max-age=2592000"}, // 37
+                    {"cache-control", "max-age=604800"}, // 38
+                    {"cache-control", "no-cache"}, // 39
+                    {"cache-control", "no-store"}, // 40
+                    {"cache-control", "public, max-age=31536000"}, // 41
+                    {"content-encoding", "br"}, // 42
+                    {"content-encoding", "gzip"}, // 43
+                    {"content-type", "application/dns-message"}, // 44
+                    {"content-type", "application/javascript"}, // 45
+                    {"content-type", "application/json"}, // 46
+                    {"content-type", "application/x-www-form-urlencoded"}, // 47
+                    {"content-type", "image/gif"}, // 48
+                    {"content-type", "image/jpeg"}, // 49
+                    {"content-type", "image/png"}, // 50
+                    {"content-type", "text/css"}, // 51
+                    {"content-type", "text/html; charset=utf-8"}, // 52
+                    {"content-type", "text/plain"}, // 53
+                    {"content-type", "text/plain;charset=utf-8"}, // 54
+                    {"range", "bytes=0-"}, // 55
+                    {"strict-transport-security", "max-age=31536000"}, // 56
+                    {"strict-transport-security", "max-age=31536000; includesubdomains"}, // 57
+                    {"strict-transport-security", "max-age=31536000; includesubdomains; preload"}, // 58
+                    {"vary", "accept-encoding"}, // 59
+                    {"vary", "origin"}, // 60
+                    {"x-content-type-options", "nosniff"}, // 61
+                    {"x-xss-protection", "1; mode=block"}, // 62
+                    {":status", "100"}, // 63
+                    {":status", "204"}, // 64
+                    {":status", "206"}, // 65
+                    {":status", "302"}, // 66
+                    {":status", "400"}, // 67
+                    {":status", "403"}, // 68
+                    {":status", "421"}, // 69
+                    {":status", "425"}, // 70
+                    {":status", "500"}, // 71
+                    {"accept-language", ""}, // 72
+                    {"access-control-allow-credentials", "FALSE"}, // 73
+                    {"access-control-allow-credentials", "TRUE"}, // 74
+                    {"access-control-allow-headers", "*"}, // 75
+                    {"access-control-allow-methods", "get"}, // 76
+                    {"access-control-allow-methods", "get, post, options"}, // 77
+                    {"access-control-allow-methods", "options"}, // 78
+                    {"access-control-expose-headers", "content-length"}, // 79
+                    {"access-control-request-headers", "content-type"}, // 80
+                    {"access-control-request-method", "get"}, // 81
+                    {"access-control-request-method", "post"}, // 82
+                    {"alt-svc", "clear"}, // 83
+                    {"authorization", ""}, // 84
+                    {"content-security-policy", "script-src 'none'; object-src 'none'; base-uri 'none';"}, // 85
+                    {"early-data", "1"}, // 86
+                    {"expect-ct", ""}, // 87
+                    {"forwarded", ""}, // 88
+                    {"if-range", ""}, // 89
+                    {"origin", ""}, // 90
+                    {"purpose", "prefetch"}, // 91
+                    {"server", ""}, // 92
+                    {"timing-allow-origin", "*"}, // 93
+                    {"upgrade-insecure-requests", "1"}, // 94
+                    {"user-agent", ""}, // 95
+                    {"x-forwarded-for", ""}, // 96
+                    {"x-frame-options", "deny"}, // 97
+                    {"x-frame-options", "sameorigin"} // 98
+                }
+            };
 
             /**
              * @brief Locate static table entry matching a header name and optional value.
@@ -252,12 +256,19 @@ namespace wavex::protos::http {
 
                     // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────
                     entry() = default;
+
                     entry(std::string n, std::string v, const uint64_t abs_idx)
-                        : name(std::move(n)), value(std::move(v)), absolute_index(abs_idx) {}
+                        : name(std::move(n)), value(std::move(v)), absolute_index(abs_idx) {
+                    }
+
                     ~entry() = default;
+
                     entry(const entry &) = default;
+
                     entry &operator=(const entry &) = default;
+
                     entry(entry &&) noexcept = default;
+
                     entry &operator=(entry &&) noexcept = default;
 
                     // ─── 4. Member Functions (LAST) ────────────────────────────────
@@ -276,11 +287,17 @@ namespace wavex::protos::http {
             public:
                 // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
                 explicit dynamic_table(const std::size_t max_cap = 4096) noexcept
-                    : max_capacity_(max_cap) {}
+                    : max_capacity_(max_cap) {
+                }
+
                 ~dynamic_table() = default;
+
                 dynamic_table(const dynamic_table &) = default;
+
                 dynamic_table &operator=(const dynamic_table &) = default;
+
                 dynamic_table(dynamic_table &&) noexcept = default;
+
                 dynamic_table &operator=(dynamic_table &&) noexcept = default;
 
                 // ─── 4. Member Functions (LAST) ────────────────────────────────────
@@ -340,7 +357,8 @@ namespace wavex::protos::http {
                  * @brief Lookup entry by relative index against Base (RFC 9204 §3.2.4).
                  * Relative index R refers to absolute index (Base - 1 - R).
                  */
-                [[nodiscard]] const entry *get_relative(const uint64_t base, const uint64_t relative_idx) const noexcept {
+                [[nodiscard]] const entry *
+                get_relative(const uint64_t base, const uint64_t relative_idx) const noexcept {
                     if (base == 0 || relative_idx >= base) return nullptr;
                     const uint64_t target_abs = base - 1 - relative_idx;
                     return get_by_absolute_index(target_abs);
@@ -511,11 +529,11 @@ namespace wavex::protos::http {
                     }
 
                     // 5. General Headers
-                    for (const auto &[raw_name, value] : headers) {
+                    for (const auto &[raw_name, value]: headers) {
                         if (raw_name.starts_with(':')) continue;
                         std::string name;
                         name.reserve(raw_name.size());
-                        for (const char c : raw_name) {
+                        for (const char c: raw_name) {
                             name.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
                         }
 
@@ -598,11 +616,11 @@ namespace wavex::protos::http {
                     }
 
                     // General Headers
-                    for (const auto &[raw_name, value] : headers) {
+                    for (const auto &[raw_name, value]: headers) {
                         if (raw_name.starts_with(':')) continue;
                         std::string name;
                         name.reserve(raw_name.size());
-                        for (const char c : raw_name) {
+                        for (const char c: raw_name) {
                             name.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
                         }
                         const auto [h_idx, h_exact] = find_static(name, value);
@@ -618,9 +636,10 @@ namespace wavex::protos::http {
                     return out;
                 }
 
-            private:
+            public:
                 // Encoded Field Section Prefix (RFC 9204 §4.5.1)
-                static void encode_prefix(std::string &out, const uint64_t ric, const uint64_t base, const uint64_t max_table_capacity = 4096) {
+                static void encode_prefix(std::string &out, const uint64_t ric, const uint64_t base,
+                                          const uint64_t max_table_capacity = 4096) {
                     uint64_t enc_insert_count = 0;
                     if (ric > 0) {
                         const uint64_t max_entries = max_table_capacity / 32;
@@ -681,7 +700,8 @@ namespace wavex::protos::http {
                 dynamic_table &dt_;
 
             public:
-                explicit decoder(dynamic_table &dt) noexcept : dt_(dt) {}
+                explicit decoder(dynamic_table &dt) noexcept : dt_(dt) {
+                }
 
                 /**
                  * @brief Apply a single instruction received from the QPACK encoder sub-stream (RFC 9204 §4.3).
@@ -722,10 +742,16 @@ namespace wavex::protos::http {
 
                     // Insert with Literal Name: 01Hxxxxx (5-bit prefix, 0x40)
                     if ((b & 0xc0) == 0x40) {
+                        const bool is_huffman = (b & 0x20) != 0;
                         uint64_t name_len = 0;
                         if (!http2::hpack::decode_integer(in, cursor, 5, name_len)) return false;
                         if (cursor + name_len > in.size()) return false;
-                        std::string name(in.substr(cursor, name_len));
+                        std::string name;
+                        if (is_huffman) {
+                            if (!http2::hpack::huffman::decode(in.substr(cursor, name_len), name)) return false;
+                        } else {
+                            name = std::string(in.substr(cursor, name_len));
+                        }
                         cursor += name_len;
 
                         std::string val;
@@ -754,7 +780,7 @@ namespace wavex::protos::http {
                  */
                 bool decode_header_block(
                     const std::string_view block,
-                    std::vector<std::pair<std::string, std::string>> &out_headers,
+                    std::vector<std::pair<std::string, std::string> > &out_headers,
                     bool &is_blocked) const {
                     is_blocked = false;
                     if (block.empty()) return false;
@@ -854,10 +880,16 @@ namespace wavex::protos::http {
                         }
                         // Case 3: Literal Header with Literal Name (starts with 001xxxxx)
                         else if ((b & 0x20) != 0) {
+                            const bool is_huffman = (b & 0x08) != 0;
                             uint64_t name_len = 0;
                             if (!http2::hpack::decode_integer(block, cursor, 3, name_len)) return false;
                             if (cursor + name_len > block.size()) return false;
-                            std::string name(block.substr(cursor, name_len));
+                            std::string name;
+                            if (is_huffman) {
+                                if (!http2::hpack::huffman::decode(block.substr(cursor, name_len), name)) return false;
+                            } else {
+                                name = std::string(block.substr(cursor, name_len));
+                            }
                             cursor += name_len;
 
                             std::string value;
@@ -873,7 +905,7 @@ namespace wavex::protos::http {
 
                 bool decode_header_block(
                     const std::string_view block,
-                    std::vector<std::pair<std::string, std::string>> &out_headers) const {
+                    std::vector<std::pair<std::string, std::string> > &out_headers) const {
                     bool is_blocked = false;
                     return decode_header_block(block, out_headers, is_blocked);
                 }
@@ -923,7 +955,7 @@ namespace wavex::protos::http {
             std::string scheme_storage{};
             std::string authority_storage{};
             std::string body_storage{};
-            std::vector<std::pair<std::string, std::string>> headers_storage{};
+            std::vector<std::pair<std::string, std::string> > headers_storage{};
             parser_state state_{};
             uint64_t stream_id{0};
             http::method method_type{method::UNKNOWN};
@@ -1012,7 +1044,7 @@ namespace wavex::protos::http {
                 if (!headers_storage.empty()) {
                     headers.clear();
                     headers.reserve(headers_storage.size());
-                    for (const auto &[n, v] : headers_storage) {
+                    for (const auto &[n, v]: headers_storage) {
                         headers.emplace_back(n, v);
                     }
                 }
@@ -1029,7 +1061,7 @@ namespace wavex::protos::http {
             // ─── 2. Member Variables (SECOND - Minimal Padding) ────────────────
             std::string_view status_text{"OK"};
             std::string body_storage{};
-            std::vector<std::pair<std::string, std::string>> headers_storage{};
+            std::vector<std::pair<std::string, std::string> > headers_storage{};
             parser_state state_{};
             uint64_t stream_id{0};
             unsigned int status_code{200};
@@ -1094,7 +1126,7 @@ namespace wavex::protos::http {
                 if (!headers_storage.empty()) {
                     headers.clear();
                     headers.reserve(headers_storage.size());
-                    for (const auto &[n, v] : headers_storage) {
+                    for (const auto &[n, v]: headers_storage) {
                         headers.emplace_back(n, v);
                     }
                 }
@@ -1164,23 +1196,84 @@ namespace wavex::protos::http {
 
                     if (hdr.type == static_cast<uint64_t>(frame_type::HEADERS)) {
                         bool is_blocked = false;
-                        std::vector<std::pair<std::string, std::string>> decoded_headers;
+                        std::vector<std::pair<std::string, std::string> > decoded_headers;
                         if (!dec.decode_header_block(payload, decoded_headers, is_blocked)) {
                             if (is_blocked) return result::incomplete; // Wait for QPACK encoder stream inserts
                             req.state_.reset();
                             return result::error;
                         }
 
-                        for (auto &[name, val] : decoded_headers) {
-                            if (name == ":method") {
-                                req.method_type = from_string(val);
-                            } else if (name == ":path") {
-                                req.target_storage = std::move(val);
-                            } else if (name == ":scheme") {
-                                req.scheme_storage = std::move(val);
-                            } else if (name == ":authority") {
-                                req.authority_storage = std::move(val);
+                        bool seen_regular_header = false;
+                        bool has_method = false;
+                        bool has_path = false;
+                        bool has_scheme = false;
+                        bool has_authority = false;
+
+                        for (auto &[name, val]: decoded_headers) {
+                            // 1. All field names MUST be lowercase (RFC 9114 §4.2 / RFC 9110)
+                            for (const char c: name) {
+                                if (c >= 'A' && c <= 'Z') {
+                                    req.state_.reset();
+                                    return result::error;
+                                }
+                            }
+
+                            if (name.starts_with(':')) {
+                                // 2. Pseudo-headers MUST appear before any regular header fields (RFC 9114 §4.3)
+                                if (seen_regular_header) {
+                                    req.state_.reset();
+                                    return result::error;
+                                }
+
+                                // 3. No duplicate pseudo-headers (RFC 9114 §4.3)
+                                if (name == ":method") {
+                                    if (has_method) {
+                                        req.state_.reset();
+                                        return result::error;
+                                    }
+                                    has_method = true;
+                                    req.method_type = from_string(val);
+                                } else if (name == ":path") {
+                                    if (has_path) {
+                                        req.state_.reset();
+                                        return result::error;
+                                    }
+                                    has_path = true;
+                                    req.target_storage = std::move(val);
+                                } else if (name == ":scheme") {
+                                    if (has_scheme) {
+                                        req.state_.reset();
+                                        return result::error;
+                                    }
+                                    has_scheme = true;
+                                    req.scheme_storage = std::move(val);
+                                } else if (name == ":authority") {
+                                    if (has_authority) {
+                                        req.state_.reset();
+                                        return result::error;
+                                    }
+                                    has_authority = true;
+                                    req.authority_storage = std::move(val);
+                                } else {
+                                    // Undefined pseudo-header field (RFC 9114 §4.3)
+                                    req.state_.reset();
+                                    return result::error;
+                                }
                             } else {
+                                seen_regular_header = true;
+
+                                // 4. Connection-specific headers prohibited (RFC 9114 §4.2)
+                                if (name == "connection" || name == "keep-alive" ||
+                                    name == "proxy-connection" || name == "transfer-encoding" ||
+                                    name == "upgrade") {
+                                    req.state_.reset();
+                                    return result::error;
+                                }
+                                if (name == "te" && val != "trailers") {
+                                    req.state_.reset();
+                                    return result::error;
+                                }
+
                                 if (name == "content-length") {
                                     if (auto cl = std::strtoull(val.c_str(), nullptr, 10); cl != 0 || val == "0") {
                                         req.state_.has_content_length = true;
@@ -1190,6 +1283,18 @@ namespace wavex::protos::http {
                                 req.headers_storage.emplace_back(std::move(name), std::move(val));
                             }
                         }
+
+                        // 5. Mandatory pseudo-headers check: :method and :path MUST be present
+                        // (:path can only be omitted for CONNECT method per RFC 9114 §4.3.1)
+                        if (!has_method || (!has_path && req.method_type != method::CONNECT)) {
+                            req.state_.reset();
+                            return result::error;
+                        }
+                        if (has_path && req.target_storage.empty() && req.method_type != method::CONNECT) {
+                            req.state_.reset();
+                            return result::error;
+                        }
+
                         req.state_.headers_received = true;
                     } else if (hdr.type == static_cast<uint64_t>(frame_type::DATA)) {
                         if (!req.state_.headers_received) {
@@ -1279,19 +1384,40 @@ namespace wavex::protos::http {
 
                     if (hdr.type == static_cast<uint64_t>(frame_type::HEADERS)) {
                         bool is_blocked = false;
-                        std::vector<std::pair<std::string, std::string>> decoded_headers;
+                        std::vector<std::pair<std::string, std::string> > decoded_headers;
                         if (!dec.decode_header_block(payload, decoded_headers, is_blocked)) {
                             if (is_blocked) return result::incomplete;
                             res.state_.reset();
                             return result::error;
                         }
 
-                        for (auto &[name, val] : decoded_headers) {
+                        bool has_status = false;
+                        for (auto &[name, val]: decoded_headers) {
+                            for (const char c: name) {
+                                if (c >= 'A' && c <= 'Z') {
+                                    res.state_.reset();
+                                    return result::error;
+                                }
+                            }
                             if (name == ":status") {
+                                if (has_status) {
+                                    res.state_.reset();
+                                    return result::error;
+                                }
+                                has_status = true;
                                 if (auto sc = std::strtoul(val.c_str(), nullptr, 10); sc != 0) {
                                     res.status_code = static_cast<unsigned int>(sc);
+                                } else {
+                                    res.state_.reset();
+                                    return result::error;
                                 }
                             } else {
+                                if (name == "connection" || name == "keep-alive" ||
+                                    name == "proxy-connection" || name == "transfer-encoding" ||
+                                    name == "upgrade") {
+                                    res.state_.reset();
+                                    return result::error;
+                                }
                                 if (name == "content-length") {
                                     if (auto cl = std::strtoull(val.c_str(), nullptr, 10); cl != 0 || val == "0") {
                                         res.state_.has_content_length = true;
@@ -1300,6 +1426,10 @@ namespace wavex::protos::http {
                                 }
                                 res.headers_storage.emplace_back(std::move(name), std::move(val));
                             }
+                        }
+                        if (!has_status) {
+                            res.state_.reset();
+                            return result::error;
                         }
                         res.state_.headers_received = true;
                     } else if (hdr.type == static_cast<uint64_t>(frame_type::DATA)) {
@@ -1407,9 +1537,10 @@ namespace wavex::protos::http {
                 return serialize_request(req);
             }
 
-            static std::string serialize_settings(const std::vector<std::pair<settings_parameter, uint64_t>> &settings) {
+            static std::string
+            serialize_settings(const std::vector<std::pair<settings_parameter, uint64_t> > &settings) {
                 std::string payload;
-                for (const auto &[param, val] : settings) {
+                for (const auto &[param, val]: settings) {
                     VarInt::encode(static_cast<uint64_t>(param), payload);
                     VarInt::encode(val, payload);
                 }
@@ -1510,12 +1641,15 @@ namespace wavex::protos::http {
                                 if (!VarInt::decode(payload, s_cursor, id)) break;
                                 if (!VarInt::decode(payload, s_cursor, val)) break;
 
-                                if (id == 0x01) { // SETTINGS_QPACK_MAX_TABLE_CAPACITY
+                                if (id == 0x01) {
+                                    // SETTINGS_QPACK_MAX_TABLE_CAPACITY
                                     ctx->peer_qpack_max_table_capacity = val;
                                     ctx->decode_table.set_max_capacity(static_cast<std::size_t>(val));
-                                } else if (id == 0x06) { // SETTINGS_MAX_FIELD_SECTION_SIZE
+                                } else if (id == 0x06) {
+                                    // SETTINGS_MAX_FIELD_SECTION_SIZE
                                     ctx->max_field_section_size = val;
-                                } else if (id == 0x07) { // SETTINGS_QPACK_BLOCKED_STREAMS
+                                } else if (id == 0x07) {
+                                    // SETTINGS_QPACK_BLOCKED_STREAMS
                                     ctx->peer_qpack_blocked_streams = val;
                                 }
                             }
@@ -1558,7 +1692,6 @@ namespace wavex::protos::http {
                 co_return;
             }
         };
-
     } // namespace http3
 
     // ─── http3codec (WaveX Codec Concept Implementation) ──────────────────────
@@ -1588,11 +1721,13 @@ namespace wavex::protos::http {
             return http1codec::status_text_for(code);
         }
 
-        static result parse_stream(const std::string_view buffer, request &req, std::size_t &bytes_consumed, dynamic_table &dt) {
+        static result parse_stream(const std::string_view buffer, request &req, std::size_t &bytes_consumed,
+                                   dynamic_table &dt) {
             return parser::parse_request(buffer, req, bytes_consumed, dt);
         }
 
-        static result parse_stream(const std::string_view buffer, request &req, std::size_t &bytes_consumed, connection_context &ctx) {
+        static result parse_stream(const std::string_view buffer, request &req, std::size_t &bytes_consumed,
+                                   connection_context &ctx) {
             return parser::parse_request(buffer, req, bytes_consumed, ctx.decode_table);
         }
 
@@ -1600,7 +1735,8 @@ namespace wavex::protos::http {
             return parser::parse_request(buffer, req, bytes_consumed);
         }
 
-        static result parse_request(const std::string_view buffer, request &req, std::size_t &bytes_consumed, dynamic_table &dt) {
+        static result parse_request(const std::string_view buffer, request &req, std::size_t &bytes_consumed,
+                                    dynamic_table &dt) {
             return parser::parse_request(buffer, req, bytes_consumed, dt);
         }
 
@@ -1608,15 +1744,18 @@ namespace wavex::protos::http {
             return parser::parse_request(buffer, req, bytes_consumed);
         }
 
-        static result parse_request(const std::string_view buffer, request &req, std::size_t &bytes_consumed, connection_context &ctx) {
+        static result parse_request(const std::string_view buffer, request &req, std::size_t &bytes_consumed,
+                                    connection_context &ctx) {
             return parser::parse_request(buffer, req, bytes_consumed, ctx.decode_table);
         }
 
-        static result parse_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed, dynamic_table &dt) {
+        static result parse_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed,
+                                     dynamic_table &dt) {
             return parser::parse_response(buffer, res, bytes_consumed, dt);
         }
 
-        static result parse_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed, connection_context &ctx) {
+        static result parse_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed,
+                                     connection_context &ctx) {
             return parser::parse_response(buffer, res, bytes_consumed, ctx.decode_table);
         }
 
@@ -1624,11 +1763,13 @@ namespace wavex::protos::http {
             return parser::parse_response(buffer, res, bytes_consumed);
         }
 
-        static result decode_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed, dynamic_table &dt) {
+        static result decode_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed,
+                                      dynamic_table &dt) {
             return decoder::decode_response(buffer, res, bytes_consumed, dt);
         }
 
-        static result decode_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed, connection_context &ctx) {
+        static result decode_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed,
+                                      connection_context &ctx) {
             return decoder::decode_response(buffer, res, bytes_consumed, ctx.decode_table);
         }
 
@@ -1648,7 +1789,6 @@ namespace wavex::protos::http {
             return decoder::dechunk(chunked_raw);
         }
     };
-
 } // namespace wavex::protos::http
 
 #endif // WAVEX_HAS_SSL

@@ -65,7 +65,9 @@ namespace wavex::base {
 
             // ─── 2. Constructors ─────────────────────────────────────────────
             iterator() = default;
-            iterator(const FlatMap *m, size_type i) : map(m), idx(i) {}
+
+            iterator(const FlatMap *m, size_type i) : map(m), idx(i) {
+            }
 
             // ─── 3. Member Functions ─────────────────────────────────────────
             iterator &operator++() noexcept {
@@ -90,11 +92,15 @@ namespace wavex::base {
     public:
         // ─── 3. Constructors & Destructor ────────────────────────────────────
         FlatMap() = default;
+
         ~FlatMap() = default;
 
         FlatMap(const FlatMap &) = default;
+
         FlatMap &operator=(const FlatMap &) = default;
+
         FlatMap(FlatMap &&) noexcept = default;
+
         FlatMap &operator=(FlatMap &&) noexcept = default;
 
         // ─── 4. Member Functions ─────────────────────────────────────────────
@@ -115,7 +121,7 @@ namespace wavex::base {
          * @brief Case-sensitive linear scan for key.
          * @return Iterator to matching pair, or end() if not found.
          */
-        [[nodiscard]] iterator find(std::string_view key) const noexcept {
+        [[nodiscard]] iterator find(const std::string_view key) const noexcept {
             for (size_type i = 0; i < size_; ++i) {
                 if (std::string_view(pair_at(i).first) == key)
                     return {this, i};
@@ -127,7 +133,7 @@ namespace wavex::base {
          * @brief Case-insensitive linear scan (for HTTP headers).
          * @return Iterator to matching pair, or end() if not found.
          */
-        [[nodiscard]] iterator find_ci(std::string_view key) const noexcept {
+        [[nodiscard]] iterator find_ci(const std::string_view key) const noexcept {
             for (size_type i = 0; i < size_; ++i) {
                 const std::string_view k(pair_at(i).first);
                 if (k.size() == key.size()) {
@@ -148,7 +154,7 @@ namespace wavex::base {
         /**
          * @brief Case-sensitive membership test.
          */
-        [[nodiscard]] bool contains(std::string_view key) const noexcept {
+        [[nodiscard]] bool contains(const std::string_view key) const noexcept {
             return find(key) != end();
         }
 
@@ -167,7 +173,7 @@ namespace wavex::base {
         /**
          * @brief Const access by key — returns empty string_view if not found.
          */
-        [[nodiscard]] V get(std::string_view key) const noexcept {
+        [[nodiscard]] V get(const std::string_view key) const noexcept {
             if (const auto it = find(key); it != end())
                 return it->second;
             return V{};
@@ -176,10 +182,10 @@ namespace wavex::base {
         /**
          * @brief Throwing access — throws std::out_of_range if key not found.
          */
-        [[nodiscard]] const V &at(std::string_view key) const {
+        [[nodiscard]] const V &at(const std::string_view key) const {
             const auto it = find(key);
             if (it == end()) [[unlikely]]
-                throw std::out_of_range("FlatMap::at: key not found");
+                    throw std::out_of_range("FlatMap::at: key not found");
             return it->second;
         }
 
@@ -224,7 +230,7 @@ namespace wavex::base {
         /**
          * @brief Erase an entry at the given index.
          */
-        void erase_at(size_type idx) {
+        void erase_at(const size_type idx) {
             if (idx >= size_) return;
             for (size_type i = idx; i + 1 < size_; ++i) {
                 mutable_pair_at(i) = std::move(mutable_pair_at(i + 1));
@@ -238,7 +244,7 @@ namespace wavex::base {
         /**
          * @brief Case-sensitive erase by key. Returns true if removed, false if not found.
          */
-        bool erase(std::string_view key) {
+        bool erase(const std::string_view key) {
             const auto it = find(key);
             if (it == end()) return false;
             erase_at(it.idx);
@@ -248,7 +254,7 @@ namespace wavex::base {
         /**
          * @brief Case-insensitive erase by key. Returns true if removed, false if not found.
          */
-        bool erase_ci(std::string_view key) {
+        bool erase_ci(const std::string_view key) {
             const auto it = find_ci(key);
             if (it == end()) return false;
             erase_at(it.idx);
@@ -266,14 +272,14 @@ namespace wavex::base {
     private:
         [[nodiscard]] const value_type &pair_at(size_type idx) const noexcept {
             if (idx < InlineCap) [[likely]]
-                return inline_[idx];
+                    return inline_[idx];
             [[assume(idx >= InlineCap)]];
             return overflow_[idx - InlineCap];
         }
 
         [[nodiscard]] value_type &mutable_pair_at(size_type idx) noexcept {
             if (idx < InlineCap) [[likely]]
-                return inline_[idx];
+                    return inline_[idx];
             [[assume(idx >= InlineCap)]];
             return overflow_[idx - InlineCap];
         }

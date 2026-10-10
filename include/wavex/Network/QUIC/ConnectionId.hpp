@@ -15,7 +15,6 @@
 
 #include <array>
 #include <cstdint>
-#include <cstddef>
 #include <string>
 #include <string_view>
 #include <functional>
@@ -23,7 +22,6 @@
 #include <wavex/Network/QUIC/QuicConstants.hpp>
 
 namespace wavex::network::quic {
-
     struct ConnectionId {
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
         std::array<uint8_t, MAX_CONNECTION_ID_LEN> data_{};
@@ -31,40 +29,47 @@ namespace wavex::network::quic {
 
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         constexpr ConnectionId() noexcept = default;
+
         ConnectionId(const uint8_t *src, std::size_t len) noexcept;
+
         explicit ConnectionId(std::string_view sv) noexcept;
+
         ~ConnectionId() = default;
+
         ConnectionId(const ConnectionId &) = default;
+
         ConnectionId &operator=(const ConnectionId &) = default;
+
         ConnectionId(ConnectionId &&) noexcept = default;
+
         ConnectionId &operator=(ConnectionId &&) noexcept = default;
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
-        [[nodiscard]] uint8_t length() const noexcept { return length_; }
-        [[nodiscard]] const uint8_t *data() const noexcept { return data_.data(); }
-        [[nodiscard]] uint8_t *data() noexcept { return data_.data(); }
-        [[nodiscard]] bool empty() const noexcept { return length_ == 0; }
+        [[nodiscard]] auto length() const noexcept -> uint8_t { return length_; }
+        [[nodiscard]] auto data() const noexcept -> const uint8_t * { return data_.data(); }
+        [[nodiscard]] auto data() noexcept -> uint8_t * { return data_.data(); }
+        [[nodiscard]] auto empty() const noexcept -> bool { return length_ == 0; }
+
         [[nodiscard]] std::string to_string() const;
-        [[nodiscard]] std::string_view as_string_view() const noexcept {
-            return {reinterpret_cast<const char*>(data_.data()), length_};
+
+        [[nodiscard]] auto as_string_view() const noexcept -> std::string_view {
+            return {reinterpret_cast<const char *>(data_.data()), length_};
         }
 
-        static ConnectionId from_hex(std::string_view hex);
-        static ConnectionId random(std::size_t len = 8);
+        static auto from_hex(std::string_view hex) -> ConnectionId;
 
-        bool operator==(const ConnectionId &other) const noexcept;
-        bool operator!=(const ConnectionId &other) const noexcept { return !(*this == other); }
+        static auto random(std::size_t len = 8) -> ConnectionId;
+
+        auto operator==(const ConnectionId &other) const noexcept -> bool;
+
+        auto operator!=(const ConnectionId &other) const noexcept -> bool { return !(*this == other); }
     };
-
 } // namespace wavex::network::quic
 
 // Hash specialization
-namespace std {
-    template<>
-    struct hash<wavex::network::quic::ConnectionId> {
-        std::size_t operator()(const wavex::network::quic::ConnectionId &cid) const noexcept;
-    };
-} // namespace std
+template<>
+struct std::hash<wavex::network::quic::ConnectionId> {
+    auto operator()(const wavex::network::quic::ConnectionId &cid) const noexcept -> std::size_t;
+}; // namespace std
 
 #endif // WAVEX_HAS_SSL
-

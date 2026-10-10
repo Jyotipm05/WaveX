@@ -20,7 +20,6 @@
 #include <unordered_set>
 
 namespace wavex::server {
-
     /**
      * @struct ConnectionTracker
      * @brief Thread-safe registry of active and idle socket connections for graceful drain.
@@ -32,8 +31,10 @@ namespace wavex::server {
             std::function<void()> close;
 
             Entry() = default;
+
             Entry(std::function<void()> c, std::function<void()> cl)
-                : cancel(std::move(c)), close(std::move(cl)) {}
+                : cancel(std::move(c)), close(std::move(cl)) {
+            }
         };
 
         // ─── 2. Member Variables (Arranged for minimum padding) ──────────────
@@ -44,22 +45,31 @@ namespace wavex::server {
 
         // ─── 3. Constructors & Destructor ────────────────────────────────────
         ConnectionTracker() = default;
+
         ~ConnectionTracker() = default;
 
         ConnectionTracker(const ConnectionTracker &) = delete;
+
         ConnectionTracker &operator=(const ConnectionTracker &) = delete;
+
         ConnectionTracker(ConnectionTracker &&) = delete;
+
         ConnectionTracker &operator=(ConnectionTracker &&) = delete;
 
         // ─── 4. Member Functions (Implemented in ConnectionTracker.cpp) ──────
         uint64_t register_socket(std::function<void()> cancel_fn,
                                  std::function<void()> close_fn);
+
         void unregister_socket(uint64_t id);
+
         void mark_idle(uint64_t id);
+
         void mark_active(uint64_t id);
+
         void cancel_all_idle();
+
         void force_close_all();
+
         [[nodiscard]] std::size_t count() const;
     };
-
 } // namespace wavex::server

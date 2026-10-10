@@ -22,7 +22,6 @@
 #include <mutex>
 #include <optional>
 #include <format>
-#include <chrono>
 #include <source_location>
 #include <cstdlib>
 
@@ -100,7 +99,7 @@ namespace wavex::base {
     class Logger {
     private:
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
-        std::optional<wavex::utils::BinaryFile> file_sink_{};
+        std::optional<utils::BinaryFile> file_sink_{};
         std::mutex mutex_{};
         std::ostream *sink_{&std::cerr};
         LogLevel min_level_{LogLevel::INFO};
@@ -150,8 +149,8 @@ namespace wavex::base {
         /// Direct output to a file
         void set_output(const std::string &path = "./logs/wavex.log") {
             std::lock_guard lock(mutex_);
-            wavex::utils::BinaryFile::write_all(path, "", true); // Ensure dirs exist
-            file_sink_.emplace(path, wavex::utils::FileMode::Append);
+            utils::BinaryFile::write_all(path, "", true); // Ensure dirs exist
+            file_sink_.emplace(path, utils::FileMode::Append);
             if (file_sink_->is_open()) {
                 sink_ = nullptr;
             }
@@ -234,14 +233,8 @@ namespace wavex::log {
         std::source_location loc;
 
         template<typename T>
-            requires std::constructible_from<std::format_string<Args
-
-                    ...
-                >
-                ,
-                T
-            >
-        consteval format_with_loc(const T &s, std::source_location l = std::source_location::current())
+            requires std::constructible_from<std::format_string<Args...>, const T &>
+        consteval format_with_loc(const T &s, const std::source_location l = std::source_location::current())
             : fmt(s), loc(l) {
         }
     };
@@ -275,84 +268,90 @@ namespace wavex::log {
 
     template<typename... Args>
     inline void trace(format_with_loc<std::type_identity_t<Args>...> fwl, Args &&... args) {
-        ::wavex::base::Logger::instance().log_loc(::wavex::base::LogLevel::TRACE, fwl.loc, fwl.fmt,
+        base::Logger::instance().log_loc(base::LogLevel::TRACE, fwl.loc, fwl.fmt,
                                                   std::forward<Args>(args)...);
     }
 
     inline void trace(const msg_with_loc &mwl) {
-        ::wavex::base::Logger::instance().log_loc(::wavex::base::LogLevel::TRACE, mwl.loc, mwl.msg);
+        base::Logger::instance().log_loc(base::LogLevel::TRACE, mwl.loc, mwl.msg);
     }
 
     template<typename... Args>
     inline void debug(format_with_loc<std::type_identity_t<Args>...> fwl, Args &&... args) {
-        ::wavex::base::Logger::instance().log_loc(::wavex::base::LogLevel::DEBUG, fwl.loc, fwl.fmt,
+        base::Logger::instance().log_loc(base::LogLevel::DEBUG, fwl.loc, fwl.fmt,
                                                   std::forward<Args>(args)...);
     }
 
     inline void debug(const msg_with_loc &mwl) {
-        ::wavex::base::Logger::instance().log_loc(::wavex::base::LogLevel::DEBUG, mwl.loc, mwl.msg);
+        base::Logger::instance().log_loc(base::LogLevel::DEBUG, mwl.loc, mwl.msg);
     }
 
 #else
 
     template<typename... Args>
-    inline void trace([[maybe_unused]] format_with_loc<std::type_identity_t<Args>...> fwl, [[maybe_unused]] Args &&... args) {}
+    inline void trace([[maybe_unused]] format_with_loc<std::type_identity_t<Args>...> fwl,
+                      [[maybe_unused]] Args &&... args) {
+    }
 
-    inline void trace([[maybe_unused]] const msg_with_loc &mwl) {}
+    inline void trace([[maybe_unused]] const msg_with_loc &mwl) {
+    }
 
     template<typename... Args>
-    inline void debug([[maybe_unused]] format_with_loc<std::type_identity_t<Args>...> fwl, [[maybe_unused]] Args &&... args) {}
+    inline void debug([[maybe_unused]] format_with_loc<std::type_identity_t<Args>...> fwl,
+                      [[maybe_unused]] Args &&... args) {
+    }
 
-    inline void debug([[maybe_unused]] const msg_with_loc &mwl) {}
+    inline void debug([[maybe_unused]] const msg_with_loc &mwl) {
+    }
 
 #endif
 
     template<typename... Args>
     inline void info(format_with_loc<std::type_identity_t<Args>...> fwl, Args &&... args) {
-        ::wavex::base::Logger::instance().log_loc(::wavex::base::LogLevel::INFO, fwl.loc, fwl.fmt,
+        base::Logger::instance().log_loc(base::LogLevel::INFO, fwl.loc, fwl.fmt,
                                                   std::forward<Args>(args)...);
     }
 
     inline void info(const msg_with_loc &mwl) {
-        ::wavex::base::Logger::instance().log_loc(::wavex::base::LogLevel::INFO, mwl.loc, mwl.msg);
+        base::Logger::instance().log_loc(base::LogLevel::INFO, mwl.loc, mwl.msg);
     }
 
     template<typename... Args>
     inline void warn(format_with_loc<std::type_identity_t<Args>...> fwl, Args &&... args) {
-        ::wavex::base::Logger::instance().log_loc(::wavex::base::LogLevel::WARN, fwl.loc, fwl.fmt,
+        base::Logger::instance().log_loc(base::LogLevel::WARN, fwl.loc, fwl.fmt,
                                                   std::forward<Args>(args)...);
     }
 
     inline void warn(const msg_with_loc &mwl) {
-        ::wavex::base::Logger::instance().log_loc(::wavex::base::LogLevel::WARN, mwl.loc, mwl.msg);
+        base::Logger::instance().log_loc(base::LogLevel::WARN, mwl.loc, mwl.msg);
     }
 
     template<typename... Args>
     inline void error(format_with_loc<std::type_identity_t<Args>...> fwl, Args &&... args) {
-        ::wavex::base::Logger::instance().log_loc(::wavex::base::LogLevel::ERR, fwl.loc, fwl.fmt,
+        base::Logger::instance().log_loc(base::LogLevel::ERR, fwl.loc, fwl.fmt,
                                                   std::forward<Args>(args)...);
     }
 
     inline void error(const msg_with_loc &mwl) {
-        ::wavex::base::Logger::instance().log_loc(::wavex::base::LogLevel::ERR, mwl.loc, mwl.msg);
+        base::Logger::instance().log_loc(base::LogLevel::ERR, mwl.loc, mwl.msg);
     }
 
     template<typename... Args>
     [[noreturn]] inline void fatal(format_with_loc<std::type_identity_t<Args>...> fwl, Args &&... args) {
-        ::wavex::base::Logger::instance().log_loc(::wavex::base::LogLevel::FATAL, fwl.loc, fwl.fmt,
+        base::Logger::instance().log_loc(base::LogLevel::FATAL, fwl.loc, fwl.fmt,
                                                   std::forward<Args>(args)...);
         std::abort();
     }
 
     [[noreturn]] inline void fatal(const msg_with_loc &mwl) {
-        ::wavex::base::Logger::instance().log_loc(::wavex::base::LogLevel::FATAL, mwl.loc, mwl.msg);
+        base::Logger::instance().log_loc(base::LogLevel::FATAL, mwl.loc, mwl.msg);
         std::abort();
     }
 
-    using LogLevel = ::wavex::base::LogLevel;
+    using LogLevel = base::LogLevel;
 
     inline void set_level(const LogLevel level) {
-        ::wavex::base::Logger::instance().set_level(level);
+        base::Logger::instance().set_level(level);
     }
 } // namespace wavex::log
 
