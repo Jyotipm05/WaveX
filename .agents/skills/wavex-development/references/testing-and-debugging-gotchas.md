@@ -75,3 +75,41 @@ When an assertion fails (such as `assert(pkts.size() == 4)`):
 - The test was written with specific RFC or architectural intent.
 - Modifying `4` to `6` masks framework bugs.
 - Always debug the implementation to understand why unexpected state or packets were generated.
+
+---
+
+## 5. Mock Stream Coroutine Lifecycle & Test Teardown
+
+### The Bug
+When unit testing coroutines that loop over stream reads (such as `handle_unidirectional_stream` or `handle_connection`), feeding partial data via `stream->push_inbound(wire, false)` without FIN leaves the coroutine suspended on `async_read_some()` waiting for further data.
+If the test completes its assertions and exits without closing the streams, the coroutine remains suspended with active `pending_read_` callbacks and armed background timers. When `io_context` leaves scope or is destroyed with pending work, Asio hangs or times out in automated test runners.
+
+### The Invariants
+1. **Lambda Closure for `co_spawn`**: Never pass an invoked awaitable expression directly from a temporary or local callable to `asio::co_spawn`. Wrap it in an explicit lambda:
+   ```cpp
+   asio::co_spawn(io, [stream, ctx]() -> asio::awaitable<void> {
+       co_await h3::session_handler::handle_unidirectional_stream(stream, ctx);
+   }, asio::detached);
+   ```
+2. **Explicit Stream & Connection Close**: Always explicitly invoke `stream->close()` on all mock streams and `conn->close()` on test connections.
+3. **Explicit IO Stop and Drain**: Call `io.stop()` and drain remaining handlers with `io.poll()` before test function exit:
+   ```cpp
+   ctrl_stream->close();
+   enc_stream->close();
+   server_conn->close();
+   io.stop();
+   io.poll();
+   ```
+
+---
+
+## 6. Automated Test Runner Output Flushing (`std::endl` vs. `\n`)
+
+### The Bug
+CTest and CI test runners redirect stdout to pipes, causing the C runtime to block-buffer standard output (typically 4096 bytes). Terminating test milestone logs and `[PASS]` messages with `\n` without flushing leaves them in the OS buffer. If a subsequent test stalls or times out, all preceding un-flushed logs remain hidden, creating the misleading impression that an earlier test stalled.
+
+### The Invariant
+All test section announcements and `[PASS]` assertions must terminate with `std::endl` (or explicit `std::flush`) to ensure immediate delivery to automated test runners:
+```cpp
+std::cout << "  [PASS] Feature verification passed." << std::endl;
+```

@@ -313,6 +313,19 @@ This skill provides essential domain context for developing, extending, and debu
     - Receiving any client `Handshake` packet validates the client address (`peer_address_validated_ = true`).
     - If handshake keys are not yet available, incoming `Handshake` packets must be safely buffered in `buffered_handshake_packets_` without advancing connection state or triggering fallback responses.
 
+40. **Mock Stream Coroutine Lifecycle & Test Teardown Invariant**:
+    - When testing coroutines that process streams in loops (`while (stream->is_open())`), pushing partial wire bytes without FIN leaves the coroutine suspended on `stream->async_read_some()`.
+    - Test functions must explicitly close all streams (`stream->close()`) and connections (`conn->close()`), and invoke `io.stop()` and `io.poll()` prior to exiting. Failing to close leaves suspended coroutines and pending timers that prevent `io_context` destruction, causing automated test runners to time out.
+
+41. **Automated Test Runner Output Flushing (`std::endl`)**:
+    - CTest and CI runners block-buffer standard output (4096 bytes) when redirecting stdout to pipes. Terminating test milestone logs and `[PASS]` messages with `\n` instead of `std::endl` delays log delivery.
+    - If a subsequent test deadlocks or times out, preceding un-flushed logs remain hidden in the OS buffer, masking the true failure site. All test runner output must be flushed immediately using `std::endl`.
+
+42. **HTTP/3 Session Demultiplexing & Connection Context (`user_context()`)**:
+    - QUIC unidirectional streams (RFC 9114 Control, QPACK Encoder/Decoder) mutate connection-wide state (SETTINGS, dynamic tables, GOAWAY).
+    - `QuicConnection` provides a type-erased `user_context()` (downcast to `http3::connection_context`).
+    - Bidirectional request streams must retrieve this context via `protocol_traits<Codec>::get_connection_context(stream, fallback)` so dynamic table entries inserted by encoder streams are visible during request header decompression.
+
 ---
 
 ## Detailed Reference Guides

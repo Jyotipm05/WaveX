@@ -70,3 +70,12 @@ This rule governs RFC 9000, RFC 9001, and RFC 9002 compliance, wire framing, hea
   ```
 - NEVER invoke `send_initial_handshake_response()` upon receiving non-Initial packets (such as buffered `Handshake` or 1-RTT datagrams). Doing so emits spurious Initial ACK and HANDSHAKE_DONE frames, corrupting the connection state and polluting outbound packet queues.
 
+---
+
+## 9. Stream Session Demultiplexing & Connection Context Binding
+
+- QUIC streams share the parent connection's protocol session state (e.g., HTTP/3 QPACK dynamic table, peer `SETTINGS`, and `GOAWAY` stream limit).
+- Unidirectional streams (`(sid & 0x03) == 0x02`) processed by `handle_unidirectional_stream` must mutate the connection-level `user_context()` (downcast to `http3::connection_context`).
+- Bidirectional request streams (`(sid & 0x03) == 0x00`) dispatched to server routers must retrieve the connection-level session context via `protocol_traits<Codec>::get_connection_context(stream, fallback)` so dynamic table entries inserted by encoder streams are visible during request header decompression.
+- Server listeners/acceptors must register unidirectional stream handlers that bind the connection `user_context` and dispatch instructions asynchronously, preventing unbounded buffering or dynamic table desynchronization.
+

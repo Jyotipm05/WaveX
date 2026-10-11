@@ -1,10 +1,6 @@
----
-trigger: always_on
----
-
 # WaveX Asio Async & Socket Lifecycle Invariants
 
-This rule governs all Asio networking, socket options, coroutine frame lifetimes, and connection registry implementations across WaveX.
+This rule governs Asio networking, socket options, coroutine frame lifetimes, and connection registry implementations across WaveX.
 
 ---
 
@@ -74,39 +70,20 @@ This rule governs all Asio networking, socket options, coroutine frame lifetimes
 
 ---
 
-## 6. Server Graceful Drain, Deadlock Immunity & Test Signal Isolation
+## 6. Server Graceful Drain & Deadlock Immunity
 
 - **Idle Keep-Alive Cancellation**: When initiating shutdown (`server.exit()`, `ShutdownEvent`), the server must proactively cancel idle sockets waiting on empty buffers (`cancel_all_idle()`) to prevent draining hangs.
 - **Worker Thread Deadlock Immunity**: During programmatic shutdown, the final shutdown step (`finish_shutdown()`) must be posted to `master_io_` rather than calling `pool_.stop_pool()` directly from inside a worker thread, ensuring worker threads never attempt to join themselves.
 - **Response Stamping**: In-flight requests finishing during shutdown must have their responses stamped with `Connection: close`.
-- **Test Signal Isolation**: Automated unit tests using loopback test servers must configure `server.enable_signal_handling(false)` to prevent background signal registration from interfering with the test runner's global signal table.
 
 ---
 
-## 7. Windows Sockets & Completion Executor Macro Invariants
-
-- **Winsock Linking**: On Windows platforms, all CMake networking targets must explicitly link `ws2_32` and `mswsock` (`PUBLIC`). GNU `ld` on MinGW does not process `#pragma comment(lib, ...)`, which causes link-time failures (`undefined reference to '__imp_WSAStartup'`, etc.) if omitted.
-- **TS Executor Prohibited**: Never define `ASIO_USE_TS_EXECUTOR_AS_DEFAULT` in any codebase header or build flag. It alters the fundamental type of `asio::any_completion_executor`, conflicting with modern C++20 awaitable signatures and triggering MSVC `C2371` type redefinition errors.
-
----
-
-## 8. Unit Test `io_context` Run Termination & Background Timer Isolation
-
-- Asio's `io_context::run()` blocks as long as there is active work. An active `asio::steady_timer` (such as RFC 9002 loss detection/PTO timers, keep-alive pingers, or idle timeouts) counts as pending work.
-- If a tested component schedules a background timer that rearms on expiration (e.g. PTO exponential backoff retransmission), calling unbounded `io.run()` in unit tests causes the test runner to hang indefinitely until CTest timeout.
-- **Mandatory Pattern in Unit Tests**:
-  1. Coroutines or completion callbacks driving tests must explicitly invoke `io.stop()` (or `io2.stop()`) as soon as the test assertion or coroutine step succeeds.
-  2. Prefer bounded execution methods (`io.run_for(100ms)`, `io.poll()`, or `io.run_one()`) when verifying asynchronous state transitions in tests.
-  3. Close connection and transport objects (`conn->close()`) to ensure all background timers are canceled (`loss_timer_.cancel(ec)`) before `io_context` teardown.
-
----
-
-## 9. Completion Handler & Coroutine Resumption Mutex Deadlock Invariant
+## 7. Completion Handler & Coroutine Resumption Mutex Deadlock Invariant
 
 - **NEVER** invoke asynchronous completion callbacks (`shared_h`, completion tokens, or `fire(...)`) while holding a non-recursive `std::mutex` (`mtx_`).
 - In Asio, invoking a completion handler frequently resumes the awaiting coroutine inline on the current thread. Resumed coroutines routinely execute cleanup or subsequent stream operations (such as `stream->close()`, `stream->is_open()`, or another `async_read_some()`), each of which attempts to acquire `mtx_`.
 - Because `std::mutex` is non-recursive, invoking completion handlers under lock results in an immediate, silent self-deadlock on the thread.
-- **Mandatory Pattern**: Evaluate status codes, perform buffer copies, and update container state strictly inside a scoped lock block. Ensure the lock is unlocked/destroyed BEFORE invoking the completion handler:
+- **Mandatory Pattern**: Evaluate status codes, perform buffer copies, and update container state strictly inside a scoped lock block. Ensure the lock is released BEFORE invoking the completion handler:
   ```cpp
   const char *site = "pending-success";
   std::error_code result_ec;
@@ -128,7 +105,7 @@ This rule governs all Asio networking, socket options, coroutine frame lifetimes
 
 ---
 
-## 10. `asio::co_spawn` Closure Lifetime & Local Callable Invariant
+## 8. `asio::co_spawn` Closure Lifetime & Local Callable Invariant
 
 - **NEVER** pass an already-invoked awaitable expression from a local callable to `asio::co_spawn`:
   ```cpp
@@ -148,7 +125,7 @@ This rule governs all Asio networking, socket options, coroutine frame lifetimes
 
 ---
 
-## 11. Timed Asynchronous Post Stack Capture Lifetime
+## 9. Timed Asynchronous Post Stack Capture Lifetime
 
 - **NEVER** capture local stack variables by reference (`[&stack_var]`) inside lambdas posted to an executor via `asio::post`, especially when followed by a bounded wait (`wait_for` / `wait_until`) or detached execution.
 - If the wait times out or the function exits early, the stack frame is unwound and destroyed. When the executor thread subsequently runs the posted task, it dereferences invalid stack memory.
@@ -165,5 +142,3 @@ This rule governs all Asio networking, socket options, coroutine frame lifetimes
   });
   fut.wait_for(std::chrono::milliseconds(500));
   ```
-
-

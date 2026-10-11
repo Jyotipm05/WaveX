@@ -74,3 +74,4 @@ trigger: always_on
 - [never-config-cmake.md](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/rules/never-config-cmake.md) (CMake configure safety)
 - [future-protocols-architecture.md](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/rules/future-protocols-architecture.md) (Protocol extensions)
 - [quic-transport-invariants.md](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/rules/quic-transport-invariants.md) (QUIC transport & crypto)
+- [test-invariants.md](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/rules/test-invariants.md) (Unit tests, stream isolation, CTest flushing)

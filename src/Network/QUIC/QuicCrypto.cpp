@@ -14,6 +14,10 @@
 #include <wavex/Network/QUIC/QuicCrypto.hpp>
 #include <wavex/Base/Logger.hpp>
 
+#ifdef __MINGW32__
+#include <cstring>
+#endif
+
 #if defined(min)
 #undef min
 #endif
