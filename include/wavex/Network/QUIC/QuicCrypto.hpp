@@ -33,6 +33,17 @@ namespace wavex::network::quic {
         std::array<uint8_t, 16> hp{};
         uint8_t key_phase{0};
         bool valid{false};
+
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        ProtectionKeys() noexcept = default;
+        ~ProtectionKeys() noexcept;
+        ProtectionKeys(const ProtectionKeys &other) noexcept;
+        ProtectionKeys &operator=(const ProtectionKeys &other) noexcept;
+        ProtectionKeys(ProtectionKeys &&other) noexcept;
+        ProtectionKeys &operator=(ProtectionKeys &&other) noexcept;
+
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
+        void cleanse() noexcept;
     };
 
     struct CryptoSuite {

@@ -243,6 +243,7 @@ endif ()
 add_library(wavex
         src/wavex.cpp
         src/protos/protos.cpp
+        src/protos/http/http3codec.cpp
         src/Base/Logger.cpp
         src/Base/Uri.cpp
         src/Base/Url.cpp
@@ -567,6 +568,7 @@ if (WAVEX_TEST)
     wavex_add_test(wavex_request_arena_tests   tests/test_request_arena.cpp)
     if (WAVEX_HAS_SSL)
         wavex_add_test(wavex_quic_tests            tests/test_quic.cpp)
+        wavex_add_test(wavex_qpack_tests           tests/test_qpack.cpp)
         wavex_add_test(wavex_http3_tests           tests/test_http3.cpp)
     endif ()
 

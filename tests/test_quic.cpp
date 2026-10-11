@@ -418,6 +418,91 @@ static void test_quic_variable_cid_and_key_update_a16() {
     std::cout << "  [PASS] A16: Variable-length CID and RFC 9001 Key Update verified." << std::endl;
 }
 
+static void test_quic_secrets_cleanse_b9() {
+    std::cout << "[Test QUIC] B9: Secrets wiping and OPENSSL_cleanse verification..." << std::endl;
+
+    // 1. Manual cleanse() zeroes all key material and invalidates
+    {
+        ProtectionKeys keys;
+        keys.secret.fill(0x42);
+        keys.key.fill(0x13);
+        keys.iv.fill(0x37);
+        keys.hp.fill(0x99);
+        keys.key_phase = 1;
+        keys.valid = true;
+
+        keys.cleanse();
+
+        for (auto b : keys.secret) assert(b == 0);
+        for (auto b : keys.key) assert(b == 0);
+        for (auto b : keys.iv) assert(b == 0);
+        for (auto b : keys.hp) assert(b == 0);
+        assert(keys.key_phase == 0);
+        assert(!keys.valid);
+    }
+
+    // 2. Move assignment wipes previous destination keys and cleanses source
+    {
+        ProtectionKeys dest;
+        dest.secret.fill(0xAA);
+        dest.key.fill(0xAA);
+        dest.valid = true;
+
+        ProtectionKeys src;
+        src.secret.fill(0xBB);
+        src.key.fill(0xBB);
+        src.valid = true;
+
+        dest = std::move(src);
+
+        // dest now has src's values
+        assert(dest.secret[0] == 0xBB);
+        assert(dest.key[0] == 0xBB);
+        assert(dest.valid);
+
+        // src was cleansed
+        for (auto b : src.secret) assert(b == 0);
+        for (auto b : src.key) assert(b == 0);
+        assert(!src.valid);
+    }
+
+    // 3. Move construction cleanses source
+    {
+        ProtectionKeys src;
+        src.secret.fill(0xCC);
+        src.key.fill(0xCC);
+        src.valid = true;
+
+        ProtectionKeys dest(std::move(src));
+
+        assert(dest.secret[0] == 0xCC);
+        assert(dest.valid);
+
+        for (auto b : src.secret) assert(b == 0);
+        for (auto b : src.key) assert(b == 0);
+        assert(!src.valid);
+    }
+
+    // 4. Initial secrets derivation and key update lifecycle
+    {
+        const ConnectionId dcid = ConnectionId::random(8);
+        ProtectionKeys client_in, server_in;
+        bool ok = CryptoSuite::derive_initial_secrets(dcid, client_in, server_in);
+        assert(ok);
+        assert(client_in.valid && server_in.valid);
+
+        ProtectionKeys client_saved = client_in;
+        assert(CryptoSuite::update_keys(client_in));
+        assert(client_in.key != client_saved.key);
+        assert(client_in.secret != client_saved.secret);
+        assert(client_in.iv != client_saved.iv);
+        assert(client_in.hp == client_saved.hp); // HP does not update
+        assert(client_in.key_phase == 1);
+    }
+
+    std::cout << "  [PASS] B9: Secrets wiping and OPENSSL_cleanse verified." << std::endl;
+}
+
 static void test_udp_basic_loopback() {
     std::cout << "[Test QUIC] Basic UDP socket loopback..." << std::endl;
 
@@ -1818,6 +1903,7 @@ int main() {
         test_quic_stream_chunk_buffering_e2();
         test_quic_keys_cleanliness_a15();
         test_quic_variable_cid_and_key_update_a16();
+        test_quic_secrets_cleanse_b9();
         test_quic_tls_ctx_move_and_accept_stream();
         test_quic_lifecycle_idle_eviction_and_crypto_cap();
         test_quic_stream_limits_and_coroutine_termination();

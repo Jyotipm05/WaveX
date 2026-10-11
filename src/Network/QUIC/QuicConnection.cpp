@@ -280,6 +280,12 @@ namespace wavex::network::quic {
             asio::error_code ec;
             idle_timer_->cancel(ec);
         }
+        initial_keys_peer_.cleanse();
+        initial_keys_local_.cleanse();
+        handshake_keys_peer_.cleanse();
+        handshake_keys_local_.cleanse();
+        one_rtt_keys_peer_.cleanse();
+        one_rtt_keys_local_.cleanse();
     }
 
     QuicConnection::QuicConnection(
@@ -566,11 +572,11 @@ namespace wavex::network::quic {
             current_write_level_ = prot_level;
             if (prot_level == 2) {
                 // OSSL_RECORD_PROTECTION_LEVEL_HANDSHAKE
-                handshake_keys_local_ = keys;
+                handshake_keys_local_ = std::move(keys);
                 wavex::log::debug("[QUIC] on_tls_secret: handshake_keys_local_ set (write)");
             } else if (prot_level >= 3) {
                 // OSSL_RECORD_PROTECTION_LEVEL_APPLICATION
-                one_rtt_keys_local_ = keys;
+                one_rtt_keys_local_ = std::move(keys);
                 wavex::log::debug("[QUIC] on_tls_secret: one_rtt_keys_local_ set (write)");
             }
         } else {
@@ -578,17 +584,18 @@ namespace wavex::network::quic {
             current_read_level_ = prot_level;
             if (prot_level == 2) {
                 // OSSL_RECORD_PROTECTION_LEVEL_HANDSHAKE
-                handshake_keys_peer_ = keys;
+                handshake_keys_peer_ = std::move(keys);
                 wavex::log::debug("[QUIC] on_tls_secret: handshake_keys_peer_ set (read)");
                 drain_buffered_packets();
             } else if (prot_level >= 3) {
                 // OSSL_RECORD_PROTECTION_LEVEL_APPLICATION
-                one_rtt_keys_peer_ = keys;
+                one_rtt_keys_peer_ = std::move(keys);
                 wavex::log::debug(
                     "[QUIC] on_tls_secret: one_rtt_keys_peer_ set (read)");
                 drain_buffered_packets();
             }
         }
+        keys.cleanse();
         return 1;
 #else
         (void) prot_level;

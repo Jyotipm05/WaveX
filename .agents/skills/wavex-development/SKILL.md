@@ -73,9 +73,8 @@ This skill provides essential domain context for developing, extending, and debu
     - `http/http1codec.hpp`: Zero-copy HTTP/1.x parser, encoder, chunked decoder, and standard status text mapping (
       including 301, 302, 303, 304, 307, 308).
     - `http/http2codec.hpp`: RFC 7540 binary framing parser, encoder, and RFC 7541 HPACK compression engine.
-    - `http/http3codec.hpp`: RFC 9114 HTTP/3 binary framing parser and encoder (`http3codec`), RFC 9204 QPACK encoder/decoder,
-      static table lookup, literal field section processing, and VarInt framed streams. Provides `Http3Request`,
-      `Http3Response`, and `Http3Router`.
+    - `http/http3codec.hpp`, `src/protos/http/http3codec.cpp`: RFC 9114 HTTP/3 binary framing parser and encoder (`http3codec`), RFC 9204 QPACK encoder/decoder,
+      static table lookup, literal field section processing, and VarInt framed streams. Non-template parser/encoder algorithms are cleanly implemented out-of-line in `http3codec.cpp` to safeguard header AST leanliness against MSVC `C1001` front-end exhaustion. Provides `Http3Request`, `Http3Response`, and `Http3Router`.
     - `http/HttpRequest.hpp`: Concrete request parsing from socket streams (`parse_stream`, `consumed_bytes`), multipart
       form accessors (`is_multipart`, `multipart`, `file`, `files`), decompression (`decompressed_body`), and disk
       persistence (`save_body_to_file`). Concrete specializations include `Http1Request`, `Http2Request`, and `Http3Request`.
@@ -326,12 +325,34 @@ This skill provides essential domain context for developing, extending, and debu
     - `QuicConnection` provides a type-erased `user_context()` (downcast to `http3::connection_context`).
     - Bidirectional request streams must retrieve this context via `protocol_traits<Codec>::get_connection_context(stream, fallback)` so dynamic table entries inserted by encoder streams are visible during request header decompression.
 
+43. **QPACK Relative vs Absolute Indexing Invariant (RFC 9204 §4.3.2)**:
+    - Instructions from encoder sub-streams (Insert with Name Reference, Duplicate) supply relative indices referencing the dynamic table at that point in time.
+    - Treating relative indices directly as absolute indices corrupts dynamic table lookups.
+    - Always convert: $\text{Absolute Index} = \text{Insert Count} - 1 - \text{Relative Index}$.
+
+44. **HTTP/3 Resumable Request Parsing & Stream FIN Lifecycle (RFC 9114 §4.1)**:
+    - Returning `success` on `HEADERS` frame arrival while the request payload is only partially received causes downstream handlers to read truncated bodies.
+    - The parser must maintain state (`parser_state`) across asynchronous socket reads, consuming subsequent `DATA` chunks up to `remaining_data_frame_bytes`.
+    - Only finalize a request once the stream FIN flag is reached or the specified `Content-Length` is completely satisfied.
+
+45. **QPACK Dynamic Table Connection Scope & Post-Base Addressing**:
+    - Never instantiate dynamic tables per-stream or copy them per-request turn. QPACK dynamic state must be connection-scoped within `connection_context::decode_table`.
+    - Table capacity must strictly respect the peer's advertised limit (`peer_qpack_max_table_capacity`).
+    - Field lines referencing dynamic entries inserted after the Base of a header block must use Post-Base indexing ($\text{Post-Base Index} = \text{Absolute Index} - \text{Base}$, RFC 9204 §4.5.3).
+
+46. **Cryptographic Key Erasure (`OPENSSL_cleanse`) & Key Updates (RFC 9001 §6)**:
+    - Sensitive key material (AEAD keys, IVs, header protection keys) must never linger in deallocated heap memory.
+    - Always invoke `OPENSSL_cleanse` on key buffers upon destruction or retirement during key phase transitions.
+    - Short header packets must evaluate the Key Phase bit (`0x04`) and trigger HKDF key updates without dropping packets.
+
 ---
 
 ## Detailed Reference Guides
 
 - [QUIC Transport & Reliability Architecture](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/skills/wavex-development/references/quic-transport-and-reliability.md): Loss detection (RFC 9002), PTO timers, stream reassembly by offset, and handshake state machine gating.
+- [HTTP/3 & QPACK Architecture](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/skills/wavex-development/references/http3-and-qpack-architecture.md): Binary framing, resumable request parsing, strict RFC 9114 validation, QPACK table indexing, and out-of-line compilation.
 - [3-Seam Architecture & Protocol Composition](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/skills/wavex-development/references/three-seam-architecture.md): Transport, Codec, and Policy seams, protocol leakage prevention, and `ComposedHttpServer`.
 - [Testing & Concurrency Gotchas](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/skills/wavex-development/references/testing-and-debugging-gotchas.md): Asio timers in unit tests, mutex unlocking before `co_await`, and `weak_ptr` callback lifetime rules.
+
 
 

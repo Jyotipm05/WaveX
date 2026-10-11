@@ -32,6 +32,7 @@
 #include <openssl/evp.h>
 #include <openssl/kdf.h>
 #include <openssl/hmac.h>
+#include <openssl/crypto.h>
 
 namespace wavex::network::quic {
     // RFC 9001 §5.2 Initial Salt for QUIC Version 1
@@ -99,6 +100,71 @@ namespace wavex::network::quic {
     }
 #endif
 
+    void ProtectionKeys::cleanse() noexcept {
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+        OPENSSL_cleanse(secret.data(), secret.size());
+        OPENSSL_cleanse(key.data(), key.size());
+        OPENSSL_cleanse(iv.data(), iv.size());
+        OPENSSL_cleanse(hp.data(), hp.size());
+#else
+        std::fill(secret.begin(), secret.end(), 0);
+        std::fill(key.begin(), key.end(), 0);
+        std::fill(iv.begin(), iv.end(), 0);
+        std::fill(hp.begin(), hp.end(), 0);
+#endif
+        key_phase = 0;
+        valid = false;
+    }
+
+    ProtectionKeys::~ProtectionKeys() noexcept {
+        cleanse();
+    }
+
+    ProtectionKeys::ProtectionKeys(const ProtectionKeys &other) noexcept
+        : secret(other.secret),
+          key(other.key),
+          iv(other.iv),
+          hp(other.hp),
+          key_phase(other.key_phase),
+          valid(other.valid) {}
+
+    ProtectionKeys &ProtectionKeys::operator=(const ProtectionKeys &other) noexcept {
+        if (this != &other) {
+            cleanse();
+            secret = other.secret;
+            key = other.key;
+            iv = other.iv;
+            hp = other.hp;
+            key_phase = other.key_phase;
+            valid = other.valid;
+        }
+        return *this;
+    }
+
+    ProtectionKeys::ProtectionKeys(ProtectionKeys &&other) noexcept
+        : secret(other.secret),
+          key(other.key),
+          iv(other.iv),
+          hp(other.hp),
+          key_phase(other.key_phase),
+          valid(other.valid) {
+        other.cleanse();
+    }
+
+    ProtectionKeys &ProtectionKeys::operator=(ProtectionKeys &&other) noexcept {
+        if (this != &other) {
+            cleanse();
+            secret = other.secret;
+            key = other.key;
+            iv = other.iv;
+            hp = other.hp;
+            key_phase = other.key_phase;
+            valid = other.valid;
+            other.cleanse();
+        }
+        return *this;
+    }
+
     bool CryptoSuite::derive_initial_secrets(
         const ConnectionId &client_dcid,
         ProtectionKeys &client_keys,
@@ -113,10 +179,16 @@ namespace wavex::network::quic {
             return false;
         }
 
+        bool ok = true;
         // 2. Client Initial Secret = HKDF-Expand-Label(initial_secret, "client in", "", 32)
-        if (!hkdf_expand_label(initial_secret, 32, "client in", client_keys.secret.data(), 32)) return false;
+        if (!hkdf_expand_label(initial_secret, 32, "client in", client_keys.secret.data(), 32)) ok = false;
         // 3. Server Initial Secret = HKDF-Expand-Label(initial_secret, "server in", "", 32)
-        if (!hkdf_expand_label(initial_secret, 32, "server in", server_keys.secret.data(), 32)) return false;
+        if (ok && !hkdf_expand_label(initial_secret, 32, "server in", server_keys.secret.data(), 32)) ok = false;
+
+        // Securely wipe intermediate initial_secret from stack
+        OPENSSL_cleanse(initial_secret, sizeof(initial_secret));
+
+        if (!ok) return false;
 
         // 4. Expand keys for client and server
         if (!expand_quic_keys(client_keys.secret.data(), 32, client_keys)) return false;
@@ -169,6 +241,7 @@ namespace wavex::network::quic {
         std::array<uint8_t, 16> next_key{};
         if (!hkdf_expand_label(next_secret.data(), next_secret.size(), "quic key",
                                next_key.data(), next_key.size())) {
+            OPENSSL_cleanse(next_secret.data(), next_secret.size());
             return false;
         }
 
@@ -176,13 +249,26 @@ namespace wavex::network::quic {
         std::array<uint8_t, 12> next_iv{};
         if (!hkdf_expand_label(next_secret.data(), next_secret.size(), "quic iv",
                                next_iv.data(), next_iv.size())) {
+            OPENSSL_cleanse(next_secret.data(), next_secret.size());
+            OPENSSL_cleanse(next_key.data(), next_key.size());
             return false;
         }
 
         // Header protection keys (hp) are NOT updated across key updates (RFC 9001 §6.1)
+        // Cleanse existing keys before overwriting
+        OPENSSL_cleanse(keys.secret.data(), keys.secret.size());
+        OPENSSL_cleanse(keys.key.data(), keys.key.size());
+        OPENSSL_cleanse(keys.iv.data(), keys.iv.size());
+
         keys.secret = next_secret;
         keys.key = next_key;
         keys.iv = next_iv;
+
+        // Cleanse stack temporaries
+        OPENSSL_cleanse(next_secret.data(), next_secret.size());
+        OPENSSL_cleanse(next_key.data(), next_key.size());
+        OPENSSL_cleanse(next_iv.data(), next_iv.size());
+
         keys.key_phase ^= 1;
         return true;
 #else
