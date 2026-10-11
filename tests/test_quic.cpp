@@ -228,6 +228,48 @@ static void test_quic_stream_async() {
     std::cout << "  [PASS] QuicStream async read/write buffering passed." << std::endl;
 }
 
+static void test_quic_stream_chunk_buffering_e2() {
+    std::cout << "[Test QUIC] E2: High-throughput contiguous chunk stream buffering..." << std::endl;
+
+    auto ep = asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 9999);
+    auto conn = std::make_shared<QuicConnection>(
+        ConnectionId::random(8), ConnectionId::random(8), ep, false);
+
+    auto stream = conn->create_stream(true);
+    assert(stream != nullptr);
+
+    // 1. Push multiple 8KB chunks (total 64KB)
+    std::string large_payload;
+    large_payload.reserve(64 * 1024);
+    for (int i = 0; i < 64 * 1024; ++i) {
+        large_payload.push_back(static_cast<char>('A' + (i % 26)));
+    }
+
+    const std::size_t push_chunk_size = 8192;
+    for (std::size_t offset = 0; offset < large_payload.size(); offset += push_chunk_size) {
+        stream->push_inbound(std::string_view(large_payload).substr(offset, push_chunk_size), false);
+    }
+
+    std::error_code ec;
+    assert(stream->available(ec) == large_payload.size());
+
+    // 2. Read in 5KB chunks to verify partial / cross-chunk drains with memcpy
+    std::string read_accumulated;
+    char read_buf[5120];
+    while (stream->available(ec) > 0) {
+        std::size_t n = stream->read_some(asio::buffer(read_buf), ec);
+        assert(!ec);
+        assert(n > 0);
+        read_accumulated.append(read_buf, n);
+    }
+
+    assert(read_accumulated.size() == large_payload.size());
+    assert(read_accumulated == large_payload);
+    assert(stream->available(ec) == 0);
+
+    std::cout << "  [PASS] E2: Contiguous chunk stream buffering verified." << std::endl;
+}
+
 static void test_udp_basic_loopback() {
     std::cout << "[Test QUIC] Basic UDP socket loopback..." << std::endl;
 
@@ -1625,6 +1667,7 @@ int main() {
         test_rfc9002_loss_and_recovery();
         test_congestion_controller();
         test_quic_stream_async();
+        test_quic_stream_chunk_buffering_e2();
         test_quic_tls_ctx_move_and_accept_stream();
         test_quic_lifecycle_idle_eviction_and_crypto_cap();
         test_quic_stream_limits_and_coroutine_termination();

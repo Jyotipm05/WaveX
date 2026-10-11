@@ -156,13 +156,8 @@ namespace wavex::network::quic {
             return 0;
         }
 
-        const std::size_t to_read = (std::min)(buffer.size(), in_buffer_.size());
         auto *dest = static_cast<uint8_t *>(buffer.data());
-        for (std::size_t i = 0; i < to_read; ++i) {
-            dest[i] = in_buffer_.front();
-            in_buffer_.pop_front();
-        }
-        return to_read;
+        return in_buffer_.read(dest, buffer.size());
     }
 
     void QuicStream::push_inbound(const std::string_view data, const bool fin) {
@@ -220,9 +215,7 @@ namespace wavex::network::quic {
 
                 auto append_bytes = [&](std::string_view chunk) {
                     if (chunk.empty()) return;
-                    for (const char c : chunk) {
-                        in_buffer_.push_back(static_cast<uint8_t>(c));
-                    }
+                    in_buffer_.append(chunk);
                     recv_offset_ += chunk.size();
                 };
 

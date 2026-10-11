@@ -382,6 +382,7 @@ target_sources(wavex
         include/wavex/Utils/Compression.hpp
         include/wavex/Utils/Multipart.hpp
         include/wavex/Utils/AsyncFs.hpp
+        include/wavex/Utils/StreamBuffer.hpp
 )
 
 # C++ Modules

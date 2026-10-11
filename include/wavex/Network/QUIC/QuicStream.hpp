@@ -19,7 +19,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
-#include <deque>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -37,9 +37,11 @@
 #include <asio/post.hpp>
 
 #include <wavex/Base/Logger.hpp>
+#include <wavex/Utils/StreamBuffer.hpp>
 
 namespace wavex::network::quic {
     class QuicConnection;
+    using wavex::utils::StreamBuffer;
 
     struct StreamChunk {
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
@@ -77,7 +79,7 @@ namespace wavex::network::quic {
         std::weak_ptr<QuicConnection> conn_{};
         asio::any_io_executor executor_{};
         mutable std::mutex mtx_{};
-        std::deque<uint8_t> in_buffer_{};
+        StreamBuffer in_buffer_{};
         std::vector<StreamChunk> pending_inbound_{};
         std::optional<ReadCallback> pending_read_{};
         std::optional<uint64_t> final_size_{std::nullopt};
@@ -193,10 +195,7 @@ namespace wavex::network::quic {
                             asio::mutable_buffer mb(*b);
                             std::size_t chunk = (std::min)(mb.size(), to_copy - copied);
                             auto *dest = static_cast<uint8_t *>(mb.data());
-                            for (std::size_t i = 0; i < chunk; ++i) {
-                                dest[i] = self->in_buffer_.front();
-                                self->in_buffer_.pop_front();
-                            }
+                            self->in_buffer_.read(dest, chunk);
                             copied += chunk;
                         }
                         asio::post(executor, [fire, copied] {
@@ -244,10 +243,7 @@ namespace wavex::network::quic {
                                         asio::mutable_buffer mb(*b);
                                         std::size_t chunk = (std::min)(mb.size(), to_copy - copied);
                                         auto *dest = static_cast<uint8_t *>(mb.data());
-                                        for (std::size_t i = 0; i < chunk; ++i) {
-                                            dest[i] = s->in_buffer_.front();
-                                            s->in_buffer_.pop_front();
-                                        }
+                                        s->in_buffer_.read(dest, chunk);
                                         copied += chunk;
                                     }
                                 }

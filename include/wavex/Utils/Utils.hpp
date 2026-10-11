@@ -17,3 +17,4 @@
 #include <wavex/Utils/Multipart.hpp>
 #include <wavex/Utils/AsyncFs.hpp>
 #include <wavex/Utils/FsUtils.hpp>
+#include <wavex/Utils/StreamBuffer.hpp>

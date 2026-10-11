@@ -26,6 +26,7 @@ export namespace wavex::utils {
     using utils::FormField;
     using utils::MultipartLimits;
     using utils::MultipartFormData;
+    using utils::StreamBuffer;
 }
 
 export namespace wavex::utils::fs_utils {
