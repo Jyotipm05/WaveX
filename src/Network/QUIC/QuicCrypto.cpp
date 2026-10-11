@@ -34,7 +34,6 @@
 #include <openssl/hmac.h>
 
 namespace wavex::network::quic {
-
     // RFC 9001 §5.2 Initial Salt for QUIC Version 1
     static constexpr uint8_t INITIAL_SALT_V1[20] = {
         0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17,
@@ -58,9 +57,9 @@ namespace wavex::network::quic {
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
     static bool hkdf_expand_label(
-        const uint8_t *secret, std::size_t secret_len,
+        const uint8_t *secret, const std::size_t secret_len,
         const std::string_view label,
-        uint8_t *out, std::size_t out_len) noexcept {
+        uint8_t *out, const std::size_t out_len) noexcept {
         // Construct HkdfLabel: Length (2 bytes), "tls13 " + Label (1 byte len + chars), Context (0 len)
         std::string hkdf_label;
         hkdf_label.push_back(static_cast<char>((out_len >> 8) & 0xff));
@@ -127,7 +126,7 @@ namespace wavex::network::quic {
         server_keys.valid = true;
         return true;
 #else
-        (void)client_dcid;
+        (void) client_dcid;
         client_keys.valid = true;
         server_keys.valid = true;
         return true;
@@ -148,7 +147,7 @@ namespace wavex::network::quic {
         keys.valid = true;
         return true;
 #else
-        (void)secret; (void)secret_len;
+        (void) secret; (void) secret_len;
         keys.valid = true;
         return true;
 #endif
@@ -186,10 +185,12 @@ namespace wavex::network::quic {
 
         if (EVP_EncryptInit_ex(ctx, EVP_aes_128_gcm(), nullptr, keys.key.data(), nonce.data()) != 1) ok = false;
         if (ok && EVP_EncryptUpdate(ctx, nullptr, &out_len, reinterpret_cast<const uint8_t *>(header_bytes.data()),
-                                    static_cast<int>(header_bytes.size())) != 1) ok = false;
+                                    static_cast<int>(header_bytes.size())) != 1)
+            ok = false;
         if (ok && EVP_EncryptUpdate(ctx, encrypted.data(), &out_len,
                                     reinterpret_cast<const uint8_t *>(plaintext.data()),
-                                    static_cast<int>(plaintext.size())) != 1) ok = false;
+                                    static_cast<int>(plaintext.size())) != 1)
+            ok = false;
         if (ok && EVP_EncryptFinal_ex(ctx, encrypted.data() + out_len, &out_len) != 1) ok = false;
         if (ok && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, encrypted.data() + plaintext.size()) != 1)
             ok = false;
@@ -201,8 +202,7 @@ namespace wavex::network::quic {
         ciphertext_out.append(reinterpret_cast<const char *>(encrypted.data()), encrypted.size());
 
         // Apply RFC 9001 §5.4 Header Protection
-        const std::size_t sample_offset = pn_offset + 4;
-        if (ciphertext_out.size() >= sample_offset + 16) {
+        if (const std::size_t sample_offset = pn_offset + 4; ciphertext_out.size() >= sample_offset + 16) {
             const auto *sample = reinterpret_cast<const uint8_t *>(ciphertext_out.data() + sample_offset);
             uint8_t mask[16] = {0};
 
@@ -269,9 +269,9 @@ namespace wavex::network::quic {
         if (!hp_ctx) return false;
 
         int hp_len = 0;
-        bool hp_ok = (EVP_EncryptInit_ex(hp_ctx, EVP_aes_128_ecb(), nullptr, keys.hp.data(), nullptr) == 1 &&
-                      EVP_CIPHER_CTX_set_padding(hp_ctx, 0) == 1 &&
-                      EVP_EncryptUpdate(hp_ctx, mask, &hp_len, sample, 16) == 1);
+        const bool hp_ok = (EVP_EncryptInit_ex(hp_ctx, EVP_aes_128_ecb(), nullptr, keys.hp.data(), nullptr) == 1 &&
+                            EVP_CIPHER_CTX_set_padding(hp_ctx, 0) == 1 &&
+                            EVP_EncryptUpdate(hp_ctx, mask, &hp_len, sample, 16) == 1);
         EVP_CIPHER_CTX_free(hp_ctx);
         if (!hp_ok) {
             wavex::log::debug("[QUIC] unprotect_packet: HP cipher failed");
@@ -317,8 +317,8 @@ namespace wavex::network::quic {
         // Step 3: Payload starts at real_hdr_len
         std::size_t total_packet_len = packet_bytes.size();
         if (hdr.is_long && hdr.length > 0) {
-            const std::size_t expected_long_len = pn_offset + static_cast<std::size_t>(hdr.length);
-            if (expected_long_len <= packet_bytes.size()) {
+            if (const std::size_t expected_long_len = pn_offset + static_cast<std::size_t>(hdr.length);
+                expected_long_len <= packet_bytes.size()) {
                 total_packet_len = expected_long_len;
             }
         }
@@ -349,7 +349,8 @@ namespace wavex::network::quic {
 
         if (EVP_DecryptInit_ex(ctx, EVP_aes_128_gcm(), nullptr, keys.key.data(), nonce.data()) != 1) ok = false;
         if (ok && EVP_DecryptUpdate(ctx, nullptr, &out_len, reinterpret_cast<const uint8_t *>(unmasked_hdr.data()),
-                                    static_cast<int>(unmasked_hdr.size())) != 1) ok = false;
+                                    static_cast<int>(unmasked_hdr.size())) != 1)
+            ok = false;
         if (ok && EVP_DecryptUpdate(ctx, decrypted.data(), &out_len, cipher_data, static_cast<int>(cipher_len)) != 1)
             ok = false;
         if (ok && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16, const_cast<uint8_t *>(tag_data)) != 1) ok = false;
@@ -373,7 +374,6 @@ namespace wavex::network::quic {
         return true;
 #endif
     }
-
 } // namespace wavex::network::quic
 
 #endif // WAVEX_HAS_SSL

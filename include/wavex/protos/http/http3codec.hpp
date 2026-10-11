@@ -810,7 +810,7 @@ namespace wavex::protos::http {
                         const uint64_t max_wrapped = (max_value / full_range) * full_range;
                         req_insert_count = max_wrapped + enc_insert_count - 1;
                         if (req_insert_count > max_value) {
-                            if (req_insert_count < full_range) return false;
+                            if (req_insert_count <= full_range) return false;
                             req_insert_count -= full_range;
                         }
                         if (req_insert_count == 0) return false;
@@ -935,16 +935,22 @@ namespace wavex::protos::http {
         struct request : public message_base {
             // ─── 1. Nested Types (TOP) ─────────────────────────────────────────
             struct parser_state {
+                // ─── 2. Member Variables (SECOND - Minimal Padding) ────
                 uint64_t content_length{0};
+                uint64_t remaining_data_frame_bytes{0};
                 std::size_t cursor{0};
                 bool headers_received{false};
                 bool has_content_length{false};
+                bool in_data_frame{false};
 
+                // ─── 4. Member Functions (LAST) ────────────────────────
                 void reset() noexcept {
                     content_length = 0;
+                    remaining_data_frame_bytes = 0;
                     cursor = 0;
                     headers_received = false;
                     has_content_length = false;
+                    in_data_frame = false;
                 }
             };
 
@@ -979,6 +985,7 @@ namespace wavex::protos::http {
                   authority_storage(other.authority_storage),
                   body_storage(other.body_storage),
                   headers_storage(other.headers_storage),
+                  state_(other.state_),
                   stream_id(other.stream_id),
                   method_type(other.method_type) {
                 rebase(other);
@@ -994,6 +1001,7 @@ namespace wavex::protos::http {
                   authority_storage(std::move(other.authority_storage)),
                   body_storage(std::move(other.body_storage)),
                   headers_storage(std::move(other.headers_storage)),
+                  state_(std::move(other.state_)),
                   stream_id(other.stream_id),
                   method_type(other.method_type) {
                 rebase(other);
@@ -1010,6 +1018,7 @@ namespace wavex::protos::http {
                     authority_storage = other.authority_storage;
                     body_storage = other.body_storage;
                     headers_storage = other.headers_storage;
+                    state_ = other.state_;
                     stream_id = other.stream_id;
                     method_type = other.method_type;
                     rebase(other);
@@ -1028,6 +1037,7 @@ namespace wavex::protos::http {
                     authority_storage = std::move(other.authority_storage);
                     body_storage = std::move(other.body_storage);
                     headers_storage = std::move(other.headers_storage);
+                    state_ = std::move(other.state_);
                     stream_id = other.stream_id;
                     method_type = other.method_type;
                     rebase(other);
@@ -1080,6 +1090,7 @@ namespace wavex::protos::http {
                   status_text(other.status_text),
                   body_storage(other.body_storage),
                   headers_storage(other.headers_storage),
+                  state_(other.state_),
                   stream_id(other.stream_id),
                   status_code(other.status_code) {
                 rebase(other);
@@ -1090,6 +1101,7 @@ namespace wavex::protos::http {
                   status_text(other.status_text),
                   body_storage(std::move(other.body_storage)),
                   headers_storage(std::move(other.headers_storage)),
+                  state_(std::move(other.state_)),
                   stream_id(other.stream_id),
                   status_code(other.status_code) {
                 rebase(other);
@@ -1101,6 +1113,7 @@ namespace wavex::protos::http {
                     status_text = other.status_text;
                     body_storage = other.body_storage;
                     headers_storage = other.headers_storage;
+                    state_ = other.state_;
                     stream_id = other.stream_id;
                     status_code = other.status_code;
                     rebase(other);
@@ -1114,6 +1127,7 @@ namespace wavex::protos::http {
                     status_text = other.status_text;
                     body_storage = std::move(other.body_storage);
                     headers_storage = std::move(other.headers_storage);
+                    state_ = std::move(other.state_);
                     stream_id = other.stream_id;
                     status_code = other.status_code;
                     rebase(other);
@@ -1140,21 +1154,30 @@ namespace wavex::protos::http {
         public:
             enum class result { success, incomplete, error };
 
+            [[nodiscard]] static bool parse_frame_header(
+                const std::string_view buffer,
+                frame_header &hdr,
+                std::size_t &bytes_consumed) {
+                bytes_consumed = 0;
+                std::size_t cursor = 0;
+                if (!VarInt::decode(buffer, cursor, hdr.type)) return false;
+                if (!VarInt::decode(buffer, cursor, hdr.length)) return false;
+                bytes_consumed = cursor;
+                return true;
+            }
+
             [[nodiscard]] static result parse_frame(
                 const std::string_view buffer,
                 frame_header &hdr,
                 std::string_view &payload,
                 std::size_t &bytes_consumed) {
                 bytes_consumed = 0;
-                std::size_t cursor = 0;
+                std::size_t hdr_bytes = 0;
+                if (!parse_frame_header(buffer, hdr, hdr_bytes)) return result::incomplete;
+                if (hdr_bytes + hdr.length > buffer.size()) return result::incomplete;
 
-                if (!VarInt::decode(buffer, cursor, hdr.type)) return result::incomplete;
-                if (!VarInt::decode(buffer, cursor, hdr.length)) return result::incomplete;
-
-                if (cursor + hdr.length > buffer.size()) return result::incomplete;
-
-                payload = buffer.substr(cursor, hdr.length);
-                bytes_consumed = cursor + hdr.length;
+                payload = buffer.substr(hdr_bytes, hdr.length);
+                bytes_consumed = hdr_bytes + hdr.length;
                 return result::success;
             }
 
@@ -1166,7 +1189,7 @@ namespace wavex::protos::http {
                 bytes_consumed = 0;
                 if (buffer.empty()) return result::incomplete;
 
-                if (req.state_.cursor == 0) {
+                if (req.state_.cursor == 0 && !req.state_.headers_received && !req.state_.in_data_frame) {
                     req.headers.clear();
                     req.headers_storage.clear();
                     req.target_storage.clear();
@@ -1181,21 +1204,53 @@ namespace wavex::protos::http {
                 std::size_t cursor = req.state_.cursor;
 
                 while (cursor < buffer.size()) {
+                    if (req.state_.in_data_frame) {
+                        const std::size_t available = buffer.size() - cursor;
+                        const auto to_consume = static_cast<std::size_t>(
+                            std::min(static_cast<uint64_t>(available), req.state_.remaining_data_frame_bytes));
+                        req.body_storage.append(buffer.substr(cursor, to_consume));
+                        cursor += to_consume;
+                        req.state_.remaining_data_frame_bytes -= to_consume;
+                        req.state_.cursor = cursor;
+                        if (req.state_.remaining_data_frame_bytes == 0) {
+                            req.state_.in_data_frame = false;
+                        }
+                        continue;
+                    }
+
                     const std::string_view remaining = buffer.substr(cursor);
                     frame_header hdr;
-                    std::string_view payload;
-                    std::size_t frame_bytes = 0;
-
-                    const auto r = parse_frame(remaining, hdr, payload, frame_bytes);
-                    if (r == result::incomplete) {
+                    std::size_t hdr_bytes = 0;
+                    if (!parse_frame_header(remaining, hdr, hdr_bytes)) {
                         break;
                     }
-                    if (r == result::error) {
-                        req.state_.reset();
-                        return result::error;
-                    }
 
-                    if (hdr.type == static_cast<uint64_t>(frame_type::HEADERS)) {
+                    if (hdr.type == static_cast<uint64_t>(frame_type::DATA)) {
+                        if (!req.state_.headers_received) {
+                            // RFC 9114 §4.1: DATA frame before HEADERS is a stream error
+                            req.state_.reset();
+                            return result::error;
+                        }
+                        cursor += hdr_bytes;
+                        req.state_.cursor = cursor;
+                        req.state_.in_data_frame = true;
+                        req.state_.remaining_data_frame_bytes = hdr.length;
+
+                        const std::size_t available = buffer.size() - cursor;
+                        const auto to_consume = static_cast<std::size_t>(
+                            std::min(static_cast<uint64_t>(available), req.state_.remaining_data_frame_bytes));
+                        req.body_storage.append(buffer.substr(cursor, to_consume));
+                        cursor += to_consume;
+                        req.state_.remaining_data_frame_bytes -= to_consume;
+                        req.state_.cursor = cursor;
+                        if (req.state_.remaining_data_frame_bytes == 0) {
+                            req.state_.in_data_frame = false;
+                        }
+                    } else if (hdr.type == static_cast<uint64_t>(frame_type::HEADERS)) {
+                        if (hdr_bytes + hdr.length > remaining.size()) {
+                            break;
+                        }
+                        const std::string_view payload = remaining.substr(hdr_bytes, hdr.length);
                         bool is_blocked = false;
                         std::vector<std::pair<std::string, std::string> > decoded_headers;
                         if (!dec.decode_header_block(payload, decoded_headers, is_blocked)) {
@@ -1297,25 +1352,24 @@ namespace wavex::protos::http {
                         }
 
                         req.state_.headers_received = true;
-                    } else if (hdr.type == static_cast<uint64_t>(frame_type::DATA)) {
-                        if (!req.state_.headers_received) {
-                            // RFC 9114 §4.1: DATA frame before HEADERS is a stream error
-                            req.state_.reset();
-                            return result::error;
-                        }
-                        req.body_storage.append(payload);
+                        cursor += hdr_bytes + hdr.length;
+                        req.state_.cursor = cursor;
                     } else if (hdr.type == static_cast<uint64_t>(frame_type::SETTINGS)) {
                         // RFC 9114 §7.2.4: SETTINGS frame MUST NOT be sent on any stream other than control stream
                         req.state_.reset();
                         return result::error;
+                    } else {
+                        // RFC 9114 §7.2.8: Unknown frames are ignored
+                        if (hdr_bytes + hdr.length > remaining.size()) {
+                            break;
+                        }
+                        cursor += hdr_bytes + hdr.length;
+                        req.state_.cursor = cursor;
                     }
-                    // RFC 9114 §7.2.8: Unknown frames are ignored
-
-                    cursor += frame_bytes;
-                    req.state_.cursor = cursor;
                 }
 
                 if (!req.state_.headers_received) return result::incomplete;
+                if (req.state_.in_data_frame) return result::incomplete;
 
                 if (req.state_.has_content_length) {
                     if (req.body_storage.size() < req.state_.content_length) {
@@ -1357,7 +1411,7 @@ namespace wavex::protos::http {
                 bytes_consumed = 0;
                 if (buffer.empty()) return result::incomplete;
 
-                if (res.state_.cursor == 0) {
+                if (res.state_.cursor == 0 && !res.state_.headers_received && !res.state_.in_data_frame) {
                     res.headers.clear();
                     res.headers_storage.clear();
                     res.body_storage.clear();
@@ -1369,21 +1423,52 @@ namespace wavex::protos::http {
                 std::size_t cursor = res.state_.cursor;
 
                 while (cursor < buffer.size()) {
+                    if (res.state_.in_data_frame) {
+                        const std::size_t available = buffer.size() - cursor;
+                        const auto to_consume = static_cast<std::size_t>(
+                            std::min(static_cast<uint64_t>(available), res.state_.remaining_data_frame_bytes));
+                        res.body_storage.append(buffer.substr(cursor, to_consume));
+                        cursor += to_consume;
+                        res.state_.remaining_data_frame_bytes -= to_consume;
+                        res.state_.cursor = cursor;
+                        if (res.state_.remaining_data_frame_bytes == 0) {
+                            res.state_.in_data_frame = false;
+                        }
+                        continue;
+                    }
+
                     const std::string_view remaining = buffer.substr(cursor);
                     frame_header hdr;
-                    std::string_view payload;
-                    std::size_t frame_bytes = 0;
-
-                    const auto r = parse_frame(remaining, hdr, payload, frame_bytes);
-                    if (r == result::incomplete) {
+                    std::size_t hdr_bytes = 0;
+                    if (!parse_frame_header(remaining, hdr, hdr_bytes)) {
                         break;
                     }
-                    if (r == result::error) {
-                        res.state_.reset();
-                        return result::error;
-                    }
 
-                    if (hdr.type == static_cast<uint64_t>(frame_type::HEADERS)) {
+                    if (hdr.type == static_cast<uint64_t>(frame_type::DATA)) {
+                        if (!res.state_.headers_received) {
+                            res.state_.reset();
+                            return result::error;
+                        }
+                        cursor += hdr_bytes;
+                        res.state_.cursor = cursor;
+                        res.state_.in_data_frame = true;
+                        res.state_.remaining_data_frame_bytes = hdr.length;
+
+                        const std::size_t available = buffer.size() - cursor;
+                        const auto to_consume = static_cast<std::size_t>(
+                            std::min(static_cast<uint64_t>(available), res.state_.remaining_data_frame_bytes));
+                        res.body_storage.append(buffer.substr(cursor, to_consume));
+                        cursor += to_consume;
+                        res.state_.remaining_data_frame_bytes -= to_consume;
+                        res.state_.cursor = cursor;
+                        if (res.state_.remaining_data_frame_bytes == 0) {
+                            res.state_.in_data_frame = false;
+                        }
+                    } else if (hdr.type == static_cast<uint64_t>(frame_type::HEADERS)) {
+                        if (hdr_bytes + hdr.length > remaining.size()) {
+                            break;
+                        }
+                        const std::string_view payload = remaining.substr(hdr_bytes, hdr.length);
                         bool is_blocked = false;
                         std::vector<std::pair<std::string, std::string> > decoded_headers;
                         if (!dec.decode_header_block(payload, decoded_headers, is_blocked)) {
@@ -1433,23 +1518,22 @@ namespace wavex::protos::http {
                             return result::error;
                         }
                         res.state_.headers_received = true;
-                    } else if (hdr.type == static_cast<uint64_t>(frame_type::DATA)) {
-                        if (!res.state_.headers_received) {
-                            res.state_.reset();
-                            return result::error;
-                        }
-                        res.body_storage.append(payload);
+                        cursor += hdr_bytes + hdr.length;
+                        res.state_.cursor = cursor;
                     } else if (hdr.type == static_cast<uint64_t>(frame_type::SETTINGS)) {
                         res.state_.reset();
                         return result::error;
+                    } else {
+                        if (hdr_bytes + hdr.length > remaining.size()) {
+                            break;
+                        }
+                        cursor += hdr_bytes + hdr.length;
+                        res.state_.cursor = cursor;
                     }
-                    // RFC 9114 §7.2.8: Unknown frames are ignored
-
-                    cursor += frame_bytes;
-                    res.state_.cursor = cursor;
                 }
 
                 if (!res.state_.headers_received) return result::incomplete;
+                if (res.state_.in_data_frame) return result::incomplete;
 
                 if (res.state_.has_content_length) {
                     if (res.body_storage.size() < res.state_.content_length) {

@@ -27,6 +27,7 @@
 #include <asio/detached.hpp>
 
 namespace h3 = wavex::protos::http::http3;
+namespace h2 = wavex::protos::http::http2;
 namespace qpk = wavex::protos::http::http3::qpack;
 namespace quic = wavex::network::quic;
 
@@ -927,6 +928,258 @@ void test_http3_session_unidirectional_routing_c7() {
     std::cout << "  [PASS] C7: Control, encoder and decoder streams successfully routed and decoded." << std::endl;
 }
 
+void test_http3_resumable_parser_c2() {
+    std::cout << "[Test HTTP/3] C2: Resumable non-quadratic streaming parser..." << std::endl;
+
+    // 1. Chunked streaming of single DATA frame across small read slices
+    {
+        h3::request orig_req;
+        orig_req.method_type = method::POST;
+        orig_req.target = "/upload";
+        orig_req.scheme = "https";
+        orig_req.authority = "wavex.dev";
+        std::string long_body;
+        for (int i = 0; i < 50; ++i) {
+            long_body += "chunk-payload-" + std::to_string(i) + ";";
+        }
+        orig_req.body = long_body;
+        orig_req.headers.emplace_back("content-length", std::to_string(long_body.size()));
+
+        std::string wire = http3codec::serialize_request(orig_req);
+        assert(!wire.empty());
+
+        h3::request parsed_req;
+        qpk::dynamic_table dt;
+        std::size_t consumed = 0;
+        std::string stream_buf;
+
+        // Feed wire data in tiny 17-byte chunks to stress resumable parser state
+        const std::size_t chunk_size = 17;
+        http3codec::result r = http3codec::result::incomplete;
+        for (std::size_t offset = 0; offset < wire.size(); offset += chunk_size) {
+            const std::size_t slice_len = std::min(chunk_size, wire.size() - offset);
+            stream_buf.append(wire.substr(offset, slice_len));
+            r = http3codec::parse_request(stream_buf, parsed_req, consumed, dt);
+            if (offset + slice_len < wire.size()) {
+                assert(r == http3codec::result::incomplete);
+            }
+        }
+
+        assert(r == http3codec::result::success);
+        assert(parsed_req.body == long_body);
+        assert(parsed_req.method_type == method::POST);
+        assert(parsed_req.target == "/upload");
+    }
+
+    // 2. Multiple sequential DATA frames arriving incrementally
+    {
+        std::string fields;
+        fields.push_back('\0'); // RIC = 0
+        fields.push_back('\0'); // Delta base = 0
+        qpk::encoder::encode_indexed_static(fields, 17); // :method GET
+        qpk::encoder::encode_indexed_static(fields, 1);  // :path /
+        qpk::encoder::encode_indexed_static(fields, 23); // :scheme https
+        qpk::encoder::encode_literal_with_name_ref(fields, 4, true, "15"); // content-length: 15 (index 4 in QPACK static table)
+        std::string headers_frame = h3::encoder::encode_frame(frame_type::HEADERS, fields);
+
+        std::string data1 = h3::encoder::encode_frame(frame_type::DATA, "hello");
+        std::string data2 = h3::encoder::encode_frame(frame_type::DATA, "world");
+        std::string data3 = h3::encoder::encode_frame(frame_type::DATA, "12345");
+
+        h3::request req;
+        qpk::dynamic_table dt;
+        std::size_t consumed = 0;
+        std::string stream_buf = headers_frame;
+
+        // Pass headers frame: incomplete because body (15 bytes) not received
+        auto r1 = http3codec::parse_request(stream_buf, req, consumed, dt);
+        assert(r1 == http3codec::result::incomplete);
+        assert(req.state_.headers_received);
+
+        // Append data1
+        stream_buf += data1;
+        auto r2 = http3codec::parse_request(stream_buf, req, consumed, dt);
+        assert(r2 == http3codec::result::incomplete);
+        assert(req.body_storage == "hello");
+
+        // Append data2
+        stream_buf += data2;
+        auto r3 = http3codec::parse_request(stream_buf, req, consumed, dt);
+        assert(r3 == http3codec::result::incomplete);
+        assert(req.body_storage == "helloworld");
+
+        // Append data3 (completes 15 bytes)
+        stream_buf += data3;
+        auto r4 = http3codec::parse_request(stream_buf, req, consumed, dt);
+        assert(r4 == http3codec::result::success);
+        assert(req.body == "helloworld12345");
+    }
+
+    // 3. Resumable response parser with streaming DATA frames
+    {
+        h3::response orig_res;
+        orig_res.status_code = 200;
+        orig_res.body = "Streamed HTTP/3 Response Body Payload";
+        orig_res.headers.emplace_back("content-length", std::to_string(orig_res.body.size()));
+
+        std::string wire = http3codec::serialize(orig_res);
+        assert(!wire.empty());
+
+        h3::response parsed_res;
+        qpk::dynamic_table dt;
+        std::size_t consumed = 0;
+        std::string stream_buf;
+
+        const std::size_t chunk_size = 11;
+        http3codec::result r = http3codec::result::incomplete;
+        for (std::size_t offset = 0; offset < wire.size(); offset += chunk_size) {
+            const std::size_t slice_len = std::min(chunk_size, wire.size() - offset);
+            stream_buf.append(wire.substr(offset, slice_len));
+            r = http3codec::parse_response(stream_buf, parsed_res, consumed, dt);
+            if (offset + slice_len < wire.size()) {
+                assert(r == http3codec::result::incomplete);
+            }
+        }
+
+        assert(r == http3codec::result::success);
+        assert(parsed_res.status_code == 200);
+        assert(parsed_res.body == orig_res.body);
+    }
+
+    std::cout << "  [PASS] C2: Resumable non-quadratic streaming parser verified." << std::endl;
+}
+
+void test_http3_qpack_required_insert_count_c3() {
+    std::cout << "[Test HTTP/3] C3: RFC 9204 §4.5.1.1 Required Insert Count decoding..." << std::endl;
+
+    // 1. Table capacity = 0 with Encoded Insert Count > 0 must return decompression error (not blocked)
+    {
+        qpk::dynamic_table dt(0); // capacity 0
+        qpk::decoder dec(dt);
+
+        std::string block;
+        // Encoded Insert Count = 1 (8-bit prefix int)
+        h2::hpack::encode_integer(block, 1, 8, 0x00);
+        // Sign = 0, Delta Base = 0 (7-bit prefix int)
+        h2::hpack::encode_integer(block, 0, 7, 0x00);
+        // Field line (:status 200)
+        qpk::encoder::encode_indexed_static(block, 25);
+
+        bool is_blocked = false;
+        std::vector<std::pair<std::string, std::string>> out_headers;
+        const bool ok = dec.decode_header_block(block, out_headers, is_blocked);
+        assert(!ok);
+        assert(!is_blocked); // Must be decompression error per RFC 9204 §4.5.1.1, NOT blocked!
+    }
+
+    // 2. Table capacity = 0 with Encoded Insert Count == 0 succeeds
+    {
+        qpk::dynamic_table dt(0);
+        qpk::decoder dec(dt);
+
+        std::string block;
+        // Encoded Insert Count = 0
+        h2::hpack::encode_integer(block, 0, 8, 0x00);
+        // Delta base = 0
+        h2::hpack::encode_integer(block, 0, 7, 0x00);
+        // Static table :status 200
+        qpk::encoder::encode_indexed_static(block, 25);
+
+        bool is_blocked = false;
+        std::vector<std::pair<std::string, std::string>> out_headers;
+        const bool ok = dec.decode_header_block(block, out_headers, is_blocked);
+        assert(ok);
+        assert(!is_blocked);
+        assert(out_headers.size() == 1);
+        assert(out_headers[0].first == ":status");
+        assert(out_headers[0].second == "200");
+    }
+
+    // 3. Encoded Insert Count exceeding FullRange is an error
+    {
+        qpk::dynamic_table dt(4096); // max_entries = 128, FullRange = 256
+        qpk::decoder dec(dt);
+
+        std::string block;
+        // Encoded Insert Count = 257 (> FullRange 256)
+        h2::hpack::encode_integer(block, 257, 8, 0x00);
+        h2::hpack::encode_integer(block, 0, 7, 0x00);
+        qpk::encoder::encode_indexed_static(block, 25);
+
+        bool is_blocked = false;
+        std::vector<std::pair<std::string, std::string>> out_headers;
+        const bool ok = dec.decode_header_block(block, out_headers, is_blocked);
+        assert(!ok);
+        assert(!is_blocked);
+    }
+
+    // 4. Modulus unwrapping: TotalNumberOfInserts = 300, FullRange = 256
+    {
+        qpk::dynamic_table dt(4096);
+        for (int i = 0; i < 300; ++i) {
+            dt.insert("x-custom-key-" + std::to_string(i), "val-" + std::to_string(i));
+        }
+        assert(dt.total_inserts() == 300);
+
+        qpk::decoder dec(dt);
+
+        // Part 4a: RIC = 200 unwraps across FullRange (MaxWrapped = 256, 456 > 428 -> 200)
+        {
+            std::string block;
+            h3::qpack::encoder::encode_prefix(block, 200, 300, 4096);
+            qpk::encoder::encode_indexed_static(block, 25); // :status 200
+
+            bool is_blocked = false;
+            std::vector<std::pair<std::string, std::string>> out_headers;
+            const bool ok = dec.decode_header_block(block, out_headers, is_blocked);
+            assert(ok);
+            assert(!is_blocked);
+            assert(out_headers.size() == 1);
+            assert(out_headers[0].first == ":status");
+            assert(out_headers[0].second == "200");
+        }
+
+        // Part 4b: Modulus unwrapping with dynamic entry lookup (target_abs = 280, Base = 300 -> rel_idx = 19)
+        {
+            std::string block;
+            // RIC = 281, Base = 300
+            h3::qpack::encoder::encode_prefix(block, 281, 300, 4096);
+            qpk::encoder::encode_indexed_dynamic(block, 19);
+
+            bool is_blocked = false;
+            std::vector<std::pair<std::string, std::string>> out_headers;
+            const bool ok = dec.decode_header_block(block, out_headers, is_blocked);
+            assert(ok);
+            assert(!is_blocked);
+            assert(out_headers.size() == 1);
+            assert(out_headers[0].first == "x-custom-key-280");
+            assert(out_headers[0].second == "val-280");
+        }
+    }
+
+    // 5. Blocked stream detection when req_insert_count > dt.total_inserts()
+    {
+        qpk::dynamic_table dt(4096);
+        dt.insert("x-k1", "v1");
+        dt.insert("x-k2", "v2");
+        assert(dt.total_inserts() == 2);
+
+        qpk::decoder dec(dt);
+        std::string block;
+        // RIC = 5 (> total_inserts 2), Base = 5
+        h3::qpack::encoder::encode_prefix(block, 5, 5, 4096);
+        qpk::encoder::encode_indexed_dynamic(block, 0);
+
+        bool is_blocked = false;
+        std::vector<std::pair<std::string, std::string>> out_headers;
+        const bool ok = dec.decode_header_block(block, out_headers, is_blocked);
+        assert(!ok);
+        assert(is_blocked); // Must be marked blocked waiting for dynamic table inserts!
+    }
+
+    std::cout << "  [PASS] C3: RFC 9204 §4.5.1.1 Required Insert Count decoding verified." << std::endl;
+}
+
 int main() {
     std::cout << "=== Running WaveX HTTP/3 Codec Tests ===\n";
     try {
@@ -945,6 +1198,8 @@ int main() {
         test_http3_malformed_request_rejection_c8();
         test_http3_qpack_huffman_literal_names_c5();
         test_http3_session_unidirectional_routing_c7();
+        test_http3_resumable_parser_c2();
+        test_http3_qpack_required_insert_count_c3();
         std::cout << "=== All HTTP/3 Tests PASSED ===\n";
         return 0;
     } catch (const std::exception &ex) {
