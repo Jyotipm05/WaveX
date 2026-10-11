@@ -270,6 +270,154 @@ static void test_quic_stream_chunk_buffering_e2() {
     std::cout << "  [PASS] E2: Contiguous chunk stream buffering verified." << std::endl;
 }
 
+static void test_quic_keys_cleanliness_a15() {
+    std::cout << "[Test QUIC] A15: Keys cleanliness and asymmetric 1-RTT separation..." << std::endl;
+
+    asio::io_context io;
+    auto ep = asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 9999);
+    auto conn = std::make_shared<QuicConnection>(
+        ConnectionId::random(8), ConnectionId::random(8), ep, true, io.get_executor());
+
+    assert(conn->local_key_phase() == 0);
+    assert(conn->peer_key_phase() == 0);
+
+    std::cout << "  [PASS] A15: Key cleanliness verified." << std::endl;
+}
+
+static void test_quic_variable_cid_and_key_update_a16() {
+    std::cout << "[Test QUIC] A16: Variable-length CID & RFC 9001 Key Update..." << std::endl;
+
+    // 1. Variable CID lengths (4, 8, 16, 20 bytes) in short header packets
+    const std::vector<std::size_t> test_cid_lengths = {4, 8, 16, 20};
+    for (std::size_t len : test_cid_lengths) {
+        const ConnectionId test_cid = ConnectionId::random(len);
+        assert(test_cid.length() == len);
+
+        PacketHeader short_hdr;
+        short_hdr.is_long = false;
+        short_hdr.type = PacketType::OneRTT;
+        short_hdr.key_phase = false;
+        short_hdr.dcid = test_cid;
+        short_hdr.packet_number = 42;
+        short_hdr.packet_number_len = 2;
+
+        std::string packed;
+        pack_packet_header(short_hdr, packed);
+        assert(!packed.empty());
+
+        PacketHeader unpacked_hdr;
+        std::size_t hdr_len = 0;
+        bool ok = unpack_packet_header(packed, unpacked_hdr, hdr_len, len);
+        assert(ok);
+        assert(!unpacked_hdr.is_long);
+        assert(unpacked_hdr.dcid == test_cid);
+        assert(unpacked_hdr.packet_number == 42);
+        assert(unpacked_hdr.key_phase == false);
+    }
+
+    // 2. RFC 9001 §6 Key Derivation & Key Update
+    ProtectionKeys client_keys, server_keys;
+    const ConnectionId dcid = ConnectionId::random(8);
+    bool derived = CryptoSuite::derive_initial_secrets(dcid, client_keys, server_keys);
+    assert(derived);
+    assert(client_keys.key_phase == 0);
+
+    const auto orig_secret = client_keys.secret;
+    const auto orig_key = client_keys.key;
+    const auto orig_iv = client_keys.iv;
+    const auto orig_hp = client_keys.hp;
+
+    // A. Normal 1-RTT packet in Key Phase 0
+    PacketHeader p0_hdr;
+    p0_hdr.is_long = false;
+    p0_hdr.type = PacketType::OneRTT;
+    p0_hdr.key_phase = false;
+    p0_hdr.dcid = dcid;
+    p0_hdr.packet_number = 100;
+    p0_hdr.packet_number_len = 4;
+
+    std::string p0_packet;
+    bool p0_prot = CryptoSuite::protect_packet(client_keys, p0_hdr, "Phase0Payload", p0_packet);
+    assert(p0_prot);
+
+    PacketHeader dec0_hdr;
+    std::string dec0_payload;
+    ProtectionKeys receiver_keys = client_keys; // Receiver starts with same phase 0 keys
+    bool dec0_ok = CryptoSuite::unprotect_packet(receiver_keys, dec0_hdr, p0_packet, dec0_payload, 0, dcid.length());
+    assert(dec0_ok);
+    assert(dec0_payload == "Phase0Payload");
+    assert(dec0_hdr.key_phase == false);
+    assert(receiver_keys.key_phase == 0);
+
+    // B. Sender updates keys (Key Phase 1)
+    bool updated = CryptoSuite::update_keys(client_keys);
+    assert(updated);
+    assert(client_keys.key_phase == 1);
+    assert(client_keys.secret != orig_secret);
+    assert(client_keys.key != orig_key);
+    assert(client_keys.iv != orig_iv);
+    assert(client_keys.hp == orig_hp); // Header protection key is NEVER updated per RFC 9001 §6.1
+
+    // C. Sender sends packet in Key Phase 1
+    PacketHeader p1_hdr;
+    p1_hdr.is_long = false;
+    p1_hdr.type = PacketType::OneRTT;
+    p1_hdr.key_phase = true;
+    p1_hdr.dcid = dcid;
+    p1_hdr.packet_number = 101;
+    p1_hdr.packet_number_len = 4;
+
+    std::string p1_packet;
+    bool p1_prot = CryptoSuite::protect_packet(client_keys, p1_hdr, "Phase1Payload", p1_packet);
+    assert(p1_prot);
+
+    // Receiver still holds Phase 0 keys!
+    assert(receiver_keys.key_phase == 0);
+
+    // D. Receiver processes Phase 1 packet: automatically unmasks key_phase=1,
+    // verifies tag with next generation keys, and updates receiver_keys in place!
+    PacketHeader dec1_hdr;
+    std::string dec1_payload;
+    bool dec1_ok = CryptoSuite::unprotect_packet(receiver_keys, dec1_hdr, p1_packet, dec1_payload, 100, dcid.length());
+    assert(dec1_ok);
+    assert(dec1_payload == "Phase1Payload");
+    assert(dec1_hdr.key_phase == true);
+    assert(receiver_keys.key_phase == 1);
+    assert(receiver_keys.key == client_keys.key); // Receiver keys now synchronized with sender keys!
+
+    // E. Subsequent packet in Phase 1 decrypts smoothly without additional update
+    PacketHeader p1_hdr_b;
+    p1_hdr_b.is_long = false;
+    p1_hdr_b.type = PacketType::OneRTT;
+    p1_hdr_b.key_phase = true;
+    p1_hdr_b.dcid = dcid;
+    p1_hdr_b.packet_number = 102;
+    p1_hdr_b.packet_number_len = 4;
+
+    std::string p1_packet_b;
+    bool p1_prot_b = CryptoSuite::protect_packet(client_keys, p1_hdr_b, "Phase1PayloadB", p1_packet_b);
+    assert(p1_prot_b);
+
+    PacketHeader dec1_hdr_b;
+    std::string dec1_payload_b;
+    bool dec1_ok_b = CryptoSuite::unprotect_packet(receiver_keys, dec1_hdr_b, p1_packet_b, dec1_payload_b, 101, dcid.length());
+    assert(dec1_ok_b);
+    assert(dec1_payload_b == "Phase1PayloadB");
+    assert(dec1_hdr_b.key_phase == true);
+
+    // F. Tampered packet with key phase flip fails authentication and leaves receiver keys unchanged
+    std::string tampered_p1 = p1_packet_b;
+    tampered_p1.back() ^= 0xff; // Corrupt authentication tag
+    PacketHeader dec_bad_hdr;
+    std::string dec_bad_payload;
+    ProtectionKeys receiver_keys_before = receiver_keys;
+    bool dec_bad_ok = CryptoSuite::unprotect_packet(receiver_keys, dec_bad_hdr, tampered_p1, dec_bad_payload, 102, dcid.length());
+    assert(!dec_bad_ok);
+    assert(receiver_keys.key == receiver_keys_before.key);
+
+    std::cout << "  [PASS] A16: Variable-length CID and RFC 9001 Key Update verified." << std::endl;
+}
+
 static void test_udp_basic_loopback() {
     std::cout << "[Test QUIC] Basic UDP socket loopback..." << std::endl;
 
@@ -1668,6 +1816,8 @@ int main() {
         test_congestion_controller();
         test_quic_stream_async();
         test_quic_stream_chunk_buffering_e2();
+        test_quic_keys_cleanliness_a15();
+        test_quic_variable_cid_and_key_update_a16();
         test_quic_tls_ctx_move_and_accept_stream();
         test_quic_lifecycle_idle_eviction_and_crypto_cap();
         test_quic_stream_limits_and_coroutine_termination();

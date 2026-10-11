@@ -51,6 +51,9 @@ namespace wavex::network::quic {
         } else {
             // Short header (1-RTT)
             uint8_t first = 0x40; // Short packet (form bit = 0, fixed bit = 1)
+            if (hdr.key_phase) {
+                first |= 0x04; // Key Phase bit (RFC 9001 §6.3)
+            }
             first |= (hdr.packet_number_len - 1) & 0x03;
             out.push_back(static_cast<char>(first));
 
@@ -117,6 +120,7 @@ namespace wavex::network::quic {
         } else {
             // Short header (1-RTT)
             hdr.type = PacketType::OneRTT;
+            hdr.key_phase = (first & 0x04) != 0;
             hdr.packet_number_len = static_cast<uint8_t>((first & 0x03) + 1);
 
             const std::size_t dcid_len = expected_dcid_len > 0 ? expected_dcid_len : 8;

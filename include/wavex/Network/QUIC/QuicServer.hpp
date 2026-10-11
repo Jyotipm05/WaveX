@@ -48,6 +48,7 @@ namespace wavex::network::quic {
         UniStreamHandler uni_stream_handler_{};
         std::string tls_cert_file_{};
         std::string tls_key_file_{};
+        std::size_t server_cid_len_{8};
         std::atomic<bool> stopped_{false};
         std::atomic<bool> running_{false};
 
@@ -60,6 +61,16 @@ namespace wavex::network::quic {
         ~QuicServer();
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
+        void set_connection_id_length(const std::size_t len) noexcept {
+            std::lock_guard lock(mtx_);
+            server_cid_len_ = (std::min)(len, MAX_CONNECTION_ID_LEN);
+        }
+
+        [[nodiscard]] auto connection_id_length() const noexcept -> std::size_t {
+            std::lock_guard lock(mtx_);
+            return server_cid_len_;
+        }
+
         void set_stream_handler(StreamHandler handler) {
             std::lock_guard lock(mtx_);
             stream_handler_ = std::move(handler);

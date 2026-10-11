@@ -34,6 +34,7 @@ namespace wavex::network::quic {
         uint8_t flags{0};
         uint8_t packet_number_len{4};
         bool is_long{false};
+        bool key_phase{false};
     };
 
     void pack_packet_header(const PacketHeader &hdr, std::string &out);

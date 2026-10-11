@@ -118,8 +118,33 @@ namespace wavex::network::quic {
                 const std::string_view datagram(reinterpret_cast<const char *>(recv_buf_.data()), bytes_recvd);
                 PacketHeader hdr;
                 std::size_t hdr_len = 0;
+                const bool is_long = !datagram.empty() && (static_cast<uint8_t>(datagram[0]) & 0x80) != 0;
 
-                if (!unpack_packet_header(datagram, hdr, hdr_len)) {
+                bool unpacked = false;
+                if (is_long) {
+                    unpacked = unpack_packet_header(datagram, hdr, hdr_len);
+                } else {
+                    unpacked = unpack_packet_header(datagram, hdr, hdr_len, server_cid_len_);
+                    if (unpacked) {
+                        std::lock_guard lock(mtx_);
+                        if (connections_.find(hdr.dcid) == connections_.end()) {
+                            for (const auto &[known_cid, _] : connections_) {
+                                if (known_cid.length() != server_cid_len_ && datagram.size() > known_cid.length()) {
+                                    PacketHeader alt_hdr;
+                                    std::size_t alt_len = 0;
+                                    if (unpack_packet_header(datagram, alt_hdr, alt_len, known_cid.length()) &&
+                                        alt_hdr.dcid == known_cid) {
+                                        hdr = alt_hdr;
+                                        hdr_len = alt_len;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (!unpacked) {
                     wavex::log::warn("[QUIC] [server] Failed to unpack packet header from {} bytes UDP datagram", bytes_recvd);
                 } else {
 
@@ -158,7 +183,7 @@ namespace wavex::network::quic {
                             conn = it->second;
                         } else if (hdr.is_long && hdr.type == PacketType::Initial) {
                             // New incoming connection (Initial)
-                            const ConnectionId server_cid = ConnectionId::random(8);
+                            const ConnectionId server_cid = ConnectionId::random(server_cid_len_);
                             conn = std::make_shared<QuicConnection>(server_cid, hdr.scid, sender_endpoint_, true,
                                                                     io_.get_executor(), hdr.dcid);
 

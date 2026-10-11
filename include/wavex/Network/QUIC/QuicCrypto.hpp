@@ -31,6 +31,7 @@ namespace wavex::network::quic {
         std::array<uint8_t, 16> key{};
         std::array<uint8_t, 12> iv{};
         std::array<uint8_t, 16> hp{};
+        uint8_t key_phase{0};
         bool valid{false};
     };
 
@@ -44,6 +45,9 @@ namespace wavex::network::quic {
             const uint8_t *secret, std::size_t secret_len,
             ProtectionKeys &keys) noexcept -> bool;
 
+        static auto update_keys(
+            ProtectionKeys &keys) noexcept -> bool;
+
         static auto protect_packet(
             const ProtectionKeys &keys,
             PacketHeader &hdr,
@@ -51,7 +55,7 @@ namespace wavex::network::quic {
             std::string &ciphertext_out) noexcept -> bool;
 
         static auto unprotect_packet(
-            const ProtectionKeys &keys,
+            ProtectionKeys &keys,
             PacketHeader &hdr,
             std::string_view packet_bytes,
             std::string &plaintext_out,

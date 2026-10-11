@@ -189,7 +189,6 @@ namespace wavex::network::quic {
         ProtectionKeys handshake_keys_local_{};
         ProtectionKeys one_rtt_keys_peer_{};
         ProtectionKeys one_rtt_keys_local_{};
-        ProtectionKeys one_rtt_keys_{};
         CongestionController congestion_controller_{};
         std::array<CryptoStreamReassembler, 4> crypto_reassemblers_{};
         std::array<ReceivedPacketTracker, 3> ack_trackers_{};
@@ -230,6 +229,8 @@ namespace wavex::network::quic {
         bool draining_buffered_packets_{false};
         bool http3_session_initialized_{false};
         bool handshake_done_sent_{false};
+        uint8_t local_key_phase_{0};
+        uint8_t peer_key_phase_{0};
 
     public:
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
@@ -314,6 +315,18 @@ namespace wavex::network::quic {
         [[nodiscard]] auto is_peer_address_validated() const noexcept -> bool {
             std::scoped_lock lock(mtx_);
             return peer_address_validated_;
+        }
+
+        void initiate_key_update();
+
+        [[nodiscard]] auto local_key_phase() const noexcept -> uint8_t {
+            std::scoped_lock lock(mtx_);
+            return local_key_phase_;
+        }
+
+        [[nodiscard]] auto peer_key_phase() const noexcept -> uint8_t {
+            std::scoped_lock lock(mtx_);
+            return peer_key_phase_;
         }
 
         [[nodiscard]] auto max_data() const noexcept -> uint64_t {

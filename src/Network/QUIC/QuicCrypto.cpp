@@ -153,6 +153,44 @@ namespace wavex::network::quic {
 #endif
     }
 
+    bool CryptoSuite::update_keys(ProtectionKeys &keys) noexcept {
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+        if (!keys.valid) return false;
+
+        // RFC 9001 §6.1:
+        // secret_<i+1> = HKDF-Expand-Label(secret_<i>, "quic ku", "", 32)
+        std::array<uint8_t, 32> next_secret{};
+        if (!hkdf_expand_label(keys.secret.data(), keys.secret.size(), "quic ku",
+                               next_secret.data(), next_secret.size())) {
+            return false;
+        }
+
+        // key_<i+1> = HKDF-Expand-Label(secret_<i+1>, "quic key", "", 16)
+        std::array<uint8_t, 16> next_key{};
+        if (!hkdf_expand_label(next_secret.data(), next_secret.size(), "quic key",
+                               next_key.data(), next_key.size())) {
+            return false;
+        }
+
+        // iv_<i+1> = HKDF-Expand-Label(secret_<i+1>, "quic iv", "", 12)
+        std::array<uint8_t, 12> next_iv{};
+        if (!hkdf_expand_label(next_secret.data(), next_secret.size(), "quic iv",
+                               next_iv.data(), next_iv.size())) {
+            return false;
+        }
+
+        // Header protection keys (hp) are NOT updated across key updates (RFC 9001 §6.1)
+        keys.secret = next_secret;
+        keys.key = next_key;
+        keys.iv = next_iv;
+        keys.key_phase ^= 1;
+        return true;
+#else
+        keys.key_phase ^= 1;
+        return true;
+#endif
+    }
+
     bool CryptoSuite::protect_packet(
         const ProtectionKeys &keys,
         PacketHeader &hdr,
@@ -237,7 +275,7 @@ namespace wavex::network::quic {
     }
 
     bool CryptoSuite::unprotect_packet(
-        const ProtectionKeys &keys,
+        ProtectionKeys &keys,
         PacketHeader &hdr,
         const std::string_view packet_bytes,
         std::string &plaintext_out,
@@ -284,6 +322,7 @@ namespace wavex::network::quic {
             first_byte ^= (mask[0] & 0x0f);
         } else {
             first_byte ^= (mask[0] & 0x1f);
+            hdr.key_phase = (first_byte & 0x04) != 0;
         }
         const auto pn_len = static_cast<uint8_t>((first_byte & 0x03) + 1);
         hdr.packet_number_len = pn_len;
@@ -330,8 +369,20 @@ namespace wavex::network::quic {
         }
         const std::string_view payload = packet_bytes.substr(real_hdr_len, total_packet_len - real_hdr_len);
 
-        // Step 4: Calculate Nonce = IV ^ FullPacketNumber (RFC 9001 §5.3)
-        std::array<uint8_t, 12> nonce = keys.iv;
+        // Step 4: Handle RFC 9001 §6 Key Update if Key Phase bit has changed
+        ProtectionKeys candidate_keys = keys;
+        bool key_updated = false;
+        if (!hdr.is_long && hdr.key_phase != (keys.key_phase != 0)) {
+            if (!update_keys(candidate_keys)) {
+                return false;
+            }
+            key_updated = true;
+        }
+
+        const ProtectionKeys &effective_keys = key_updated ? candidate_keys : keys;
+
+        // Step 5: Calculate Nonce = IV ^ FullPacketNumber (RFC 9001 §5.3)
+        std::array<uint8_t, 12> nonce = effective_keys.iv;
         for (int i = 0; i < 8; ++i) {
             nonce[11 - i] ^= static_cast<uint8_t>((full_packet_num >> (i * 8)) & 0xff);
         }
@@ -347,7 +398,7 @@ namespace wavex::network::quic {
         int out_len = 0;
         bool ok = true;
 
-        if (EVP_DecryptInit_ex(ctx, EVP_aes_128_gcm(), nullptr, keys.key.data(), nonce.data()) != 1) ok = false;
+        if (EVP_DecryptInit_ex(ctx, EVP_aes_128_gcm(), nullptr, effective_keys.key.data(), nonce.data()) != 1) ok = false;
         if (ok && EVP_DecryptUpdate(ctx, nullptr, &out_len, reinterpret_cast<const uint8_t *>(unmasked_hdr.data()),
                                     static_cast<int>(unmasked_hdr.size())) != 1)
             ok = false;
@@ -362,6 +413,11 @@ namespace wavex::network::quic {
 
         EVP_CIPHER_CTX_free(ctx);
         if (!ok) return false;
+
+        // Only commit updated keys if authentication tag verified successfully (RFC 9001 §6.2)
+        if (key_updated) {
+            keys = candidate_keys;
+        }
 
         plaintext_out.assign(reinterpret_cast<const char *>(decrypted.data()), cipher_len);
         return true;

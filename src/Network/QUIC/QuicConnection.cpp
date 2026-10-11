@@ -665,6 +665,7 @@ namespace wavex::network::quic {
                 // OSSL_RECORD_PROTECTION_LEVEL_APPLICATION (1-RTT)
                 hdr.is_long = false;
                 hdr.type = PacketType::OneRTT;
+                hdr.key_phase = (local_key_phase_ != 0);
                 hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
                 cf.offset = crypto_send_offset_app_;
                 crypto_send_offset_app_ += chunk.size();
@@ -761,11 +762,10 @@ namespace wavex::network::quic {
         if (type == PacketType::OneRTT) {
             hdr.is_long = false;
             hdr.type = PacketType::OneRTT;
+            hdr.key_phase = (local_key_phase_ != 0);
             hdr.dcid = peer_cid_;
             hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
-            keys = one_rtt_keys_local_.valid
-                       ? &one_rtt_keys_local_
-                       : (one_rtt_keys_.valid ? &one_rtt_keys_ : &initial_keys_local_);
+            keys = one_rtt_keys_local_.valid ? &one_rtt_keys_local_ : &initial_keys_local_;
         } else if (type == PacketType::Handshake) {
             hdr.is_long = true;
             hdr.type = PacketType::Handshake;
@@ -1064,6 +1064,7 @@ namespace wavex::network::quic {
                 } else {
                     hdr.is_long = false;
                     hdr.type = PacketType::OneRTT;
+                    hdr.key_phase = (local_key_phase_ != 0);
                     hdr.dcid = peer_cid_;
                     hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
                     keys = one_rtt_keys_local_.valid ? &one_rtt_keys_local_ : &initial_keys_local_;
@@ -1092,13 +1093,12 @@ namespace wavex::network::quic {
                 PacketHeader hdr;
                 hdr.is_long = false;
                 hdr.type = PacketType::OneRTT;
+                hdr.key_phase = (local_key_phase_ != 0);
                 hdr.dcid = peer_cid_;
                 hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
 
                 std::string packet;
-                const auto &keys = (one_rtt_keys_local_.valid)
-                                       ? one_rtt_keys_local_
-                                       : (one_rtt_keys_.valid ? one_rtt_keys_ : initial_keys_local_);
+                const auto &keys = one_rtt_keys_local_.valid ? one_rtt_keys_local_ : initial_keys_local_;
                 if (CryptoSuite::protect_packet(keys, hdr, payload, packet)) {
                     wavex::log::debug(
                         "[QUIC] retransmit_frame: resending STREAM frame (sid={}, offset={}, size={}, new_pn={})",
@@ -1110,6 +1110,7 @@ namespace wavex::network::quic {
                 PacketHeader hdr;
                 hdr.is_long = false;
                 hdr.type = PacketType::OneRTT;
+                hdr.key_phase = (local_key_phase_ != 0);
                 hdr.dcid = peer_cid_;
                 hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
 
@@ -1187,7 +1188,7 @@ namespace wavex::network::quic {
                 const std::string_view packet_bytes = remaining.substr(0, packet_size);
                 remaining.remove_prefix(packet_size);
 
-                const ProtectionKeys *keys = nullptr;
+                ProtectionKeys *keys = nullptr;
                 if (hdr.is_long) {
                     if (hdr.type == PacketType::Initial) {
                         keys = &initial_keys_peer_;
@@ -1209,7 +1210,7 @@ namespace wavex::network::quic {
                     if (!one_rtt_keys_peer_.valid) {
                         if (!tls_ || !tls_->initialized) {
                             // Non-TLS or mock test fallback
-                            keys = one_rtt_keys_.valid ? &one_rtt_keys_ : &initial_keys_peer_;
+                            keys = &initial_keys_peer_;
                         } else {
                             if (buffered_one_rtt_packets_.size() < 16) {
                                 buffered_one_rtt_packets_.emplace_back(packet_bytes);
@@ -1253,6 +1254,15 @@ namespace wavex::network::quic {
                     }
                 } else {
                     peer_address_validated_ = true; // RFC 9000 §8.1: Authenticated 1-RTT validates address
+                    if (one_rtt_keys_peer_.valid && one_rtt_keys_peer_.key_phase != peer_key_phase_) {
+                        peer_key_phase_ = one_rtt_keys_peer_.key_phase;
+                        wavex::log::info("[QUIC] Peer initiated Key Update to phase {}", peer_key_phase_);
+                        if (one_rtt_keys_local_.valid) {
+                            CryptoSuite::update_keys(one_rtt_keys_local_);
+                            local_key_phase_ = peer_key_phase_;
+                            one_rtt_keys_local_.key_phase = local_key_phase_;
+                        }
+                    }
                 }
 
                 std::vector<Frame> frames;
@@ -1479,6 +1489,7 @@ namespace wavex::network::quic {
         PacketHeader one_rtt_hdr;
         one_rtt_hdr.is_long = false;
         one_rtt_hdr.type = PacketType::OneRTT;
+        one_rtt_hdr.key_phase = (local_key_phase_ != 0);
         one_rtt_hdr.dcid = peer_cid_;
         one_rtt_hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
 
@@ -1492,6 +1503,16 @@ namespace wavex::network::quic {
             track_sent_packet(PacketType::OneRTT, one_rtt_hdr.packet_number, one_rtt_packet.size(), {hdf});
             pending_outbound_datagrams_.push_back(std::move(one_rtt_packet));
             wavex::log::info("[QUIC] HANDSHAKE_DONE sent on 1-RTT (keys_valid={})", one_rtt_keys_local_.valid);
+        }
+    }
+
+    void QuicConnection::initiate_key_update() {
+        std::lock_guard lock(mtx_);
+        if (!one_rtt_keys_local_.valid) return;
+        if (CryptoSuite::update_keys(one_rtt_keys_local_)) {
+            local_key_phase_ ^= 1;
+            one_rtt_keys_local_.key_phase = local_key_phase_;
+            wavex::log::info("[QUIC] Local endpoint initiated Key Update to phase {}", local_key_phase_);
         }
     }
 
@@ -1658,13 +1679,12 @@ namespace wavex::network::quic {
                 PacketHeader hdr;
                 hdr.is_long = false;
                 hdr.type = PacketType::OneRTT;
+                hdr.key_phase = (local_key_phase_ != 0);
                 hdr.dcid = peer_cid_;
                 hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
 
                 std::string packet;
-                const auto &keys = (one_rtt_keys_local_.valid)
-                                       ? one_rtt_keys_local_
-                                       : (one_rtt_keys_.valid ? one_rtt_keys_ : initial_keys_local_);
+                const auto &keys = one_rtt_keys_local_.valid ? one_rtt_keys_local_ : initial_keys_local_;
                 if (CryptoSuite::protect_packet(keys, hdr, payload, packet)) {
                     track_sent_packet(PacketType::OneRTT, hdr.packet_number, packet.size(), {sf});
                     cumulative_bytes_sent_ += packet.size();
@@ -1782,13 +1802,12 @@ namespace wavex::network::quic {
             PacketHeader hdr;
             hdr.is_long = false;
             hdr.type = PacketType::OneRTT;
+            hdr.key_phase = (local_key_phase_ != 0);
             hdr.dcid = peer_cid_;
             hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
 
             std::string packet;
-            const auto &keys = (one_rtt_keys_local_.valid)
-                                   ? one_rtt_keys_local_
-                                   : (one_rtt_keys_.valid ? one_rtt_keys_ : initial_keys_local_);
+            const auto &keys = one_rtt_keys_local_.valid ? one_rtt_keys_local_ : initial_keys_local_;
             if (CryptoSuite::protect_packet(keys, hdr, payload, packet)) {
                 pending_outbound_datagrams_.push_back(std::move(packet));
             }
