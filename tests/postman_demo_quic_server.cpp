@@ -111,13 +111,24 @@ asio::awaitable<void> handle_quic_stream(std::shared_ptr<quic::basic_quic_socket
     co_return;
 }
 
+#ifndef PROJECT_DIR
+#  ifdef CMAKE_SOURCE_DIR
+#    define PROJECT_DIR CMAKE_SOURCE_DIR
+#  else
+#    define PROJECT_DIR "."
+#  endif
+#endif
+
 int main(int argc, char *argv[]) {
+    const std::string default_cert = std::string(PROJECT_DIR) + "/ssl/test.crt";
+    const std::string default_key = std::string(PROJECT_DIR) + "/ssl/test.key";
+
     cli::CliParser parser("wavex_postman_quic_server", "Interactive WaveX RFC 9000 / 9001 QUIC Echo Server for Interop & Testing");
 
     parser.add_flag("lan", 'l', "Bind to all interfaces (0.0.0.0) instead of localhost only (127.0.0.1)")
           .add_option("port", 'p', "UDP Port number to listen on", "8443")
-          .add_option("cert", 'c', "Path to TLS 1.3 certificate file (PEM format)", "ssl/test.crt")
-          .add_option("key", 'k', "Path to TLS 1.3 private key file (PEM format)", "ssl/test.key");
+          .add_option("cert", 'c', "Path to TLS 1.3 certificate file (PEM format)", default_cert)
+          .add_option("key", 'k', "Path to TLS 1.3 private key file (PEM format)", default_key);
 
     const auto parse_res = parser.parse(argc, argv);
     if (!parse_res.ok()) {

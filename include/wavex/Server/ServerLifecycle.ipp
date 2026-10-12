@@ -16,7 +16,6 @@
 #include <csignal>
 #include <iostream>
 #include <wavex/Base/Logger.hpp>
-#include <wavex/Utils/FsUtils.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/post.hpp>
@@ -99,29 +98,8 @@ namespace wavex::server {
             quic_server_ = std::make_unique<network::quic::QuicServer>(
                 master_io_, address_, port_);
             if (tls_enabled_) {
-                std::string cert_path = tls_config_.cert_file;
-                std::string key_path = tls_config_.key_file;
-                std::error_code ec;
-                if (!wavex::utils::fs_utils::exists(cert_path, ec)) {
-#ifdef PROJECT_DIR
-                    std::string alt = std::string(PROJECT_DIR) + "/" + cert_path;
-                    if (wavex::utils::fs_utils::exists(alt, ec)) cert_path = alt;
-#endif
-                    if (!wavex::utils::fs_utils::exists(cert_path, ec) &&
-                        wavex::utils::fs_utils::exists("../" + tls_config_.cert_file, ec)) {
-                        cert_path = "../" + tls_config_.cert_file;
-                    }
-                }
-                if (!wavex::utils::fs_utils::exists(key_path, ec)) {
-#ifdef PROJECT_DIR
-                    std::string alt = std::string(PROJECT_DIR) + "/" + key_path;
-                    if (wavex::utils::fs_utils::exists(alt, ec)) key_path = alt;
-#endif
-                    if (!wavex::utils::fs_utils::exists(key_path, ec) &&
-                        wavex::utils::fs_utils::exists("../" + tls_config_.key_file, ec)) {
-                        key_path = "../" + tls_config_.key_file;
-                    }
-                }
+                std::string cert_path = detail::resolve_cert_path("", tls_config_.cert_file);
+                std::string key_path = detail::resolve_key_path("", tls_config_.key_file);
                 quic_server_->set_tls_credentials(std::move(cert_path), std::move(key_path));
             }
             quic_server_->set_stream_handler(

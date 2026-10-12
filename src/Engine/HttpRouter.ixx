@@ -24,6 +24,8 @@ export module wavex:http_router;
 export namespace wavex::engine {
     using engine::Http1Proto;
     using engine::http1proto;
+    using engine::Http2Proto;
+    using engine::http2proto;
     using engine::HttpRouter;
     using engine::HttpProto;
     using engine::Http1Router;
@@ -31,6 +33,8 @@ export namespace wavex::engine {
     using engine::Http2Router;
     using engine::http2router;
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+    using engine::Http3Proto;
+    using engine::http3proto;
     using engine::Http3Router;
     using engine::http3router;
 #endif

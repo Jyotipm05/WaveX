@@ -40,6 +40,16 @@ namespace wavex::engine {
     using Http1Proto = HttpProto<protos::http::http1codec>;
     using http1proto = Http1Proto;
 
+    /// Concrete HTTP/2 protocol adapter aliases
+    using Http2Proto = HttpProto<protos::http::http2codec>;
+    using http2proto = Http2Proto;
+
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+    /// Concrete HTTP/3 protocol adapter aliases
+    using Http3Proto = HttpProto<protos::http::http3codec>;
+    using http3proto = Http3Proto;
+#endif
+
     /**
      * @class HttpRouter
      * @brief HTTP-specific convenience wrapper around Router<HttpProto<Codec>>.

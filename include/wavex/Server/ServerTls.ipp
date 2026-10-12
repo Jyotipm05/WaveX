@@ -16,7 +16,6 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
-#include <wavex/Utils/FsUtils.hpp>
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
 #include <asio/ssl.hpp>
@@ -73,31 +72,8 @@ namespace wavex::server {
                 });
         }
 
-        std::string cert_path = tls_config_.cert_file;
-        std::string key_path = tls_config_.key_file;
-
-        std::error_code ec;
-        if (!wavex::utils::fs_utils::exists(cert_path, ec)) {
-#ifdef PROJECT_DIR
-            std::string alt = std::string(PROJECT_DIR) + "/" + cert_path;
-            if (wavex::utils::fs_utils::exists(alt, ec)) cert_path = alt;
-#endif
-            if (!wavex::utils::fs_utils::exists(cert_path, ec) &&
-                wavex::utils::fs_utils::exists("../" + tls_config_.cert_file, ec)) {
-                cert_path = "../" + tls_config_.cert_file;
-            }
-        }
-
-        if (!wavex::utils::fs_utils::exists(key_path, ec)) {
-#ifdef PROJECT_DIR
-            std::string alt = std::string(PROJECT_DIR) + "/" + key_path;
-            if (wavex::utils::fs_utils::exists(alt, ec)) key_path = alt;
-#endif
-            if (!wavex::utils::fs_utils::exists(key_path, ec) &&
-                wavex::utils::fs_utils::exists("../" + tls_config_.key_file, ec)) {
-                key_path = "../" + tls_config_.key_file;
-            }
-        }
+        std::string cert_path = detail::resolve_cert_path("", tls_config_.cert_file);
+        std::string key_path = detail::resolve_key_path("", tls_config_.key_file);
 
         ssl_ctx_->use_certificate_chain_file(cert_path);
         ssl_ctx_->use_private_key_file(key_path, asio::ssl::context::pem);

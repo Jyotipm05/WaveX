@@ -38,7 +38,6 @@
 #define ASIO_HAS_CO_AWAIT 1
 #endif
 
-#include <cassert>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -47,19 +46,75 @@
 #include <memory>
 #include <functional>
 #include <algorithm>
-#include <wavex/Utils/BinaryFile.hpp>
 #include <array>
 #include <span>
-
-#include <re2/re2.h>
 
 #include <wavex/Base/FlatMap.hpp>
 #include <wavex/Base/MiddleWare.hpp>
 #include <wavex/Base/Chainable.hpp>
-#include <wavex/Base/MimeTypes.hpp>
 #include <asio/awaitable.hpp>
 
+namespace re2 {
+    class RE2;
+}
+
 namespace wavex::engine {
+    namespace detail {
+        enum class SegmentType : uint8_t {
+            Static,
+            Param,
+            RegexParam,
+            Wildcard
+        };
+
+        struct ParsedSegment {
+            // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+            std::string param_name{};
+            std::string regex_pattern{};
+            std::string_view static_prefix{};
+            SegmentType type{SegmentType::Static};
+
+            // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+            ParsedSegment() = default;
+
+            ~ParsedSegment() = default;
+
+            ParsedSegment(const ParsedSegment &) = default;
+
+            ParsedSegment &operator=(const ParsedSegment &) = default;
+
+            ParsedSegment(ParsedSegment &&) noexcept = default;
+
+            ParsedSegment &operator=(ParsedSegment &&) noexcept = default;
+        };
+
+        auto normalize_path(std::string_view path) -> std::string;
+
+        [[nodiscard]] auto normalize_path_view(std::string_view path, std::string &scratch) -> std::string_view;
+
+        [[nodiscard]] auto split_path_view(std::string_view path) -> std::vector<std::string_view>;
+
+        [[nodiscard]] auto split_path_into(
+            std::string_view normalized,
+            std::span<std::string_view> seg_buf,
+            std::size_t &seg_count,
+            std::vector<std::string_view> &seg_overflow) -> std::span<const std::string_view>;
+
+        [[nodiscard]] auto parse_segment(std::string_view segment) -> ParsedSegment;
+
+        auto get_compiled_regex(
+            std::unordered_map<std::string, std::shared_ptr<re2::RE2> > &cache,
+            const std::string &pattern) -> std::shared_ptr<re2::RE2>;
+
+        [[nodiscard]] auto match_regex(std::string_view text, const re2::RE2 &constraint) -> bool;
+
+        [[nodiscard]] auto compute_wildcard_slice(std::span<const std::string_view> segments,
+                                                  std::size_t depth) -> std::string_view;
+
+        void backtrack_param(base::FlatMap<std::string_view, std::string_view> &params, std::string_view param_name);
+
+        auto load_not_found_file(const std::string &file_path, std::string &out_body, std::string &out_mime) -> bool;
+    } // namespace detail
     /**
      * @class Router
      * @brief Protocol-agnostic radix-tree router.
@@ -274,14 +329,9 @@ namespace wavex::engine {
          */
         void route(MethodType m, const std::string_view pattern,
                    std::vector<MiddlewareFn> mws, Handler h) {
-            // Normalize + split without allocating for the common case of an
-            // already-well-formed literal pattern (e.g. "/api/users/:id").
-            // `insert_segment` only allocates an owned std::string when it
-            // actually needs to create a *new* node — matching an existing
-            // static child is a pure view comparison.
             std::string scratch;
-            const std::string_view normalized = normalize_path_view(pattern, scratch);
-            const auto segments = split_path_view(normalized);
+            const std::string_view normalized = detail::normalize_path_view(pattern, scratch);
+            const auto segments = detail::split_path_view(normalized);
 
             // Walk/create the tree
             Node *current = root_.get();
@@ -332,7 +382,7 @@ namespace wavex::engine {
             if (prefix.empty()) [[unlikely]] {
                 middlewares_.emplace_back("", std::move(mw));
             } else [[likely]] {
-                middlewares_.emplace_back(normalize_path(prefix), std::move(mw));
+                middlewares_.emplace_back(detail::normalize_path(prefix), std::move(mw));
             }
             frozen_ = false;
         }
@@ -401,9 +451,9 @@ namespace wavex::engine {
          * @param file_path Path to the error page file.
          */
         void not_found_page(const std::string &file_path) {
-            if (auto res = wavex::utils::BinaryFile::read_all(file_path)) {
-                auto mime = std::string(base::mime_type_from_path(file_path));
-                not_found(std::move(*res), std::move(mime));
+            std::string body, mime;
+            if (detail::load_not_found_file(file_path, body, mime)) {
+                not_found(std::move(body), std::move(mime));
                 return;
             }
             not_found("Not Found", "text/plain");
@@ -462,39 +512,14 @@ namespace wavex::engine {
             // normalized (no leading '/', or a trailing '/'); the common
             // case coming off a parsed HTTP request line needs no copy.
             std::string scratch;
-            const std::string_view normalized = normalize_path_view(path, scratch);
+            const std::string_view normalized = detail::normalize_path_view(path, scratch);
 
             // Inline stack segment array — zero heap allocation for paths ≤ 16 segments
             std::array<std::string_view, 16> seg_buf;
             std::size_t seg_count = 0;
             std::vector<std::string_view> seg_overflow; // only used for paths > 16 segments
 
-            if (!normalized.empty() && normalized != "/") {
-                std::size_t start = 1;
-                while (start < normalized.size()) {
-                    const std::size_t end = normalized.find('/', start);
-                    const std::size_t actual_end = (end == std::string_view::npos) ? normalized.size() : end;
-                    if (actual_end != start) {
-                        if (seg_count < seg_buf.size()) [[likely]] {
-                            seg_buf[seg_count++] = normalized.substr(start, actual_end - start);
-                        } else [[unlikely]] {
-                            // Rare overflow path (> 16 segments)
-                            if (seg_overflow.empty()) {
-                                seg_overflow.assign(seg_buf.begin(),
-                                                    std::next(seg_buf.begin(), static_cast<std::ptrdiff_t>(seg_count)));
-                            }
-                            seg_overflow.emplace_back(normalized.substr(start, actual_end - start));
-                        }
-                    }
-                    if (end == std::string_view::npos) break;
-                    start = end + 1;
-                }
-            }
-
-            const std::span<const std::string_view> segments =
-                    seg_overflow.empty()
-                        ? std::span<const std::string_view>(seg_buf.data(), seg_count)
-                        : std::span<const std::string_view>(seg_overflow);
+            const auto segments = detail::split_path_into(normalized, seg_buf, seg_count, seg_overflow);
 
             base::FlatMap<std::string_view, std::string_view> params;
             const Node *node = resolve_node(root_.get(), segments, 0, params);
@@ -566,195 +591,69 @@ namespace wavex::engine {
         }
 
         // ---------------------------------------------------------------
-        //  Path utilities — registration-time (owning; not perf-critical)
-        // ---------------------------------------------------------------
-
-        /**
-         * @brief Normalizes a path into an owned string: ensures a leading
-         *        '/' and strips any trailing '/'.
-         * @param path Path to normalize.
-         * @return Owned, normalized copy of `path`.
-         */
-        static auto normalize_path(const std::string_view path) -> std::string {
-            if (path.empty() || path == "/") return "/";
-            std::string p(path);
-            if (p.front() != '/') [[unlikely]] p.insert(p.begin(), '/');
-            if (p.size() > 1 && p.back() == '/') [[likely]] p.pop_back();
-            return p;
-        }
-
-        // ---------------------------------------------------------------
-        //  Path utilities — shared by registration and resolve(): allocation-
-        //  free normalization when possible, string_view segments (no "per-segment"
-        //  heap allocation). Used by both route() and resolve().
-        // ---------------------------------------------------------------
-
-        /**
-         * @brief Normalizes `path`, writing into `scratch` only if needed,
-         *        and returns a view of the result.
-         *
-         * `scratch` is owned by the caller so the returned view is valid for
-         * exactly as long as the caller's `scratch` object is alive — no
-         * dangling self-reference risk from returning a view-into-local by
-         * value. `scratch` is cleared unconditionally before use, so this
-         * function is safe to call with a *reused* buffer (e.g. a
-         * thread-local scratch pool) — it never relies on the caller having
-         * passed in an empty string.
-         *
-         * @param path Path to normalize; need not already be well-formed.
-         * @param scratch Caller-owned buffer used only if `path` isn't
-         *        already normalized (no leading '/', or has a trailing '/').
-         * @return A view of the normalized path — either `path` unchanged
-         *         (zero-copy fast path) or `scratch`.
-         */
-        [[nodiscard]] static auto normalize_path_view(const std::string_view path,
-                                                      std::string &scratch) -> std::string_view {
-            if (path.empty() || path == "/") return "/";
-
-            const bool needs_front = path.front() != '/';
-            const bool needs_trim = path.size() > 1 && path.back() == '/';
-
-            if (!needs_front && !needs_trim) [[likely]] {
-                // ReSharper disable once CppDFALocalValueEscapesFunction
-                return path; // zero-copy: caller's buffer is already normalized
-            }
-
-            scratch.clear();
-            scratch.reserve(path.size() + (needs_front ? 1 : 0));
-            if (needs_front) scratch.push_back('/');
-            scratch.append(path);
-            if (needs_trim && scratch.size() > 1 && scratch.back() == '/') {
-                scratch.pop_back();
-            }
-            return scratch;
-        }
-
-        /**
-         * @brief Splits an already-normalized path into segment views.
-         * @param path Normalized path (see normalize_path_view()).
-         * @return Segments as views into `path`; empty for "/" or an empty path.
-         */
-        [[nodiscard]] static auto split_path_view(std::string_view path) -> std::vector<std::string_view> {
-            std::vector<std::string_view> segments;
-            if (path.empty() || path == "/") return segments;
-
-            segments.reserve(static_cast<size_t>(std::ranges::count(path, '/')));
-
-            size_t start = 1;
-            while (start < path.size()) {
-                size_t end = path.find('/', start);
-                if (end == std::string_view::npos) end = path.size();
-                if (end != start) {
-                    segments.emplace_back(path.substr(start, end - start));
-                }
-                start = end + 1;
-            }
-            return segments;
-        }
-
-        // ---------------------------------------------------------------
-        //  Tree insertion (registration-time, but startup-cost-sensitive
-        //  for large route tables). `segment` is a view — no allocation
-        //  happens on the (common) path where it matches an existing
-        //  child; a std::string is only materialized when a genuinely new
-        //  node needs to own its label/param name/pattern.
+        //  Tree insertion (registration-time)
         // ---------------------------------------------------------------
 
         /**
          * @brief Inserts (or finds) the child of `parent` for a single path segment.
-         *
-         * `segment` is a view — no allocation happens on the common path
-         * where it matches an existing child; a std::string is only
-         * materialized when a genuinely new node needs to own its
-         * label/param name/pattern.
-         *
          * @param parent Node to insert under.
          * @param segment Single path segment (e.g. "users", ":id", "{id:[0-9]+}", "*rest").
          * @return The existing or newly created child node for `segment`.
          */
-        auto insert_segment(Node *parent, std::string_view segment) -> Node * {
-            // 1. Check if param segment: :name
-            if (!segment.empty() && segment[0] == ':') {
-                std::string pname(segment.substr(1)); // direct-init: string_view -> string ctor is explicit
-                for (const auto &child: parent->param_children) {
-                    if (child->is_param && !child->constraint && child->param_name == pname) {
-                        return child.get();
-                    }
-                }
-                auto new_node = std::make_unique<Node>();
-                new_node->is_param = true;
-                new_node->param_name = pname;
-                Node *res = new_node.get();
-                parent->param_children.emplace_back(std::move(new_node));
-                return res;
-            }
-
-            // 2. Check if brace param segment: {name} or {name:pattern}
-            if (segment.size() >= 2 && segment[0] == '{' && segment.back() == '}') {
-                const auto inner = segment.substr(1, segment.size() - 2);
-                if (const size_t colon = inner.find(':'); colon != std::string_view::npos) {
-                    auto pname = std::string(inner.substr(0, colon));
-                    auto pat = std::string(inner.substr(colon + 1));
+        auto insert_segment(Node *parent, const std::string_view segment) -> Node * {
+            const auto parsed = detail::parse_segment(segment);
+            switch (parsed.type) {
+                case detail::SegmentType::Param: {
                     for (const auto &child: parent->param_children) {
-                        if (child->is_param && child->constraint && child->param_name == pname && child->pattern ==
-                            pat) {
+                        if (child->is_param && !child->constraint && child->param_name == parsed.param_name) {
                             return child.get();
                         }
                     }
                     auto new_node = std::make_unique<Node>();
                     new_node->is_param = true;
-                    new_node->param_name = pname;
-                    new_node->pattern = pat;
-                    // Reuse a compiled RE2 for this pattern text if some
-                    // other route already registered it (common: the same
-                    // constraint, e.g. "[0-9]+", reused under many prefixes).
-                    if (auto &cached = regex_cache_[pat]; cached) {
-                        new_node->constraint = cached;
-                    } else {
-                        cached = std::make_shared<re2::RE2>(pat);
-                        new_node->constraint = cached;
-                    }
+                    new_node->param_name = parsed.param_name;
                     Node *res = new_node.get();
                     parent->param_children.emplace_back(std::move(new_node));
                     return res;
                 }
-                // Unconstrained brace param: {name} (works identically to :name)
-                auto pname = std::string(inner);
-                for (const auto &child: parent->param_children) {
-                    if (child->is_param && !child->constraint && child->param_name == pname) {
-                        return child.get();
+                case detail::SegmentType::RegexParam: {
+                    for (const auto &child: parent->param_children) {
+                        if (child->is_param && child->constraint && child->param_name == parsed.param_name &&
+                            child->pattern == parsed.regex_pattern) {
+                            return child.get();
+                        }
                     }
+                    auto new_node = std::make_unique<Node>();
+                    new_node->is_param = true;
+                    new_node->param_name = parsed.param_name;
+                    new_node->pattern = parsed.regex_pattern;
+                    new_node->constraint = detail::get_compiled_regex(regex_cache_, parsed.regex_pattern);
+                    Node *res = new_node.get();
+                    parent->param_children.emplace_back(std::move(new_node));
+                    return res;
                 }
-                auto new_node = std::make_unique<Node>();
-                new_node->is_param = true;
-                new_node->param_name = pname;
-                Node *res = new_node.get();
-                parent->param_children.emplace_back(std::move(new_node));
-                return res;
-            }
-
-            // 3. Check if wildcard: * or *name
-            if (!segment.empty() && segment[0] == '*') {
-                if (!parent->wildcard_child) {
-                    parent->wildcard_child = std::make_unique<Node>();
-                    parent->wildcard_child->param_name = segment.size() > 1 ? segment.substr(1) : "*";
-                    parent->wildcard_child->is_param = true;
+                case detail::SegmentType::Wildcard: {
+                    if (!parent->wildcard_child) {
+                        parent->wildcard_child = std::make_unique<Node>();
+                        parent->wildcard_child->param_name = parsed.param_name;
+                        parent->wildcard_child->is_param = true;
+                    }
+                    return parent->wildcard_child.get();
                 }
-                return parent->wildcard_child.get();
+                case detail::SegmentType::Static: {
+                    if (const auto found = parent->static_index.find(parsed.static_prefix);
+                        found != parent->static_index.end()) {
+                        return found->second;
+                    }
+                    auto new_node = std::make_unique<Node>();
+                    new_node->prefix = parsed.static_prefix;
+                    Node *res = new_node.get();
+                    parent->static_index.emplace(std::string_view(new_node->prefix), res);
+                    parent->children.emplace_back(std::move(new_node));
+                    return res;
+                }
             }
-
-            // 4. Static segment — O(1) average lookup via static_index.
-            if (const auto found = parent->static_index.find(segment); found != parent->static_index.end()) {
-                return found->second;
-            }
-
-            auto new_node = std::make_unique<Node>();
-            new_node->prefix = segment;
-            Node *res = new_node.get();
-            // Index by a view into the child's own storage (see Node comment).
-            parent->static_index.emplace(std::string_view(new_node->prefix), res);
-            parent->children.emplace_back(std::move(new_node));
-            return res;
+            return nullptr;
         }
 
         // ---------------------------------------------------------------
@@ -762,16 +661,12 @@ namespace wavex::engine {
         // ---------------------------------------------------------------
 
         /**
-         * @brief Recursively resolves `segments[depth…]` against `node`,
-         *        trying static, then param/regex, then wildcard children in
-         *        priority order, and backtracking on dead ends.
+         * @brief Recursively resolves `segments[depth…]` against `node`.
          * @param node Node to resolve from.
          * @param segments Full path segment list for the request.
          * @param depth Index into `segments` currently being matched.
-         * @param params Accumulator for resolved param values; entries for a
-         *        param/regex child are erased again on backtrack.
-         * @return The matching leaf node (with a non-empty handler map), or
-         *         nullptr if no match exists under `node`.
+         * @param params Accumulator for resolved param values.
+         * @return The matching leaf node (with a non-empty handler map), or nullptr.
          */
         auto resolve_node(const Node *node,
                           const std::span<const std::string_view> &segments,
@@ -793,43 +688,19 @@ namespace wavex::engine {
 
             // 2. Dynamic / Regex param children
             for (const auto &child: node->param_children) {
-                bool match = true;
-                if (child->constraint) {
-                    match = re2::RE2::FullMatch(re2::StringPiece(segment.data(), segment.size()), *child->constraint);
-                }
+                const bool match = !child->constraint || detail::match_regex(segment, *child->constraint);
                 if (match) {
                     params.insert_or_assign(std::string_view(child->param_name), segment);
                     if (auto result = resolve_node(child.get(), segments, depth + 1, params)) return result;
-                    // Backtrack: remove the param we just inserted
-                    // FlatMap doesn't have "erase", so rebuild from scratch (rare backtrack path)
-                    base::FlatMap<std::string_view, std::string_view> rebuilt;
-                    for (const auto &[k, v]: params) {
-                        if (k != std::string_view(child->param_name))
-                            rebuilt.insert_or_assign(k, v);
-                    }
-                    params = std::move(rebuilt);
+                    detail::backtrack_param(params, child->param_name);
                 }
             }
 
             // 3. Wildcard child (*) — captures all remaining segments.
-            // INVARIANT: All string_views in `segments` are non-empty, contiguous slices
-            // of the single normalized path buffer parsed in resolve(). Therefore,
-            // (segments.back().data() + segments.back().size()) - segments[depth].data()
-            // is valid pointer arithmetic spanning the entire wildcard suffix.
             if (node->wildcard_child) {
-                if (depth < segments.size()) {
-                    const char *w_begin = segments[depth].data();
-                    const char *w_end = segments.back().data() + segments.back().size();
-                    assert(w_begin <= w_end && "Segments must be contiguous slices of the same path buffer");
-                    std::string_view wildcard_slice(w_begin, static_cast<size_t>(w_end - w_begin));
-                    params.insert_or_assign(
-                        std::string_view(node->wildcard_child->param_name),
-                        wildcard_slice);
-                } else {
-                    params.insert_or_assign(
-                        std::string_view(node->wildcard_child->param_name),
-                        std::string_view{});
-                }
+                params.insert_or_assign(
+                    std::string_view(node->wildcard_child->param_name),
+                    detail::compute_wildcard_slice(segments, depth));
                 if (!node->wildcard_child->handlers.empty()) {
                     return node->wildcard_child.get();
                 }

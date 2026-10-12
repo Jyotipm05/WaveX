@@ -13,10 +13,6 @@
 
 #pragma once
 
-#include <wavex/Base/Memory.hpp>
-#include <wavex/Base/MimeTypes.hpp>
-#include <wavex/Utils/BinaryFile.hpp>
-
 namespace wavex::server {
     template<typename Codec, typename RouterType>
     void Server<Codec, RouterType>::enable_signal_handling(bool enable) noexcept {
@@ -148,7 +144,7 @@ namespace wavex::server {
 
     template<typename Codec, typename RouterType>
     void Server<Codec, RouterType>::trim_memory() {
-        pool_.post_all([] { wavex::memory::get_thread_local_pool().release(); });
+        pool_.post_all(&detail::release_thread_local_pool);
     }
 
     template<typename Codec, typename RouterType>
@@ -173,9 +169,9 @@ namespace wavex::server {
 
     template<typename Codec, typename RouterType>
     void Server<Codec, RouterType>::set_not_found_page(const std::string &file_path) {
-        if (auto res = utils::BinaryFile::read_all(file_path)) {
-            auto mime = std::string(base::mime_type_from_path(file_path));
-            set_not_found(std::move(*res), std::move(mime));
+        std::string body, mime;
+        if (detail::load_not_found_page_file(file_path, body, mime)) {
+            set_not_found(std::move(body), std::move(mime));
             return;
         }
         set_not_found("Not Found", "text/plain");

@@ -102,7 +102,18 @@ asio::awaitable<void> auth_middleware(const Req &req, Res &res, base::Next next)
     co_await next();
 }
 
+#ifndef PROJECT_DIR
+#  ifdef CMAKE_SOURCE_DIR
+#    define PROJECT_DIR CMAKE_SOURCE_DIR
+#  else
+#    define PROJECT_DIR "."
+#  endif
+#endif
+
 int main(int argc, char *argv[]) {
+    const std::string default_cert = std::string(PROJECT_DIR) + "/ssl/127.0.0.1.pem";
+    const std::string default_key = std::string(PROJECT_DIR) + "/ssl/127.0.0.1-key.pem";
+
     cli::CliParser parser("wavex_postman_http3_server",
                           "WaveX HTTP/3 Interactive Dev & Postman Testing Server (RFC 9114 / RFC 9204 / RFC 9000)");
 
@@ -111,10 +122,8 @@ int main(int argc, char *argv[]) {
           .add_flag("lan", 'l', "Host server on local area network (LAN) using current machine IP")
           .add_option("port", 'p', "Port number to listen on (default: 8445 with TLS, 8083 with --no-tls)")
           .add_option("host", 'H', "Host IP address to bind to", "127.0.0.1")
-          // .add_option("cert", 'c', "Path to TLS certificate file", "ssl/test.crt")
-          .add_option("cert", 'c', "Path to TLS certificate file", "ssl/127.0.0.1.pem")
-          // .add_option("key", 'k', "Path to TLS private key file", "ssl/test.key");
-          .add_option("key", 'k', "Path to TLS private key file", "ssl/127.0.0.1-key.pem");
+          .add_option("cert", 'c', "Path to TLS certificate file", default_cert)
+          .add_option("key", 'k', "Path to TLS private key file", default_key);
 
     const auto parse_res = parser.parse(argc, argv);
     if (!parse_res.ok()) {

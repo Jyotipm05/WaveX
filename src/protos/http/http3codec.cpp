@@ -13,15 +13,13 @@
 
 #include <wavex/protos/http/http3codec.hpp>
 #include <charconv>
-#include <cctype>
 #include <limits>
 #include <algorithm>
-#include <cstdlib>
+
+#include "wavex/protos/http/http2codec.hpp"
 
 namespace wavex::protos::http::http3 {
-
     namespace qpack {
-
         // RFC 9204 Appendix A — QPACK Static Table (0-indexed, entries 0..98)
         const std::array<static_entry, 99> STATIC_TABLE = {
             {
@@ -181,19 +179,21 @@ namespace wavex::protos::http::http3 {
         const dynamic_table::entry *dynamic_table::get_by_absolute_index(const uint64_t abs_idx) const noexcept {
             if (entries_.empty()) return nullptr;
             const uint64_t oldest_idx = entries_.front().absolute_index;
-            const uint64_t newest_idx = entries_.back().absolute_index;
-            if (abs_idx < oldest_idx || abs_idx > newest_idx) return nullptr;
+            if (const uint64_t newest_idx = entries_.back().absolute_index;
+                abs_idx < oldest_idx || abs_idx > newest_idx) return nullptr;
             const std::size_t offset = static_cast<std::size_t>(abs_idx - oldest_idx);
             return &entries_[offset];
         }
 
-        const dynamic_table::entry *dynamic_table::get_relative(const uint64_t base, const uint64_t relative_idx) const noexcept {
+        const dynamic_table::entry *dynamic_table::get_relative(const uint64_t base,
+                                                                const uint64_t relative_idx) const noexcept {
             if (base == 0 || relative_idx >= base) return nullptr;
             const uint64_t target_abs = base - 1 - relative_idx;
             return get_by_absolute_index(target_abs);
         }
 
-        const dynamic_table::entry *dynamic_table::get_post_base(const uint64_t base, const uint64_t post_base_idx) const noexcept {
+        const dynamic_table::entry *dynamic_table::get_post_base(const uint64_t base,
+                                                                 const uint64_t post_base_idx) const noexcept {
             if (post_base_idx > std::numeric_limits<uint64_t>::max() - base) return nullptr;
             const uint64_t target_abs = base + post_base_idx;
             return get_by_absolute_index(target_abs);
@@ -273,7 +273,7 @@ namespace wavex::protos::http::http3 {
             const std::string_view scheme,
             const std::string_view authority,
             const std::vector<header> &headers,
-            dynamic_table *dt) {
+            const dynamic_table *dt) {
             std::string out;
             out.reserve(256);
 
@@ -285,8 +285,7 @@ namespace wavex::protos::http::http3 {
 
             // 1. :method
             const std::string_view method_str = to_string(m);
-            const auto [m_idx, m_exact] = find_static(":method", method_str);
-            if (m_exact) {
+            if (const auto [m_idx, m_exact] = find_static(":method", method_str); m_exact) {
                 encode_indexed_static(fields, m_idx);
             } else if (m_idx < STATIC_TABLE.size()) {
                 encode_literal_with_name_ref(fields, m_idx, true, method_str);
@@ -296,16 +295,14 @@ namespace wavex::protos::http::http3 {
 
             // 2. :scheme
             const std::string_view sc = scheme.empty() ? "https" : scheme;
-            const auto [s_idx, s_exact] = find_static(":scheme", sc);
-            if (s_exact) {
+            if (const auto [s_idx, s_exact] = find_static(":scheme", sc); s_exact) {
                 encode_indexed_static(fields, s_idx);
             } else {
                 encode_literal_with_name_ref(fields, 23, true, sc); // 23 = :scheme https
             }
 
             // 3. :path
-            const std::string_view p = target.empty() ? "/" : target;
-            if (p == "/") {
+            if (const std::string_view p = target.empty() ? "/" : target; p == "/") {
                 encode_indexed_static(fields, 1); // 1 = :path: /
             } else {
                 encode_literal_with_name_ref(fields, 1, true, p);
@@ -389,8 +386,7 @@ namespace wavex::protos::http::http3 {
             const auto [ptr, ec] = std::to_chars(sbuf, sbuf + sizeof(sbuf), status_code);
             const std::string_view status_str(sbuf, ptr);
 
-            const auto [idx, exact] = find_static(":status", status_str);
-            if (exact) {
+            if (const auto [idx, exact] = find_static(":status", status_str); exact) {
                 encode_indexed_static(out, idx);
             } else {
                 encode_literal_with_name_ref(out, 25, true, status_str); // 25 = :status: 200
@@ -404,8 +400,7 @@ namespace wavex::protos::http::http3 {
                 for (const char c: raw_name) {
                     name.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
                 }
-                const auto [h_idx, h_exact] = find_static(name, value);
-                if (h_exact) {
+                if (const auto [h_idx, h_exact] = find_static(name, value); h_exact) {
                     encode_indexed_static(out, h_idx);
                 } else if (h_idx < STATIC_TABLE.size()) {
                     encode_literal_with_name_ref(out, h_idx, true, value);
@@ -424,8 +419,7 @@ namespace wavex::protos::http::http3 {
             const uint64_t max_table_capacity) {
             uint64_t enc_insert_count = 0;
             if (ric > 0) {
-                const uint64_t max_entries = max_table_capacity / 32;
-                if (max_entries > 0) {
+                if (const uint64_t max_entries = max_table_capacity / 32; max_entries > 0) {
                     enc_insert_count = (ric % (2 * max_entries)) + 1;
                 }
             }
@@ -480,7 +474,7 @@ namespace wavex::protos::http::http3 {
 
         // ─── qpack::decoder ────────────────────────────────────────────────────────
 
-        bool decoder::apply_encoder_instruction(const std::string_view in, std::size_t &cursor) {
+        bool decoder::apply_encoder_instruction(const std::string_view in, std::size_t &cursor) const {
             if (cursor >= in.size()) return false;
             const auto b = static_cast<uint8_t>(in[cursor]);
 
@@ -552,7 +546,7 @@ namespace wavex::protos::http::http3 {
 
         bool decoder::decode_header_block(
             const std::string_view block,
-            std::vector<std::pair<std::string, std::string>> &out_headers,
+            std::vector<std::pair<std::string, std::string> > &out_headers,
             bool &is_blocked) const {
             is_blocked = false;
             if (block.empty()) return false;
@@ -604,10 +598,8 @@ namespace wavex::protos::http::http3 {
             }
 
             while (cursor < block.size()) {
-                const auto b = static_cast<uint8_t>(block[cursor]);
-
                 // Case 1: Indexed Header Field (starts with 1xxxxxxx)
-                if ((b & 0x80) != 0) {
+                if (const auto b = static_cast<uint8_t>(block[cursor]); (b & 0x80) != 0) {
                     const bool is_static = (b & 0x40) != 0;
                     uint64_t index = 0;
                     if (!http2::hpack::decode_integer(block, cursor, 6, index)) return false;
@@ -689,11 +681,10 @@ namespace wavex::protos::http::http3 {
 
         bool decoder::decode_header_block(
             const std::string_view block,
-            std::vector<std::pair<std::string, std::string>> &out_headers) const {
+            std::vector<std::pair<std::string, std::string> > &out_headers) const {
             bool is_blocked = false;
             return decode_header_block(block, out_headers, is_blocked);
         }
-
     } // namespace qpack
 
     // ─── http3::parser ─────────────────────────────────────────────────────────────
@@ -744,7 +735,7 @@ namespace wavex::protos::http::http3 {
             req.state_.reset();
         }
 
-        qpack::decoder dec(dt);
+        const qpack::decoder dec(dt);
         std::size_t cursor = req.state_.cursor;
 
         while (cursor < buffer.size()) {
@@ -801,9 +792,8 @@ namespace wavex::protos::http::http3 {
                 }
 
                 const std::string_view block = remaining.substr(hdr_bytes, hdr.length);
-                std::vector<std::pair<std::string, std::string>> decoded;
-                bool is_blocked = false;
-                if (!dec.decode_header_block(block, decoded, is_blocked)) {
+                std::vector<std::pair<std::string, std::string> > decoded;
+                if (bool is_blocked = false; !dec.decode_header_block(block, decoded, is_blocked)) {
                     if (is_blocked) {
                         return result::incomplete;
                     }
@@ -818,7 +808,7 @@ namespace wavex::protos::http::http3 {
                 bool seen_regular_header = false;
 
                 for (auto &[name, val]: decoded) {
-                    for (char c: name) {
+                    for (const char c: name) {
                         if (std::isupper(static_cast<unsigned char>(c))) {
                             req.state_.reset();
                             return result::error;
@@ -877,7 +867,7 @@ namespace wavex::protos::http::http3 {
                         }
 
                         if (name == "content-length") {
-                            if (auto cl = std::strtoull(val.c_str(), nullptr, 10); cl != 0 || val == "0") {
+                            if (const auto cl = std::strtoull(val.c_str(), nullptr, 10); cl != 0 || val == "0") {
                                 req.state_.has_content_length = true;
                                 req.state_.content_length = cl;
                             }
@@ -961,7 +951,7 @@ namespace wavex::protos::http::http3 {
             res.state_.reset();
         }
 
-        qpack::decoder dec(dt);
+        const qpack::decoder dec(dt);
         std::size_t cursor = res.state_.cursor;
 
         while (cursor < buffer.size()) {
@@ -1018,9 +1008,8 @@ namespace wavex::protos::http::http3 {
                 }
 
                 const std::string_view block = remaining.substr(hdr_bytes, hdr.length);
-                std::vector<std::pair<std::string, std::string>> decoded;
-                bool is_blocked = false;
-                if (!dec.decode_header_block(block, decoded, is_blocked)) {
+                std::vector<std::pair<std::string, std::string> > decoded;
+                if (bool is_blocked = false; !dec.decode_header_block(block, decoded, is_blocked)) {
                     if (is_blocked) {
                         return result::incomplete;
                     }
@@ -1032,7 +1021,7 @@ namespace wavex::protos::http::http3 {
                 bool seen_regular_header = false;
 
                 for (auto &[name, val]: decoded) {
-                    for (char c: name) {
+                    for (const char c: name) {
                         if (std::isupper(static_cast<unsigned char>(c))) {
                             res.state_.reset();
                             return result::error;
@@ -1050,7 +1039,7 @@ namespace wavex::protos::http::http3 {
                                 return result::error;
                             }
                             has_status = true;
-                            if (auto sc = std::strtoul(val.c_str(), nullptr, 10); sc != 0) {
+                            if (const auto sc = std::strtoul(val.c_str(), nullptr, 10); sc != 0) {
                                 res.status_code = static_cast<unsigned int>(sc);
                             }
                         } else {
@@ -1066,7 +1055,7 @@ namespace wavex::protos::http::http3 {
                             return result::error;
                         }
                         if (name == "content-length") {
-                            if (auto cl = std::strtoull(val.c_str(), nullptr, 10); cl != 0 || val == "0") {
+                            if (const auto cl = std::strtoull(val.c_str(), nullptr, 10); cl != 0 || val == "0") {
                                 res.state_.has_content_length = true;
                                 res.state_.content_length = cl;
                             }
@@ -1142,8 +1131,8 @@ namespace wavex::protos::http::http3 {
         return encode_frame(frame_type::DATA, payload);
     }
 
-    std::string encoder::serialize_request(const request &req, qpack::dynamic_table *dt) {
-        std::string header_block = qpack::encoder::encode_request_headers(
+    std::string encoder::serialize_request(const request &req, const qpack::dynamic_table *dt) {
+        const std::string header_block = qpack::encoder::encode_request_headers(
             req.method_type,
             req.target,
             req.scheme,
@@ -1160,7 +1149,7 @@ namespace wavex::protos::http::http3 {
     }
 
     std::string encoder::serialize_response(const response &res, qpack::dynamic_table *dt) {
-        std::string header_block = qpack::encoder::encode_response_headers(
+        const std::string header_block = qpack::encoder::encode_response_headers(
             res.status_code,
             res.headers,
             dt
@@ -1182,7 +1171,7 @@ namespace wavex::protos::http::http3 {
     }
 
     std::string encoder::serialize_settings(
-        const std::vector<std::pair<settings_parameter, uint64_t>> &settings) {
+        const std::vector<std::pair<settings_parameter, uint64_t> > &settings) {
         std::string payload;
         for (const auto &[param, val]: settings) {
             VarInt::encode(static_cast<uint64_t>(param), payload);
@@ -1223,7 +1212,6 @@ namespace wavex::protos::http::http3 {
     std::string decoder::dechunk(const std::string_view chunked_raw) {
         return std::string(chunked_raw);
     }
-
 } // namespace wavex::protos::http::http3
 
 #endif // WAVEX_HAS_SSL

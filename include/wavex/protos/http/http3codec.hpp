@@ -31,11 +31,11 @@
 #include <utility>
 #include <algorithm>
 #include <asio/as_tuple.hpp>
+#include <asio/buffer.hpp>
 #include <asio/use_awaitable.hpp>
 #include <wavex/protos/http/Methods.hpp>
 #include <wavex/protos/http/http1codec.hpp>
-#include <wavex/protos/http/http2codec.hpp>
-#include <wavex/Network/QUIC.hpp>
+#include <wavex/Network/QUIC/VarInt.hpp>
 
 namespace wavex::protos::http {
     namespace http3 {
@@ -189,6 +189,7 @@ namespace wavex::protos::http {
 
                 // ─── 4. Member Functions (LAST) ────────────────────────────────────
                 bool set_max_capacity(std::size_t cap) noexcept;
+
                 void set_max_capacity_limit(std::size_t limit) noexcept;
 
                 [[nodiscard]] std::size_t max_capacity_limit() const noexcept { return max_capacity_limit_; }
@@ -205,7 +206,9 @@ namespace wavex::protos::http {
                 }
 
                 [[nodiscard]] const entry *get_by_absolute_index(uint64_t abs_idx) const noexcept;
+
                 [[nodiscard]] const entry *get_relative(uint64_t base, uint64_t relative_idx) const noexcept;
+
                 [[nodiscard]] const entry *get_post_base(uint64_t base, uint64_t post_base_idx) const noexcept;
 
                 [[nodiscard]] std::tuple<uint64_t, bool, bool> find(
@@ -223,20 +226,25 @@ namespace wavex::protos::http {
             public:
                 // ─── Encoder Stream Instructions (RFC 9204 §4.3) ───────────────────
                 static void encode_set_capacity(std::string &out, uint64_t capacity);
+
                 static void encode_insert_with_name_ref(
                     std::string &out,
                     uint64_t name_idx,
                     bool is_static,
                     std::string_view val);
+
                 static void encode_insert_with_literal_name(
                     std::string &out,
                     std::string_view name,
                     std::string_view val);
+
                 static void encode_duplicate(std::string &out, uint64_t index);
 
                 // ─── Decoder Stream Instructions (RFC 9204 §4.4) ───────────────────
                 static void encode_section_ack(std::string &out, uint64_t stream_id);
+
                 static void encode_stream_cancel(std::string &out, uint64_t stream_id);
+
                 static void encode_insert_count_increment(std::string &out, uint64_t increment);
 
                 // ─── Header Field Section (Field Block) Encoding (RFC 9204 §4.5) ───
@@ -250,7 +258,7 @@ namespace wavex::protos::http {
                     std::string_view scheme,
                     std::string_view authority,
                     const std::vector<header> &headers,
-                    dynamic_table *dt = nullptr);
+                    const dynamic_table *dt = nullptr);
 
                 /**
                  * @brief Encode Response Header block.
@@ -315,7 +323,7 @@ namespace wavex::protos::http {
                 /**
                  * @brief Apply a single instruction received from the QPACK encoder sub-stream (RFC 9204 §4.3).
                  */
-                bool apply_encoder_instruction(std::string_view in, std::size_t &cursor);
+                bool apply_encoder_instruction(std::string_view in, std::size_t &cursor) const;
 
                 /**
                  * @brief Decode Encoded Field Section (Header Block) into header pairs.
@@ -422,7 +430,7 @@ namespace wavex::protos::http {
                   authority_storage(std::move(other.authority_storage)),
                   body_storage(std::move(other.body_storage)),
                   headers_storage(std::move(other.headers_storage)),
-                  state_(std::move(other.state_)),
+                  state_(other.state_),
                   stream_id(other.stream_id),
                   method_type(other.method_type) {
                 rebase(other);
@@ -458,7 +466,7 @@ namespace wavex::protos::http {
                     authority_storage = std::move(other.authority_storage);
                     body_storage = std::move(other.body_storage);
                     headers_storage = std::move(other.headers_storage);
-                    state_ = std::move(other.state_);
+                    state_ = other.state_;
                     stream_id = other.stream_id;
                     method_type = other.method_type;
                     rebase(other);
@@ -522,7 +530,7 @@ namespace wavex::protos::http {
                   status_text(other.status_text),
                   body_storage(std::move(other.body_storage)),
                   headers_storage(std::move(other.headers_storage)),
-                  state_(std::move(other.state_)),
+                  state_(other.state_),
                   stream_id(other.stream_id),
                   status_code(other.status_code) {
                 rebase(other);
@@ -548,7 +556,7 @@ namespace wavex::protos::http {
                     status_text = other.status_text;
                     body_storage = std::move(other.body_storage);
                     headers_storage = std::move(other.headers_storage);
-                    state_ = std::move(other.state_);
+                    state_ = other.state_;
                     stream_id = other.stream_id;
                     status_code = other.status_code;
                     rebase(other);
@@ -627,13 +635,22 @@ namespace wavex::protos::http {
         public:
             // ─── 4. Member Functions (LAST) ────────────────────────────────────
             static std::string encode_frame(frame_type type, std::string_view payload);
+
             static std::string encode_data_frame(std::string_view payload);
-            static std::string serialize_request(const request &req, qpack::dynamic_table *dt = nullptr);
+
+            static std::string serialize_request(const request &req, const qpack::dynamic_table *dt = nullptr);
+
             static std::string serialize_response(const response &res, qpack::dynamic_table *dt = nullptr);
+
             static std::string serialize(const response &res);
+
             static std::string serialize(const request &req);
-            static std::string serialize_settings(const std::vector<std::pair<settings_parameter, uint64_t>> &settings);
+
+            static std::string
+            serialize_settings(const std::vector<std::pair<settings_parameter, uint64_t> > &settings);
+
             static std::string format_chunk(std::string_view data);
+
             [[nodiscard]] static constexpr std::string_view format_terminal_chunk() noexcept {
                 return {};
             }
@@ -671,7 +688,7 @@ namespace wavex::protos::http {
             template<typename Stream>
             static asio::awaitable<void> handle_unidirectional_stream(
                 std::shared_ptr<Stream> stream,
-                std::shared_ptr<connection_context> ctx) {
+                const std::shared_ptr<connection_context> ctx) {
                 if (!stream || !ctx) co_return;
 
                 std::string stream_buf;
@@ -680,8 +697,7 @@ namespace wavex::protos::http {
                 // 1. Read unidirectional stream type (RFC 9114 §6.2)
                 uint64_t stream_type = 0;
                 while (stream->is_open()) {
-                    std::size_t offset = 0;
-                    if (VarInt::decode(stream_buf, offset, stream_type)) {
+                    if (std::size_t offset = 0; VarInt::decode(stream_buf, offset, stream_type)) {
                         stream_buf.erase(0, offset);
                         break;
                     }
@@ -731,8 +747,7 @@ namespace wavex::protos::http {
                             ctx->settings_received = true;
                         } else if (hdr.type == static_cast<uint64_t>(frame_type::GOAWAY)) {
                             std::size_t g_cursor = 0;
-                            uint64_t goaway_sid = 0;
-                            if (VarInt::decode(payload, g_cursor, goaway_sid)) {
+                            if (uint64_t goaway_sid = 0; VarInt::decode(payload, g_cursor, goaway_sid)) {
                                 ctx->goaway_stream_id = goaway_sid;
                             }
                             ctx->goaway_received = true;
@@ -742,11 +757,11 @@ namespace wavex::protos::http {
                     }
                 } else if (stream_type == 0x02) {
                     // QPACK Encoder Stream (RFC 9204 §4.2)
-                    qpack::decoder dec(ctx->decode_table);
+                    const qpack::decoder dec(ctx->decode_table);
                     while (stream->is_open()) {
                         std::size_t cursor = 0;
                         while (cursor < stream_buf.size()) {
-                            std::size_t prev_cursor = cursor;
+                            const std::size_t prev_cursor = cursor;
                             if (!dec.apply_encoder_instruction(stream_buf, cursor)) {
                                 cursor = prev_cursor;
                                 break;

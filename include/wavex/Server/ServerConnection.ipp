@@ -77,35 +77,8 @@ namespace wavex::server {
     template<typename Stream>
     asio::awaitable<void> Server<Codec, RouterType>::drain_and_abort(Stream &s) {
         // QUIC streams handle their own graceful teardown — drain is TCP-only
-        if constexpr (requires
-        {
-            { get_stream_socket(s).available(std::declval<asio::error_code &>()) } -> std::integral;
-        }) {
-            auto &sock = get_stream_socket(s);
-            asio::error_code ec;
-            std::ignore = sock.shutdown(asio::ip::tcp::socket::shutdown_send, ec);
-            if (ec || !sock.is_open()) co_return;
-
-            constexpr auto kDrainLimit = std::chrono::milliseconds(200);
-            constexpr std::size_t kMaxDrainBytes = 64 * 1024; // 64 KB cap
-            const auto deadline = std::chrono::steady_clock::now() + kDrainLimit;
-
-            char discard_buf[4096];
-            std::size_t total_drained = 0;
-
-            while (sock.is_open()) {
-                if (std::chrono::steady_clock::now() >= deadline) break;
-
-                std::size_t avail = sock.available(ec);
-                if (ec || avail == 0) break;
-
-                std::size_t to_read = std::min({avail, sizeof(discard_buf), kMaxDrainBytes - total_drained});
-                std::size_t n = sock.read_some(asio::buffer(discard_buf, to_read), ec);
-                if (ec || n == 0) break;
-
-                total_drained += n;
-                if (total_drained >= kMaxDrainBytes) break;
-            }
+        if constexpr (std::is_convertible_v<decltype(get_stream_socket(s)) &, asio::ip::tcp::socket &>) {
+            detail::drain_and_abort_tcp(get_stream_socket(s));
         }
         co_return;
     }

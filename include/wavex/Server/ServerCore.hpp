@@ -51,6 +51,19 @@
 
 namespace wavex::server {
 
+    namespace detail {
+        [[nodiscard]] auto resolve_cert_path(std::string_view base_dir, const std::string &cert_file) -> std::string;
+        [[nodiscard]] auto resolve_key_path(std::string_view base_dir, const std::string &key_file) -> std::string;
+        [[nodiscard]] auto load_not_found_page_file(const std::string &file_path, std::string &out_body, std::string &out_mime) -> bool;
+        void release_thread_local_pool();
+        void drain_and_abort_tcp(asio::ip::tcp::socket &sock);
+    } // namespace detail
+
+    // ─── Extern Template Declarations for Hot Asio Coroutines ──────────────────
+    extern template class asio::awaitable<void, asio::any_io_executor>;
+    extern template class asio::detail::awaitable_frame<void, asio::any_io_executor>;
+    extern template class asio::detail::awaitable_thread<asio::any_io_executor>;
+
     template<typename C>
     inline constexpr bool is_http3_codec_v =
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL

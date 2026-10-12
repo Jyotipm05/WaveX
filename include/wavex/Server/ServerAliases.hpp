@@ -28,4 +28,11 @@ namespace wavex::server {
 #endif
     using HttpServer = Http1Server;
     using httpserver = HttpServer;
+
+    // ─── Extern Template Declarations for Concrete Server Types ────────────
+    extern template class Server<protos::http::http1codec, engine::Http1Router>;
+    extern template class Server<protos::http::http2codec, engine::Http2Router>;
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+    extern template class Server<protos::http::http3codec, engine::Http3Router>;
+#endif
 } // namespace wavex::server
