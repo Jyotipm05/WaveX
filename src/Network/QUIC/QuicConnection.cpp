@@ -931,7 +931,7 @@ namespace wavex::network::quic {
         if (state_ == ConnectionState::Closed) return;
 
         bool has_in_flight = false;
-        auto earliest_sent = std::chrono::steady_clock::time_point::max();
+        auto earliest_sent = (std::chrono::steady_clock::time_point::max)();
 
         for (std::size_t s = 0; s < 3; ++s) {
             for (const auto &pkt: sent_packets_[s]) {

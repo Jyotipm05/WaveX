@@ -26,7 +26,6 @@
 #include <wavex/Server/TlsConfig.hpp>
 #include <wavex/Engine/HttpRouter.hpp>
 #include <wavex/protos/ProtocolTraits.hpp>
-#include <wavex/protos/http/http.hpp>
 #include <wavex/Network/QUIC.hpp>
 #include <wavex/Base/Event.hpp>
 
@@ -40,14 +39,20 @@
 #include <asio/ssl.hpp>
 #endif
 
+#include <asio/any_io_executor.hpp>
+
 #include <atomic>
 #include <chrono>
-#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+
+// ─── Extern Template Declarations for Hot Asio Coroutines ──────────────────
+extern template class asio::awaitable<void, asio::any_io_executor>;
+extern template class asio::detail::awaitable_frame<void, asio::any_io_executor>;
+extern template class asio::detail::awaitable_thread<asio::any_io_executor>;
 
 namespace wavex::server {
 
@@ -58,11 +63,6 @@ namespace wavex::server {
         void release_thread_local_pool();
         void drain_and_abort_tcp(asio::ip::tcp::socket &sock);
     } // namespace detail
-
-    // ─── Extern Template Declarations for Hot Asio Coroutines ──────────────────
-    extern template class asio::awaitable<void, asio::any_io_executor>;
-    extern template class asio::detail::awaitable_frame<void, asio::any_io_executor>;
-    extern template class asio::detail::awaitable_thread<asio::any_io_executor>;
 
     template<typename C>
     inline constexpr bool is_http3_codec_v =
@@ -136,7 +136,7 @@ namespace wavex::server {
 
     public:
         // ─── 3. Constructors & Destructor ────────────────────────────────────
-        Server(RouterType &router, std::string address, const unsigned short port);
+        Server(RouterType &router, std::string address, unsigned short port);
         ~Server();
 
         Server(const Server &) = delete;

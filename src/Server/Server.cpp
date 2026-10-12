@@ -100,12 +100,12 @@ namespace wavex::server::detail {
 
 } // namespace wavex::server::detail
 
-namespace wavex::server {
+// ─── Explicit Template Instantiations for Asio Coroutines ──────────────────
+template class asio::awaitable<void, asio::any_io_executor>;
+template class asio::detail::awaitable_frame<void, asio::any_io_executor>;
+template class asio::detail::awaitable_thread<asio::any_io_executor>;
 
-    // ─── Explicit Template Instantiations for Asio Coroutines ──────────────────
-    template class asio::awaitable<void, asio::any_io_executor>;
-    template class asio::detail::awaitable_frame<void, asio::any_io_executor>;
-    template class asio::detail::awaitable_thread<asio::any_io_executor>;
+namespace wavex::server {
 
     // ─── Explicit Template Instantiations for Concrete Server Types ────────────
     template class Server<protos::http::http1codec, engine::Http1Router>;

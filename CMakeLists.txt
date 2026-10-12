@@ -6,22 +6,22 @@ project(wavex VERSION 0.4.0 LANGUAGES C CXX)
 # ===========================================================================
 # Configure Version.hpp.in and wavex.hpp.in to replace @PROJECT_VERSION@ with actual version
 configure_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/include/wavex/Version.hpp.in"
-    "${CMAKE_CURRENT_BINARY_DIR}/include/wavex/Version.hpp"
-    @ONLY
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/wavex/Version.hpp.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/include/wavex/Version.hpp"
+        @ONLY
 )
 configure_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/include/wavex/wavex.hpp.in"
-    "${CMAKE_CURRENT_BINARY_DIR}/include/wavex/wavex.hpp"
-    @ONLY
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/wavex/wavex.hpp.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/include/wavex/wavex.hpp"
+        @ONLY
 )
 
 # ===========================================================================
 #  Platform & Global Macro Configuration
 # ===========================================================================
 add_compile_definitions(
-    ASIO_HAS_CO_AWAIT=1
-    ASIO_STANDALONE=1
+        ASIO_HAS_CO_AWAIT=1
+        ASIO_STANDALONE=1
 )
 
 if (WIN32)
@@ -79,7 +79,7 @@ if (WAVEX_USE_LLD)
         message(STATUS "LLD linker enabled: ${WAVEX_LLD_EXE}")
     else ()
         message(WARNING "WAVEX_USE_LLD is ON, but 'lld-link' (Windows) or 'ld.lld' (Unix) was not found in PATH. "
-                        "Falling back to default system linker.")
+                "Falling back to default system linker.")
         unset(CMAKE_LINKER_TYPE)
         unset(CMAKE_LINKER_TYPE CACHE)
     endif ()
@@ -95,8 +95,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 #    set(CMAKE_INCLUDE_SYSTEM_FLAG_CXX "-I ")
 #endif ()
 
-option(WAVEX_TEST      "Build tests for the wavex library"                           OFF)
-option(WAVEX_TEST_TSAN "Build tests with Thread Sanitizer (TSan) only"              OFF)
+option(WAVEX_TEST "Build tests for the wavex library" OFF)
+option(WAVEX_TEST_TSAN "Build tests with Thread Sanitizer (TSan) only" OFF)
 option(WAVEX_TEST_ASAN "Build tests with Address + UB + Leak Sanitizers (ASan+UBSan+LSan)" OFF)
 
 if (MSVC)
@@ -109,8 +109,8 @@ option(WAVEX_USE_MODULE "Build and export C++20 modules for WaveX" ${WAVEX_USE_M
 # TSan and ASan/UBSan are mutually exclusive — the runtimes conflict.
 if (WAVEX_TEST_TSAN AND WAVEX_TEST_ASAN)
     message(FATAL_ERROR
-        "WAVEX_TEST_TSAN and WAVEX_TEST_ASAN cannot both be ON. "
-        "Thread Sanitizer and Address Sanitizer runtimes are mutually exclusive."
+            "WAVEX_TEST_TSAN and WAVEX_TEST_ASAN cannot both be ON. "
+            "Thread Sanitizer and Address Sanitizer runtimes are mutually exclusive."
     )
 endif ()
 
@@ -287,11 +287,13 @@ if (WIN32)
 endif ()
 
 target_compile_definitions(wavex PUBLIC
-    ASIO_HAS_CO_AWAIT=1
-    ASIO_STANDALONE=1
-    $<$<BOOL:${WIN32}>:_WIN32_WINNT=${WAVEX_WIN32_WINNT}>
-    $<$<AND:$<BOOL:${WIN32}>,$<BOOL:${MINGW}>>:ASIO_HAS_PTHREADS=1>
-    $<$<NOT:$<CONFIG:Release>>:ENABLE_LOGGING=1>
+        ASIO_HAS_CO_AWAIT=1
+        ASIO_STANDALONE=1
+        $<$<BOOL:${WIN32}>:NOMINMAX>
+        $<$<BOOL:${WIN32}>:WIN32_LEAN_AND_MEAN>
+        $<$<BOOL:${WIN32}>:_WIN32_WINNT=${WAVEX_WIN32_WINNT}>
+        $<$<AND:$<BOOL:${WIN32}>,$<BOOL:${MINGW}>>:ASIO_HAS_PTHREADS=1>
+        $<$<NOT:$<CONFIG:Release>>:ENABLE_LOGGING=1>
 )
 
 if (WAVEX_HAS_SSL)
@@ -388,10 +390,7 @@ target_sources(wavex
 
 # C++ Modules
 if (WAVEX_USE_MODULE)
-    target_sources(wavex
-            PUBLIC FILE_SET wavex_modules TYPE CXX_MODULES
-            BASE_DIRS src
-            FILES
+    set(WAVEX_MODULE_FILES
             src/wavex.ixx
             src/Base/Logger.ixx
             src/Base/Chainable.ixx
@@ -416,10 +415,62 @@ if (WAVEX_USE_MODULE)
             src/Utils/Compression.ixx
             src/Utils/Multipart.ixx
     )
+    target_sources(wavex
+            PUBLIC FILE_SET wavex_modules TYPE CXX_MODULES
+            BASE_DIRS src
+            FILES ${WAVEX_MODULE_FILES}
+    )
+    set_source_files_properties(${WAVEX_MODULE_FILES} PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
     target_compile_definitions(wavex PUBLIC WAVEX_USE_MODULE=1)
 else ()
     target_compile_definitions(wavex PUBLIC WAVEX_USE_MODULE=0)
 endif ()
+
+# ===========================================================================
+#  Precompiled Headers (PCH) for Fast Incremental & Test Builds
+# ===========================================================================
+if (NOT WAVEX_TEST)
+    target_precompile_headers(wavex PUBLIC
+            # C++ Standard Library Core
+            <string>
+            <string_view>
+            <vector>
+            <memory>
+            <chrono>
+            <functional>
+            <optional>
+            <span>
+            <algorithm>
+            <utility>
+            <system_error>
+            <array>
+            <cstdint>
+            <cstddef>
+
+            # Third-Party Dependencies
+            #    <nlohmann/json.hpp>
+            #    <re2/re2.h>
+            #    $<$<BOOL:${WAVEX_HAS_SSL}>:<openssl/ssl.h>>
+            #    $<$<BOOL:${WAVEX_HAS_SSL}>:<openssl/err.h>>
+            #    $<$<BOOL:${WAVEX_HAS_SSL}>:<openssl/evp.h>>
+
+            # Asio Core Subset
+            <asio/io_context.hpp>
+            <asio/awaitable.hpp>
+            <asio/co_spawn.hpp>
+            <asio/use_awaitable.hpp>
+            <asio/buffer.hpp>
+            <asio/ip/tcp.hpp>
+            <asio/ip/udp.hpp>
+            <asio/detached.hpp>
+            <asio/steady_timer.hpp>
+            <asio/write.hpp>
+            <asio/read.hpp>
+            <asio/post.hpp>
+            $<$<BOOL:${WAVEX_HAS_SSL}>:<asio/ssl.hpp>>
+    )
+endif ()
+
 
 # ===========================================================================
 #  Install Rules
@@ -461,10 +512,10 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/WaveXConfig.cmake" DESTINATION "${CMA
 # ===========================================================================
 # Auto-copy compile_commands.json to project root for Clangd
 add_custom_target(clangd_sync ALL
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_BINARY_DIR}/compile_commands.json"
         "${CMAKE_SOURCE_DIR}/compile_commands.json"
-    COMMENT "Syncing compile_commands.json for Clangd"
+        COMMENT "Syncing compile_commands.json for Clangd"
 )
 
 if (WAVEX_TEST)
@@ -480,15 +531,15 @@ if (WAVEX_TEST)
     if (WAVEX_TEST_TSAN)
         if (MSVC)
             message(FATAL_ERROR
-                "[WaveX] WAVEX_TEST_TSAN is not supported with MSVC. "
-                "Thread Sanitizer is only available with GCC or Clang."
+                    "[WaveX] WAVEX_TEST_TSAN is not supported with MSVC. "
+                    "Thread Sanitizer is only available with GCC or Clang."
             )
         endif ()
         message(STATUS "[WaveX] TSan build enabled (GCC/Clang)")
         set(WAVEX_SAN_COMPILE_FLAGS -fsanitize=thread -fno-omit-frame-pointer -g)
-        set(WAVEX_SAN_LINK_FLAGS    -fsanitize=thread)
-        set(WAVEX_SAN_ENV           "TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1")
-        set(WAVEX_SAN_LABEL         tsan)
+        set(WAVEX_SAN_LINK_FLAGS -fsanitize=thread)
+        set(WAVEX_SAN_ENV "TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1")
+        set(WAVEX_SAN_LABEL tsan)
 
     elseif (WAVEX_TEST_ASAN)
         if (MSVC)
@@ -496,17 +547,17 @@ if (WAVEX_TEST)
             # The runtime is linked automatically; no linker flag needed.
             message(STATUS "[WaveX] ASan build enabled (MSVC — address sanitizer only)")
             set(WAVEX_SAN_COMPILE_FLAGS /fsanitize=address /Zi)
-            set(WAVEX_SAN_LINK_FLAGS    "")  # MSVC injects the ASan runtime automatically
+            set(WAVEX_SAN_LINK_FLAGS "")  # MSVC injects the ASan runtime automatically
         else ()
             message(STATUS "[WaveX] ASan+UBSan+LSan build enabled (GCC/Clang)")
             set(WAVEX_SAN_COMPILE_FLAGS -fsanitize=address,undefined,leak -fno-omit-frame-pointer -g)
-            set(WAVEX_SAN_LINK_FLAGS    -fsanitize=address,undefined,leak)
+            set(WAVEX_SAN_LINK_FLAGS -fsanitize=address,undefined,leak)
         endif ()
         if (MSVC)
             # MSVC ASan does not support leak detection (detect_leaks=1) or detect_stack_use_after_return=1.
-            set(WAVEX_SAN_ENV   "ASAN_OPTIONS=halt_on_error=1")
+            set(WAVEX_SAN_ENV "ASAN_OPTIONS=halt_on_error=1")
         else ()
-            set(WAVEX_SAN_ENV   "ASAN_OPTIONS=halt_on_error=1:detect_leaks=1:strict_string_checks=1:detect_stack_use_after_return=1")
+            set(WAVEX_SAN_ENV "ASAN_OPTIONS=halt_on_error=1:detect_leaks=1:strict_string_checks=1:detect_stack_use_after_return=1")
         endif ()
         set(WAVEX_SAN_LABEL asan)
     endif ()
@@ -533,43 +584,43 @@ if (WAVEX_TEST)
         add_test(NAME ${test_name} COMMAND ${test_name})
         if (WAVEX_SAN_COMPILE_FLAGS)
             set_tests_properties(${test_name} PROPERTIES
-                LABELS       "${WAVEX_SAN_LABEL}"
-                ENVIRONMENT  "${WAVEX_SAN_ENV}"
+                    LABELS "${WAVEX_SAN_LABEL}"
+                    ENVIRONMENT "${WAVEX_SAN_ENV}"
             )
         endif ()
-        endfunction()
+    endfunction()
 
     # -----------------------------------------------------------------------
     # Test registrations
     # -----------------------------------------------------------------------
     if (WAVEX_USE_MODULE)
-        wavex_add_test(wavex_tests                 tests/test1.cpp)
+        wavex_add_test(wavex_tests tests/test1.cpp)
     endif ()
-    wavex_add_test(wavex_mw_tests              tests/test_MW.cpp)
+    wavex_add_test(wavex_mw_tests tests/test_MW.cpp)
     wavex_add_test(wavex_method_template_tests tests/test_method_template.cpp)
-    wavex_add_test(wavex_server_tests          tests/test_server.cpp)
-    wavex_add_test(wavex_client_tests          tests/test_client.cpp
-        DEFINES PROJECT_DIR="${CMAKE_SOURCE_DIR}"
+    wavex_add_test(wavex_server_tests tests/test_server.cpp)
+    wavex_add_test(wavex_client_tests tests/test_client.cpp
+            DEFINES PROJECT_DIR="${CMAKE_SOURCE_DIR}"
     )
-    wavex_add_test(wavex_server_chunked_tests  tests/test_server_chunked.cpp)
-    wavex_add_test(wavex_cli_tests             tests/test_cli.cpp)
-    wavex_add_test(wavex_chainable_tests       tests/test_chainable.cpp)
-    wavex_add_test(wavex_logger_tests          tests/test_logger_modern.cpp)
+    wavex_add_test(wavex_server_chunked_tests tests/test_server_chunked.cpp)
+    wavex_add_test(wavex_cli_tests tests/test_cli.cpp)
+    wavex_add_test(wavex_chainable_tests tests/test_chainable.cpp)
+    wavex_add_test(wavex_logger_tests tests/test_logger_modern.cpp)
     wavex_add_test(wavex_server_keepalive_tests tests/test_server_keepalive.cpp)
-    wavex_add_test(wavex_not_found_tests        tests/test_not_found.cpp)
-    wavex_add_test(wavex_http2_codec_tests      tests/test_http2_codec.cpp)
-    wavex_add_test(wavex_temp_file_tests        tests/test_temp_file.cpp)
-    wavex_add_test(wavex_compression_tests      tests/test_compression.cpp)
-    wavex_add_test(wavex_multipart_tests        tests/test_multipart.cpp)
+    wavex_add_test(wavex_not_found_tests tests/test_not_found.cpp)
+    wavex_add_test(wavex_http2_codec_tests tests/test_http2_codec.cpp)
+    wavex_add_test(wavex_temp_file_tests tests/test_temp_file.cpp)
+    wavex_add_test(wavex_compression_tests tests/test_compression.cpp)
+    wavex_add_test(wavex_multipart_tests tests/test_multipart.cpp)
     wavex_add_test(wavex_client_file_upload_tests tests/test_client_file_upload.cpp)
-    wavex_add_test(wavex_spawn_blocking_tests  tests/test_spawn_blocking.cpp)
-    wavex_add_test(wavex_async_fs_tests        tests/test_async_fs.cpp)
-    wavex_add_test(wavex_flat_map_tests        tests/test_flat_map.cpp)
-    wavex_add_test(wavex_request_arena_tests   tests/test_request_arena.cpp)
+    wavex_add_test(wavex_spawn_blocking_tests tests/test_spawn_blocking.cpp)
+    wavex_add_test(wavex_async_fs_tests tests/test_async_fs.cpp)
+    wavex_add_test(wavex_flat_map_tests tests/test_flat_map.cpp)
+    wavex_add_test(wavex_request_arena_tests tests/test_request_arena.cpp)
     if (WAVEX_HAS_SSL)
-        wavex_add_test(wavex_quic_tests            tests/test_quic.cpp)
-        wavex_add_test(wavex_qpack_tests           tests/test_qpack.cpp)
-        wavex_add_test(wavex_http3_tests           tests/test_http3.cpp)
+        wavex_add_test(wavex_quic_tests tests/test_quic.cpp)
+        wavex_add_test(wavex_qpack_tests tests/test_qpack.cpp)
+        wavex_add_test(wavex_http3_tests tests/test_http3.cpp)
     endif ()
 
     # Unified CLI-driven Postman Dev Servers (HTTP/1.1 and HTTP/2)
