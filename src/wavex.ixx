@@ -137,6 +137,7 @@ export namespace wavex::network::quic {
     using quic::FrameType;
     using quic::VarInt;
     using quic::ConnectionId;
+    using quic::siphash24;
     using quic::Frame;
     using quic::PacketHeader;
     using quic::ProtectionKeys;

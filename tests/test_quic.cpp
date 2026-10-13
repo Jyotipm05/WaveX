@@ -78,6 +78,66 @@ static void test_connection_id() {
     std::cout << "  [PASS] ConnectionId tests passed." << std::endl;
 }
 
+static void test_connection_id_siphash_d3() {
+    std::cout << "[Test QUIC] Seeded SipHash-2-4 ConnectionId hashing (D3)..." << std::endl;
+
+    // 1. Official SipHash-2-4 test vector (Jean-Philippe Aumasson & Daniel J. Bernstein reference)
+    // Key: 00 01 02 ... 0f (k0 = 0x0706050403020100ULL, k1 = 0x0f0e0d0c0b0a0908ULL)
+    constexpr uint64_t k0 = 0x0706050403020100ULL;
+    constexpr uint64_t k1 = 0x0f0e0d0c0b0a0908ULL;
+
+    // 15-byte message: 00 01 02 ... 0e -> output: 0xa129ca6149be45e5ULL (from official vectors.h)
+    const std::vector<uint8_t> msg15 = {
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e
+    };
+    const uint64_t h15 = siphash24(msg15.data(), msg15.size(), k0, k1);
+    assert(h15 == 0xa129ca6149be45e5ULL);
+
+    // 0-byte message -> output: 0x726fdb47dd0e0e31ULL
+    const uint64_t h0 = siphash24(nullptr, 0, k0, k1);
+    assert(h0 == 0x726fdb47dd0e0e31ULL);
+
+    // 1-byte message (0x00) -> output: 0x74f839c593dc67fdULL (from official vectors.h)
+    const uint8_t msg1 = 0x00;
+    const uint64_t h1 = siphash24(&msg1, 1, k0, k1);
+    assert(h1 == 0x74f839c593dc67fdULL);
+
+    // 2. Deterministic Seed Isolation & HashDoS Protection
+    // Ensure that different seeds produce completely different hash outputs for identical Connection IDs.
+    const auto orig_seed = get_process_siphash_seed();
+
+    set_process_siphash_seed(0x1111222233334444ULL, 0x5555666677778888ULL);
+    const auto cid_test = ConnectionId::from_hex("0102030405060708");
+    std::hash<ConnectionId> hasher;
+    const std::size_t h_seed1 = hasher(cid_test);
+
+    set_process_siphash_seed(0xaaaabbbbccccddddULL, 0xeeeeffff00001111ULL);
+    const std::size_t h_seed2 = hasher(cid_test);
+
+    // Different keys MUST yield completely distinct hash digests
+    assert(h_seed1 != h_seed2);
+
+    // Same seed MUST produce consistent hash digests
+    assert(hasher(cid_test) == h_seed2);
+
+    // 3. Test std::unordered_map with ConnectionId keys
+    std::unordered_map<ConnectionId, std::string> cid_map;
+    const auto cid_a = ConnectionId::random(8);
+    const auto cid_b = ConnectionId::random(8);
+    cid_map[cid_a] = "conn_a";
+    cid_map[cid_b] = "conn_b";
+
+    assert(cid_map.find(cid_a) != cid_map.end());
+    assert(cid_map[cid_a] == "conn_a");
+    assert(cid_map[cid_b] == "conn_b");
+
+    // Restore original seed
+    set_process_siphash_seed(orig_seed.first, orig_seed.second);
+
+    std::cout << "  [PASS] Seeded SipHash-2-4 ConnectionId hashing passed." << std::endl;
+}
+
 static void test_frames() {
     std::cout << "[Test QUIC] Frame serialization and parsing..." << std::endl;
 
@@ -1891,6 +1951,7 @@ int main() {
         test_varint_edge_cases();
         test_connection_id();
         test_connection_id_boundaries();
+        test_connection_id_siphash_d3();
         test_stream_id_allocation();
         test_rfc9001_appendix_a();
         test_frames();

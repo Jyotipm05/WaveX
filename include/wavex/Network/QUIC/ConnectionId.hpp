@@ -19,6 +19,8 @@
 #include <string_view>
 #include <functional>
 
+#include <utility>
+
 #include <wavex/Network/QUIC/QuicConstants.hpp>
 
 namespace wavex::network::quic {
@@ -64,6 +66,18 @@ namespace wavex::network::quic {
 
         auto operator!=(const ConnectionId &other) const noexcept -> bool { return !(*this == other); }
     };
+
+    /// @brief Computes 64-bit SipHash-2-4 over the given buffer with specified 128-bit key (k0, k1).
+    [[nodiscard]] uint64_t siphash24(const uint8_t *data, std::size_t len, uint64_t k0, uint64_t k1) noexcept;
+
+    /// @brief Computes 64-bit SipHash-2-4 over the given buffer using the process-wide random seed.
+    [[nodiscard]] uint64_t siphash24(const uint8_t *data, std::size_t len) noexcept;
+
+    /// @brief Overrides the process-wide 128-bit SipHash seed (e.g., for deterministic unit testing).
+    void set_process_siphash_seed(uint64_t k0, uint64_t k1) noexcept;
+
+    /// @brief Gets the current process-wide 128-bit SipHash seed.
+    [[nodiscard]] std::pair<uint64_t, uint64_t> get_process_siphash_seed() noexcept;
 } // namespace wavex::network::quic
 
 // Hash specialization
