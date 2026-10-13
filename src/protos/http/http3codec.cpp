@@ -711,6 +711,10 @@ namespace wavex::protos::http::http3 {
         if (!parse_frame_header(buffer, hdr, hdr_bytes)) return result::incomplete;
         if (hdr_bytes + hdr.length > buffer.size()) return result::incomplete;
 
+        if (is_reserved_frame_type(hdr.type)) {
+            return result::error;
+        }
+
         payload = buffer.substr(hdr_bytes, hdr.length);
         bytes_consumed = hdr_bytes + hdr.length;
         return result::success;
@@ -758,6 +762,11 @@ namespace wavex::protos::http::http3 {
             std::size_t hdr_bytes = 0;
             if (!parse_frame_header(remaining, hdr, hdr_bytes)) {
                 break;
+            }
+
+            if (is_reserved_frame_type(hdr.type)) {
+                req.state_.reset();
+                return result::error;
             }
 
             if (hdr.type == static_cast<uint64_t>(frame_type::DATA)) {
@@ -888,7 +897,10 @@ namespace wavex::protos::http::http3 {
                 req.state_.headers_received = true;
                 cursor += hdr_bytes + hdr.length;
                 req.state_.cursor = cursor;
-            } else if (hdr.type == static_cast<uint64_t>(frame_type::SETTINGS)) {
+            } else if (hdr.type == static_cast<uint64_t>(frame_type::SETTINGS) ||
+                       hdr.type == static_cast<uint64_t>(frame_type::CANCEL_PUSH) ||
+                       hdr.type == static_cast<uint64_t>(frame_type::GOAWAY) ||
+                       hdr.type == static_cast<uint64_t>(frame_type::MAX_PUSH_ID)) {
                 req.state_.reset();
                 return result::error;
             } else {
@@ -974,6 +986,11 @@ namespace wavex::protos::http::http3 {
             std::size_t hdr_bytes = 0;
             if (!parse_frame_header(remaining, hdr, hdr_bytes)) {
                 break;
+            }
+
+            if (is_reserved_frame_type(hdr.type)) {
+                res.state_.reset();
+                return result::error;
             }
 
             if (hdr.type == static_cast<uint64_t>(frame_type::DATA)) {
@@ -1072,6 +1089,12 @@ namespace wavex::protos::http::http3 {
                 res.state_.headers_received = true;
                 cursor += hdr_bytes + hdr.length;
                 res.state_.cursor = cursor;
+            } else if (hdr.type == static_cast<uint64_t>(frame_type::SETTINGS) ||
+                       hdr.type == static_cast<uint64_t>(frame_type::CANCEL_PUSH) ||
+                       hdr.type == static_cast<uint64_t>(frame_type::GOAWAY) ||
+                       hdr.type == static_cast<uint64_t>(frame_type::MAX_PUSH_ID)) {
+                res.state_.reset();
+                return result::error;
             } else {
                 if (hdr_bytes + hdr.length > remaining.size()) {
                     break;

@@ -20,6 +20,8 @@ export namespace wavex::protos::http {
 
     namespace http3 {
         using http3::frame_type;
+        using http3::reserved_frame_type;
+        using http3::is_reserved_frame_type;
         using http3::stream_type;
         using http3::settings_parameter;
         using http3::error_code;

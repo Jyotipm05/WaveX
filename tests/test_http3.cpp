@@ -758,6 +758,129 @@ void test_http3_resumable_parser_c2() {
     std::cout << "  [PASS] C2: Resumable non-quadratic streaming parser verified." << std::endl;
 }
 
+void test_http3_reserved_frame_types_c9() {
+    std::cout << "[Test HTTP/3] C9: Rejection of HTTP/2 Reserved Frame Types (RFC 9114 §7.2.8)...\n";
+
+    // Build a valid request headers frame
+    h3::request valid_req;
+    valid_req.method_type = method::GET;
+    valid_req.target = "/api/resource";
+    valid_req.scheme = "https";
+    valid_req.authority = "wavex.internal";
+    valid_req.body = "valid-body";
+
+    const std::string headers_frame = h3::encoder::encode_frame(
+        frame_type::HEADERS,
+        qpk::encoder::encode_request_headers(valid_req.method_type, valid_req.target, valid_req.scheme,
+                                             valid_req.authority, valid_req.headers));
+
+    // HTTP/2 Reserved frame types per RFC 9114 §7.2.8 & §11.2.1:
+    // 0x02 (PRIORITY), 0x06 (PING), 0x08 (WINDOW_UPDATE), 0x09 (CONTINUATION)
+    const std::vector<uint64_t> reserved_types = {0x02, 0x06, 0x08, 0x09};
+
+    for (const uint64_t reserved_type : reserved_types) {
+        assert(wavex::protos::http::http3::is_reserved_frame_type(reserved_type));
+        assert(http3codec::is_reserved_frame(reserved_type));
+        assert(h3::parser::is_reserved_frame(reserved_type));
+
+        std::string reserved_frame;
+        quic::VarInt::encode(reserved_type, reserved_frame);
+        quic::VarInt::encode(8, reserved_frame);
+        reserved_frame.append("12345678");
+
+        // 1. Standalone reserved frame on request stream -> must return error
+        {
+            h3::request req;
+            std::size_t consumed = 0;
+            qpk::dynamic_table dt;
+            const auto r = http3codec::parse_request(reserved_frame, req, consumed, dt);
+            assert(r == http3codec::result::error);
+        }
+
+        // 2. Interleaved reserved frame after HEADERS on request stream -> must return error
+        {
+            const std::string wire = headers_frame + reserved_frame;
+            h3::request req;
+            std::size_t consumed = 0;
+            qpk::dynamic_table dt;
+            const auto r = http3codec::parse_request(wire, req, consumed, dt);
+            assert(r == http3codec::result::error);
+        }
+
+        // 3. Standalone reserved frame on response stream -> must return error
+        {
+            h3::response res;
+            std::size_t consumed = 0;
+            qpk::dynamic_table dt;
+            const auto r = http3codec::parse_response(reserved_frame, res, consumed, dt);
+            assert(r == http3codec::result::error);
+        }
+
+        // 4. Interleaved reserved frame on response stream after HEADERS -> must return error
+        {
+            h3::response valid_res;
+            valid_res.status_code = 200;
+            valid_res.body = "ok";
+            const std::string res_headers_frame = h3::encoder::encode_frame(
+                frame_type::HEADERS,
+                qpk::encoder::encode_response_headers(valid_res.status_code, valid_res.headers));
+            const std::string wire = res_headers_frame + reserved_frame;
+            h3::response res;
+            std::size_t consumed = 0;
+            qpk::dynamic_table dt;
+            const auto r = http3codec::parse_response(wire, res, consumed, dt);
+            assert(r == http3codec::result::error);
+        }
+
+        // 5. parse_frame directly -> must return error
+        {
+            h3::frame_header hdr;
+            std::string_view payload;
+            std::size_t bytes_consumed = 0;
+            const auto r = h3::parser::parse_frame(reserved_frame, hdr, payload, bytes_consumed);
+            assert(r == h3::parser::result::error);
+        }
+    }
+
+    // 6. Prohibited control stream frames on request stream (CANCEL_PUSH 0x03, GOAWAY 0x07, MAX_PUSH_ID 0x0d)
+    for (const uint64_t ctrl_type : {0x03ULL, 0x07ULL, 0x0dULL}) {
+        std::string ctrl_frame;
+        quic::VarInt::encode(ctrl_type, ctrl_frame);
+        quic::VarInt::encode(4, ctrl_frame);
+        ctrl_frame.append("CTRL");
+
+        const std::string wire = headers_frame + ctrl_frame;
+        h3::request req;
+        std::size_t consumed = 0;
+        qpk::dynamic_table dt;
+        const auto r = http3codec::parse_request(wire, req, consumed, dt);
+        assert(r == http3codec::result::error);
+    }
+
+    // 7. Verify non-reserved unknown frames (e.g. 0x3f, 0x21 grease) are still ignored/skipped
+    for (const uint64_t unknown_type : {0x3fULL, 0x21ULL}) {
+        assert(!wavex::protos::http::http3::is_reserved_frame_type(unknown_type));
+
+        std::string unk_frame;
+        quic::VarInt::encode(unknown_type, unk_frame);
+        quic::VarInt::encode(4, unk_frame);
+        unk_frame.append("GRES");
+
+        std::string data_frame = h3::encoder::encode_data_frame(valid_req.body);
+        std::string wire = headers_frame + unk_frame + data_frame;
+
+        h3::request req;
+        std::size_t consumed = 0;
+        qpk::dynamic_table dt;
+        const auto r = http3codec::parse_request(wire, req, consumed, dt);
+        assert(r == http3codec::result::success);
+        assert(req.target == "/api/resource");
+        assert(req.body == "valid-body");
+    }
+
+    std::cout << "  [PASS] C9: Rejection of HTTP/2 Reserved Frame Types verified.\n";
+}
+
 int main() {
     std::cout << "=== Running WaveX HTTP/3 Codec Tests ===\n";
     try {
@@ -771,6 +894,7 @@ int main() {
         test_http3_malformed_request_rejection_c8();
         test_http3_session_unidirectional_routing_c7();
         test_http3_resumable_parser_c2();
+        test_http3_reserved_frame_types_c9();
         std::cout << "=== All HTTP/3 Tests PASSED ===\n";
         return 0;
     } catch (const std::exception &ex) {

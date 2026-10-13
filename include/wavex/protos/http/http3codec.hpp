@@ -52,6 +52,21 @@ namespace wavex::protos::http {
             MAX_PUSH_ID = 0x0d
         };
 
+        // ─── Reserved HTTP/2 Frame Types (RFC 9114 §7.2.8 & §11.2.1) ──────────────
+        enum class reserved_frame_type : uint64_t {
+            H2_PRIORITY = 0x02,
+            H2_PING = 0x06,
+            H2_WINDOW_UPDATE = 0x08,
+            H2_CONTINUATION = 0x09
+        };
+
+        [[nodiscard]] constexpr bool is_reserved_frame_type(const uint64_t type) noexcept {
+            return type == static_cast<uint64_t>(reserved_frame_type::H2_PRIORITY) ||
+                   type == static_cast<uint64_t>(reserved_frame_type::H2_PING) ||
+                   type == static_cast<uint64_t>(reserved_frame_type::H2_WINDOW_UPDATE) ||
+                   type == static_cast<uint64_t>(reserved_frame_type::H2_CONTINUATION);
+        }
+
         // ─── Stream Types (RFC 9114 §6.2) ─────────────────────────────────────────
         enum class stream_type : uint64_t {
             CONTROL = 0x00,
@@ -585,6 +600,10 @@ namespace wavex::protos::http {
             enum class result { success, incomplete, error };
 
             // ─── 4. Member Functions (LAST) ────────────────────────────────────
+            [[nodiscard]] static constexpr bool is_reserved_frame(const uint64_t type) noexcept {
+                return is_reserved_frame_type(type);
+            }
+
             [[nodiscard]] static bool parse_frame_header(
                 std::string_view buffer,
                 frame_header &hdr,
@@ -725,6 +744,13 @@ namespace wavex::protos::http {
                             break;
                         }
 
+                        if (is_reserved_frame_type(hdr.type) ||
+                            hdr.type == static_cast<uint64_t>(frame_type::DATA) ||
+                            hdr.type == static_cast<uint64_t>(frame_type::HEADERS)) {
+                            // Connection error H3_FRAME_UNEXPECTED (RFC 9114 §7.2.1, §7.2.2, §7.2.8)
+                            break;
+                        }
+
                         if (hdr.type == static_cast<uint64_t>(frame_type::SETTINGS)) {
                             // Parse SETTINGS frame payload (pairs of VarInt: identifier and value)
                             std::size_t s_cursor = 0;
@@ -803,6 +829,11 @@ namespace wavex::protos::http {
         using encoder = http3::encoder;
         using decoder = http3::decoder;
         using result = http3::parser::result;
+        using reserved_frame_type = http3::reserved_frame_type;
+
+        [[nodiscard]] static constexpr bool is_reserved_frame(const uint64_t type) noexcept {
+            return http3::is_reserved_frame_type(type);
+        }
 
         static std::string serialize(const response &res) {
             return encoder::serialize_response(res);
