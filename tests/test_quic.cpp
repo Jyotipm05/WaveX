@@ -1944,6 +1944,60 @@ static void test_quic_critical_mtu_flow_control_anti_amplification() {
     std::cout << "  [PASS] MTU splitting (A3), Flow control (A4), and Anti-amplification (D1) passed." << std::endl;
 }
 
+static void test_cert_resolution_d4() {
+    std::cout << "[Test QUIC] Clean Config-Time Certificate Resolution (D4)..." << std::endl;
+
+    asio::io_context io;
+    QuicServer server(io, 0);
+
+    // 1. Missing certificate file must fail immediately at config time with std::runtime_error
+    bool cert_threw = false;
+    try {
+        server.set_tls_credentials("non_existent_cert_path_12345.crt", "valid_or_dummy.key");
+    } catch (const std::runtime_error &ex) {
+        cert_threw = true;
+        assert(std::string(ex.what()).find("Certificate file not found") != std::string::npos);
+    }
+    assert(cert_threw);
+
+    // 2. Missing private key file must fail immediately at config time with std::runtime_error
+    const auto current_src = std::filesystem::path(std::source_location::current().file_name());
+    const auto project_root = current_src.parent_path().parent_path();
+    const std::string valid_cert = (project_root / "ssl" / "test.crt").string();
+
+    bool key_threw = false;
+    try {
+        server.set_tls_credentials(valid_cert, "non_existent_key_path_12345.key");
+    } catch (const std::runtime_error &ex) {
+        key_threw = true;
+        assert(std::string(ex.what()).find("Private key file not found") != std::string::npos);
+    }
+    assert(key_threw);
+
+    // 3. Standalone QuicConnection must also enforce existence at config time
+    const auto cid = ConnectionId::random(8);
+    const auto peer_cid = ConnectionId::random(8);
+    asio::ip::udp::endpoint ep(asio::ip::address_v4::loopback(), 4433);
+    QuicConnection conn(cid, peer_cid, ep, true, io.get_executor());
+
+    bool conn_threw = false;
+    try {
+        conn.set_tls_credentials("missing_cert.crt", "missing_key.key");
+    } catch (const std::runtime_error &ex) {
+        conn_threw = true;
+    }
+    assert(conn_threw);
+
+    // 4. Valid credentials succeed cleanly without error
+    const std::string valid_key = (project_root / "ssl" / "test.key").string();
+    if (std::filesystem::exists(valid_cert) && std::filesystem::exists(valid_key)) {
+        server.set_tls_credentials(valid_cert, valid_key);
+        conn.set_tls_credentials(valid_cert, valid_key);
+    }
+
+    std::cout << "  [PASS] Clean Config-Time Certificate Resolution passed." << std::endl;
+}
+
 int main() {
     std::cout << "=== Running WaveX QUIC Transport Tests ===\n";
     try {
@@ -1952,6 +2006,7 @@ int main() {
         test_connection_id();
         test_connection_id_boundaries();
         test_connection_id_siphash_d3();
+        test_cert_resolution_d4();
         test_stream_id_allocation();
         test_rfc9001_appendix_a();
         test_frames();

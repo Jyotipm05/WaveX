@@ -317,6 +317,22 @@ namespace wavex::network::quic {
         }
     }
 
+    void QuicServer::set_tls_credentials(std::string cert_file, std::string key_file) {
+        std::error_code ec;
+        if (!std::filesystem::exists(cert_file, ec)) {
+            wavex::log::error("[QuicServer] TLS certificate file not found: '{}'", cert_file);
+            throw std::runtime_error("QuicServer::set_tls_credentials: Certificate file not found: '" + cert_file + "'");
+        }
+        if (!std::filesystem::exists(key_file, ec)) {
+            wavex::log::error("[QuicServer] TLS private key file not found: '{}'", key_file);
+            throw std::runtime_error("QuicServer::set_tls_credentials: Private key file not found: '" + key_file + "'");
+        }
+        std::lock_guard lock(mtx_);
+        tls_cert_file_ = std::move(cert_file);
+        tls_key_file_ = std::move(key_file);
+        init_shared_ssl_ctx();
+    }
+
     void QuicServer::init_shared_ssl_ctx() {
         if (shared_ssl_ctx_) {
             SSL_CTX_free(shared_ssl_ctx_);
@@ -346,40 +362,17 @@ namespace wavex::network::quic {
                 });
         }
 
-        std::string cert_file = tls_cert_file_;
-        std::string key_file = tls_key_file_;
-        std::error_code ec;
-        if (!std::filesystem::exists(cert_file, ec)) {
-#ifdef PROJECT_DIR
-            std::string alt = std::string(PROJECT_DIR) + "/" + cert_file;
-            if (std::filesystem::exists(alt, ec)) cert_file = alt;
-#endif
-            if (!std::filesystem::exists(cert_file, ec) &&
-                std::filesystem::exists("../" + tls_cert_file_, ec)) {
-                cert_file = "../" + tls_cert_file_;
-            }
-        }
-        if (!std::filesystem::exists(key_file, ec)) {
-#ifdef PROJECT_DIR
-            std::string alt = std::string(PROJECT_DIR) + "/" + key_file;
-            if (std::filesystem::exists(alt, ec)) key_file = alt;
-#endif
-            if (!std::filesystem::exists(key_file, ec) && std::filesystem::exists("../" + tls_key_file_, ec)) {
-                key_file = "../" + tls_key_file_;
-            }
-        }
-
-        if (SSL_CTX_use_certificate_file(shared_ssl_ctx_, cert_file.c_str(), SSL_FILETYPE_PEM) != 1) {
-            wavex::log::error("[QuicServer] SSL_CTX_use_certificate_file failed for '{}'", cert_file);
+        if (SSL_CTX_use_certificate_file(shared_ssl_ctx_, tls_cert_file_.c_str(), SSL_FILETYPE_PEM) != 1) {
+            wavex::log::error("[QuicServer] SSL_CTX_use_certificate_file failed for '{}'", tls_cert_file_);
             SSL_CTX_free(shared_ssl_ctx_);
             shared_ssl_ctx_ = nullptr;
-            return;
+            throw std::runtime_error("QuicServer: SSL_CTX_use_certificate_file failed for '" + tls_cert_file_ + "'");
         }
-        if (SSL_CTX_use_PrivateKey_file(shared_ssl_ctx_, key_file.c_str(), SSL_FILETYPE_PEM) != 1) {
-            wavex::log::error("[QuicServer] SSL_CTX_use_PrivateKey_file failed for '{}'", key_file);
+        if (SSL_CTX_use_PrivateKey_file(shared_ssl_ctx_, tls_key_file_.c_str(), SSL_FILETYPE_PEM) != 1) {
+            wavex::log::error("[QuicServer] SSL_CTX_use_PrivateKey_file failed for '{}'", tls_key_file_);
             SSL_CTX_free(shared_ssl_ctx_);
             shared_ssl_ctx_ = nullptr;
-            return;
+            throw std::runtime_error("QuicServer: SSL_CTX_use_PrivateKey_file failed for '" + tls_key_file_ + "'");
         }
 
         SSL_CTX_set_alpn_select_cb(
@@ -403,7 +396,7 @@ namespace wavex::network::quic {
             nullptr);
 
         wavex::log::info("[QuicServer] Initialized shared server SSL_CTX with cert '{}' and key '{}'",
-                         cert_file, key_file);
+                         tls_cert_file_, tls_key_file_);
     }
 
 } // namespace wavex::network::quic

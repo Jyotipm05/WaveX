@@ -363,11 +363,7 @@ namespace wavex::network::quic {
 
         void refresh_idle_timer();
 
-        void set_tls_credentials(std::string cert_file, std::string key_file) {
-            std::scoped_lock lock(mtx_);
-            tls_cert_file_ = std::move(cert_file);
-            tls_key_file_ = std::move(key_file);
-        }
+        void set_tls_credentials(std::string cert_file, std::string key_file);
 
         void set_shared_ssl_ctx(SSL_CTX *shared_ctx) noexcept {
             std::scoped_lock lock(mtx_);

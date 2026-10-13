@@ -108,16 +108,20 @@ namespace wavex::server {
 
         void enable_tls(std::string cert_file = "ssl/test.crt",
                         std::string key_file = "ssl/test.key") {
-            tls_config_.cert_file = std::move(cert_file);
-            tls_config_.key_file = std::move(key_file);
-            tls_enabled_ = true;
-            server_.enable_tls(tls_config_);
+            TlsConfig cfg;
+            cfg.cert_file = std::move(cert_file);
+            cfg.key_file = std::move(key_file);
+            enable_tls(std::move(cfg));
         }
 
         void enable_tls(TlsConfig config) {
             tls_config_ = std::move(config);
             tls_enabled_ = true;
             server_.enable_tls(tls_config_);
+            tls_config_ = server_.tls_config();
+            if (quic_server_) {
+                quic_server_->set_tls_credentials(tls_config_.cert_file, tls_config_.key_file);
+            }
         }
 
         [[nodiscard]] bool is_tls_enabled() const noexcept { return tls_enabled_ || server_.is_tls_enabled(); }
@@ -156,30 +160,7 @@ namespace wavex::server {
             quic_server_->set_max_field_section_size(max_field_section_size_);
 
             if (tls_enabled_) {
-                std::string cert_path = tls_config_.cert_file;
-                std::string key_path = tls_config_.key_file;
-                std::error_code ec;
-                if (!utils::fs_utils::exists(cert_path, ec)) {
-#ifdef PROJECT_DIR
-                    std::string alt = std::string(PROJECT_DIR) + "/" + cert_path;
-                    if (wavex::utils::fs_utils::exists(alt, ec)) cert_path = alt;
-#endif
-                    if (!wavex::utils::fs_utils::exists(cert_path, ec) &&
-                        utils::fs_utils::exists("../" + tls_config_.cert_file, ec)) {
-                        cert_path = "../" + tls_config_.cert_file;
-                    }
-                }
-                if (!utils::fs_utils::exists(key_path, ec)) {
-#ifdef PROJECT_DIR
-                    std::string alt = std::string(PROJECT_DIR) + "/" + key_path;
-                    if (wavex::utils::fs_utils::exists(alt, ec)) key_path = alt;
-#endif
-                    if (!utils::fs_utils::exists(key_path, ec) &&
-                        utils::fs_utils::exists("../" + tls_config_.key_file, ec)) {
-                        key_path = "../" + tls_config_.key_file;
-                    }
-                }
-                quic_server_->set_tls_credentials(std::move(cert_path), std::move(key_path));
+                quic_server_->set_tls_credentials(tls_config_.cert_file, tls_config_.key_file);
             }
 
             quic_server_->set_uni_stream_handler(

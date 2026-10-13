@@ -346,41 +346,18 @@ namespace wavex::network::quic {
 
             if (is_server_) {
                 if (!tls_cert_file_.empty() && !tls_key_file_.empty()) {
-                    std::string cert_file = tls_cert_file_;
-                    std::string key_file = tls_key_file_;
-                    std::error_code ec;
-                    if (!std::filesystem::exists(cert_file, ec)) {
-#ifdef PROJECT_DIR
-                        std::string alt = std::string(PROJECT_DIR) + "/" + cert_file;
-                        if (std::filesystem::exists(alt, ec)) cert_file = alt;
-#endif
-                        if (!std::filesystem::exists(cert_file, ec) &&
-                            std::filesystem::exists("../" + tls_cert_file_, ec)) {
-                            cert_file = "../" + tls_cert_file_;
-                        }
-                    }
-                    if (!std::filesystem::exists(key_file, ec)) {
-#ifdef PROJECT_DIR
-                        std::string alt = std::string(PROJECT_DIR) + "/" + key_file;
-                        if (std::filesystem::exists(alt, ec)) key_file = alt;
-#endif
-                        if (!std::filesystem::exists(key_file, ec) && std::filesystem::exists("../" + tls_key_file_, ec)) {
-                            key_file = "../" + tls_key_file_;
-                        }
-                    }
-
-                    if (SSL_CTX_use_certificate_file(tls_->ctx, cert_file.c_str(), SSL_FILETYPE_PEM) != 1) {
+                    if (SSL_CTX_use_certificate_file(tls_->ctx, tls_cert_file_.c_str(), SSL_FILETYPE_PEM) != 1) {
                         wavex::log::error("[QUIC] init_tls_handshake_engine: SSL_CTX_use_certificate_file failed for '{}'",
-                                          cert_file);
+                                          tls_cert_file_);
                         return false;
                     }
-                    if (SSL_CTX_use_PrivateKey_file(tls_->ctx, key_file.c_str(), SSL_FILETYPE_PEM) != 1) {
+                    if (SSL_CTX_use_PrivateKey_file(tls_->ctx, tls_key_file_.c_str(), SSL_FILETYPE_PEM) != 1) {
                         wavex::log::error("[QUIC] init_tls_handshake_engine: SSL_CTX_use_PrivateKey_file failed for '{}'",
-                                          key_file);
+                                          tls_key_file_);
                         return false;
                     }
-                    wavex::log::debug("[QUIC] init_tls_handshake_engine: loaded cert '{}' and key '{}'", cert_file,
-                                      key_file);
+                    wavex::log::debug("[QUIC] init_tls_handshake_engine: loaded cert '{}' and key '{}'", tls_cert_file_,
+                                      tls_key_file_);
                 } else {
                     wavex::log::warn(
                         "[QUIC] init_tls_handshake_engine: is_server=true but cert ('{}') or key ('{}') is empty!",
@@ -1839,6 +1816,21 @@ namespace wavex::network::quic {
         }
         if (cb) cb();
         if (closed_cb) closed_cb(lcid, pcid, orig_dcid);
+    }
+
+    void QuicConnection::set_tls_credentials(std::string cert_file, std::string key_file) {
+        std::error_code ec;
+        if (!cert_file.empty() && !std::filesystem::exists(cert_file, ec)) {
+            wavex::log::error("[QuicConnection] TLS certificate file not found: '{}'", cert_file);
+            throw std::runtime_error("QuicConnection::set_tls_credentials: Certificate file not found: '" + cert_file + "'");
+        }
+        if (!key_file.empty() && !std::filesystem::exists(key_file, ec)) {
+            wavex::log::error("[QuicConnection] TLS private key file not found: '{}'", key_file);
+            throw std::runtime_error("QuicConnection::set_tls_credentials: Private key file not found: '" + key_file + "'");
+        }
+        std::scoped_lock lock(mtx_);
+        tls_cert_file_ = std::move(cert_file);
+        tls_key_file_ = std::move(key_file);
     }
 } // namespace wavex::network::quic
 

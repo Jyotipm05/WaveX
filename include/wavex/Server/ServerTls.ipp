@@ -27,6 +27,8 @@ namespace wavex::server {
     void Server<Codec, RouterType>::enable_tls(TlsConfig config) {
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
         tls_config_ = std::move(config);
+        tls_config_.cert_file = detail::resolve_cert_path("", tls_config_.cert_file);
+        tls_config_.key_file = detail::resolve_key_path("", tls_config_.key_file);
         init_ssl();
         tls_enabled_ = true;
 #else
@@ -72,11 +74,8 @@ namespace wavex::server {
                 });
         }
 
-        std::string cert_path = detail::resolve_cert_path("", tls_config_.cert_file);
-        std::string key_path = detail::resolve_key_path("", tls_config_.key_file);
-
-        ssl_ctx_->use_certificate_chain_file(cert_path);
-        ssl_ctx_->use_private_key_file(key_path, asio::ssl::context::pem);
+        ssl_ctx_->use_certificate_chain_file(tls_config_.cert_file);
+        ssl_ctx_->use_private_key_file(tls_config_.key_file, asio::ssl::context::pem);
 
         if (!tls_config_.dh_file.empty()) {
             ssl_ctx_->use_tmp_dh_file(tls_config_.dh_file);

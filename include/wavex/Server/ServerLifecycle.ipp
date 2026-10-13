@@ -98,9 +98,7 @@ namespace wavex::server {
             quic_server_ = std::make_unique<network::quic::QuicServer>(
                 master_io_, address_, port_);
             if (tls_enabled_) {
-                std::string cert_path = detail::resolve_cert_path("", tls_config_.cert_file);
-                std::string key_path = detail::resolve_key_path("", tls_config_.key_file);
-                quic_server_->set_tls_credentials(std::move(cert_path), std::move(key_path));
+                quic_server_->set_tls_credentials(tls_config_.cert_file, tls_config_.key_file);
             }
             quic_server_->set_stream_handler(
                 [this](std::shared_ptr<network::quic::QuicStream> stream)

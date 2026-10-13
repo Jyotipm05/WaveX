@@ -20,42 +20,41 @@
 #include <asio/buffer.hpp>
 #include <chrono>
 #include <algorithm>
+#include <filesystem>
 #include <string>
 #include <string_view>
 #include <system_error>
 
 namespace wavex::server::detail {
 
-    auto resolve_cert_path(const std::string_view /*base_dir*/, const std::string &cert_file) -> std::string {
-        std::string cert_path = cert_file;
-        std::error_code ec;
-        if (!wavex::utils::fs_utils::exists(cert_path, ec)) {
-#ifdef PROJECT_DIR
-            std::string alt = std::string(PROJECT_DIR) + "/" + cert_path;
-            if (wavex::utils::fs_utils::exists(alt, ec)) cert_path = alt;
-#endif
-            if (!wavex::utils::fs_utils::exists(cert_path, ec) &&
-                wavex::utils::fs_utils::exists("../" + cert_file, ec)) {
-                cert_path = "../" + cert_file;
-            }
+    auto resolve_cert_path(const std::string_view base_dir, const std::string &cert_file) -> std::string {
+        if (cert_file.empty()) {
+            throw std::runtime_error("Server::enable_tls: Certificate file path cannot be empty");
         }
-        return cert_path;
+        std::filesystem::path p(cert_file);
+        if (!base_dir.empty() && p.is_relative()) {
+            p = std::filesystem::path(base_dir) / p;
+        }
+        std::error_code ec;
+        if (!wavex::utils::fs_utils::exists(p.string(), ec)) {
+            throw std::runtime_error("Server::enable_tls: Certificate file not found: '" + p.string() + "'");
+        }
+        return p.string();
     }
 
-    auto resolve_key_path(const std::string_view /*base_dir*/, const std::string &key_file) -> std::string {
-        std::string key_path = key_file;
-        std::error_code ec;
-        if (!wavex::utils::fs_utils::exists(key_path, ec)) {
-#ifdef PROJECT_DIR
-            std::string alt = std::string(PROJECT_DIR) + "/" + key_path;
-            if (wavex::utils::fs_utils::exists(alt, ec)) key_path = alt;
-#endif
-            if (!wavex::utils::fs_utils::exists(key_path, ec) &&
-                wavex::utils::fs_utils::exists("../" + key_file, ec)) {
-                key_path = "../" + key_file;
-            }
+    auto resolve_key_path(const std::string_view base_dir, const std::string &key_file) -> std::string {
+        if (key_file.empty()) {
+            throw std::runtime_error("Server::enable_tls: Private key file path cannot be empty");
         }
-        return key_path;
+        std::filesystem::path p(key_file);
+        if (!base_dir.empty() && p.is_relative()) {
+            p = std::filesystem::path(base_dir) / p;
+        }
+        std::error_code ec;
+        if (!wavex::utils::fs_utils::exists(p.string(), ec)) {
+            throw std::runtime_error("Server::enable_tls: Private key file not found: '" + p.string() + "'");
+        }
+        return p.string();
     }
 
     auto load_not_found_page_file(const std::string &file_path, std::string &out_body, std::string &out_mime) -> bool {

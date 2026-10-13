@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <filesystem>
 #include <future>
 #include <memory>
 #include <string>
@@ -600,6 +601,15 @@ namespace wavex::network::quic {
     }
 
     void basic_quic_acceptor::set_tls_credentials(std::string cert_file, std::string key_file) {
+        std::error_code ec;
+        if (!std::filesystem::exists(cert_file, ec)) {
+            wavex::log::error("[basic_quic_acceptor] TLS certificate file not found: '{}'", cert_file);
+            throw std::runtime_error("basic_quic_acceptor::set_tls_credentials: Certificate file not found: '" + cert_file + "'");
+        }
+        if (!std::filesystem::exists(key_file, ec)) {
+            wavex::log::error("[basic_quic_acceptor] TLS private key file not found: '{}'", key_file);
+            throw std::runtime_error("basic_quic_acceptor::set_tls_credentials: Private key file not found: '" + key_file + "'");
+        }
         std::lock_guard lock(mtx_);
         tls_cert_file_ = std::move(cert_file);
         tls_key_file_ = std::move(key_file);

@@ -92,12 +92,7 @@ namespace wavex::network::quic {
             uni_stream_handler_ = std::move(handler);
         }
 
-        void set_tls_credentials(std::string cert_file, std::string key_file) {
-            std::lock_guard lock(mtx_);
-            tls_cert_file_ = std::move(cert_file);
-            tls_key_file_ = std::move(key_file);
-            init_shared_ssl_ctx();
-        }
+        void set_tls_credentials(std::string cert_file, std::string key_file);
 
         void start();
 
