@@ -348,11 +348,13 @@ namespace wavex::protos::http {
                 bool decode_header_block(
                     std::string_view block,
                     std::vector<std::pair<std::string, std::string> > &out_headers,
-                    bool &is_blocked) const;
+                    bool &is_blocked,
+                    uint64_t max_field_section_size = 0) const;
 
                 bool decode_header_block(
                     std::string_view block,
-                    std::vector<std::pair<std::string, std::string> > &out_headers) const;
+                    std::vector<std::pair<std::string, std::string> > &out_headers,
+                    uint64_t max_field_section_size = 0) const;
             };
         } // namespace qpack
 
@@ -363,6 +365,7 @@ namespace wavex::protos::http {
             // ─── 2. Member Variables (SECOND - Minimal Padding) ────────────────
             qpack::dynamic_table decode_table{};
             uint64_t max_field_section_size{65536};
+            uint64_t peer_max_field_section_size{(std::numeric_limits<uint64_t>::max)()};
             uint64_t peer_qpack_max_table_capacity{0};
             uint64_t peer_qpack_blocked_streams{0};
             uint64_t goaway_stream_id{0};
@@ -600,6 +603,9 @@ namespace wavex::protos::http {
             enum class result { success, incomplete, error };
 
             // ─── 4. Member Functions (LAST) ────────────────────────────────────
+            [[nodiscard]] static uint64_t default_max_field_section_size() noexcept;
+            static void set_default_max_field_section_size(uint64_t size) noexcept;
+
             [[nodiscard]] static constexpr bool is_reserved_frame(const uint64_t type) noexcept {
                 return is_reserved_frame_type(type);
             }
@@ -619,6 +625,13 @@ namespace wavex::protos::http {
                 std::string_view buffer,
                 request &req,
                 std::size_t &bytes_consumed,
+                qpack::dynamic_table &dt,
+                uint64_t max_field_section_size);
+
+            [[nodiscard]] static result parse_request(
+                std::string_view buffer,
+                request &req,
+                std::size_t &bytes_consumed,
                 qpack::dynamic_table &dt);
 
             [[nodiscard]] static result parse_request(
@@ -631,6 +644,13 @@ namespace wavex::protos::http {
                 request &req,
                 std::size_t &bytes_consumed,
                 connection_context &ctx);
+
+            [[nodiscard]] static result parse_response(
+                std::string_view buffer,
+                response &res,
+                std::size_t &bytes_consumed,
+                qpack::dynamic_table &dt,
+                uint64_t max_field_section_size);
 
             [[nodiscard]] static result parse_response(
                 std::string_view buffer,
@@ -831,6 +851,14 @@ namespace wavex::protos::http {
         using result = http3::parser::result;
         using reserved_frame_type = http3::reserved_frame_type;
 
+        static void set_default_max_field_section_size(const uint64_t size) noexcept {
+            parser::set_default_max_field_section_size(size);
+        }
+
+        [[nodiscard]] static uint64_t default_max_field_section_size() noexcept {
+            return parser::default_max_field_section_size();
+        }
+
         [[nodiscard]] static constexpr bool is_reserved_frame(const uint64_t type) noexcept {
             return http3::is_reserved_frame_type(type);
         }
@@ -848,17 +876,27 @@ namespace wavex::protos::http {
         }
 
         static result parse_stream(const std::string_view buffer, request &req, std::size_t &bytes_consumed,
+                                   dynamic_table &dt, const uint64_t max_field_section_size) {
+            return parser::parse_request(buffer, req, bytes_consumed, dt, max_field_section_size);
+        }
+
+        static result parse_stream(const std::string_view buffer, request &req, std::size_t &bytes_consumed,
                                    dynamic_table &dt) {
             return parser::parse_request(buffer, req, bytes_consumed, dt);
         }
 
         static result parse_stream(const std::string_view buffer, request &req, std::size_t &bytes_consumed,
                                    connection_context &ctx) {
-            return parser::parse_request(buffer, req, bytes_consumed, ctx.decode_table);
+            return parser::parse_request(buffer, req, bytes_consumed, ctx);
         }
 
         static result parse_stream(const std::string_view buffer, request &req, std::size_t &bytes_consumed) {
             return parser::parse_request(buffer, req, bytes_consumed);
+        }
+
+        static result parse_request(const std::string_view buffer, request &req, std::size_t &bytes_consumed,
+                                    dynamic_table &dt, const uint64_t max_field_section_size) {
+            return parser::parse_request(buffer, req, bytes_consumed, dt, max_field_section_size);
         }
 
         static result parse_request(const std::string_view buffer, request &req, std::size_t &bytes_consumed,
@@ -872,7 +910,12 @@ namespace wavex::protos::http {
 
         static result parse_request(const std::string_view buffer, request &req, std::size_t &bytes_consumed,
                                     connection_context &ctx) {
-            return parser::parse_request(buffer, req, bytes_consumed, ctx.decode_table);
+            return parser::parse_request(buffer, req, bytes_consumed, ctx);
+        }
+
+        static result parse_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed,
+                                     dynamic_table &dt, const uint64_t max_field_section_size) {
+            return parser::parse_response(buffer, res, bytes_consumed, dt, max_field_section_size);
         }
 
         static result parse_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed,
@@ -882,7 +925,7 @@ namespace wavex::protos::http {
 
         static result parse_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed,
                                      connection_context &ctx) {
-            return parser::parse_response(buffer, res, bytes_consumed, ctx.decode_table);
+            return parser::parse_response(buffer, res, bytes_consumed, ctx);
         }
 
         static result parse_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed) {

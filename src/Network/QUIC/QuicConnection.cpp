@@ -1733,9 +1733,9 @@ namespace wavex::network::quic {
         // Construct SETTINGS Frame (Type 0x04)
         std::string settings_payload;
 
-        // SETTINGS_MAX_FIELD_SECTION_SIZE (Identifier 0x06) = 65,536 bytes
+        // SETTINGS_MAX_FIELD_SECTION_SIZE (Identifier 0x06)
         VarInt::encode(0x06, settings_payload);
-        VarInt::encode(65536, settings_payload);
+        VarInt::encode(max_field_section_size_, settings_payload);
 
         // SETTINGS_QPACK_MAX_TABLE_CAPACITY (Identifier 0x01) = 0 (Static table only)
         VarInt::encode(0x01, settings_payload);

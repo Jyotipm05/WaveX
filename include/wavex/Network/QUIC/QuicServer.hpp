@@ -48,6 +48,7 @@ namespace wavex::network::quic {
         UniStreamHandler uni_stream_handler_{};
         std::string tls_cert_file_{};
         std::string tls_key_file_{};
+        uint64_t max_field_section_size_{65536};
         std::size_t server_cid_len_{8};
         std::atomic<bool> stopped_{false};
         std::atomic<bool> running_{false};
@@ -69,6 +70,16 @@ namespace wavex::network::quic {
         [[nodiscard]] auto connection_id_length() const noexcept -> std::size_t {
             std::lock_guard lock(mtx_);
             return server_cid_len_;
+        }
+
+        void set_max_field_section_size(const uint64_t max_size) noexcept {
+            std::lock_guard lock(mtx_);
+            max_field_section_size_ = max_size;
+        }
+
+        [[nodiscard]] auto max_field_section_size() const noexcept -> uint64_t {
+            std::lock_guard lock(mtx_);
+            return max_field_section_size_;
         }
 
         void set_stream_handler(StreamHandler handler) {

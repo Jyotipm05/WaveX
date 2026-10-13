@@ -15,10 +15,23 @@
 #include <charconv>
 #include <limits>
 #include <algorithm>
+#include <atomic>
 
 #include "wavex/protos/http/http2codec.hpp"
 
 namespace wavex::protos::http::http3 {
+    namespace {
+        std::atomic<uint64_t> s_default_max_field_section_size{65536};
+    }
+
+    uint64_t parser::default_max_field_section_size() noexcept {
+        return s_default_max_field_section_size.load(std::memory_order_relaxed);
+    }
+
+    void parser::set_default_max_field_section_size(const uint64_t size) noexcept {
+        s_default_max_field_section_size.store(size, std::memory_order_relaxed);
+    }
+
     namespace qpack {
         // RFC 9204 Appendix A — QPACK Static Table (0-indexed, entries 0..98)
         const std::array<static_entry, 99> STATIC_TABLE = {
@@ -547,7 +560,8 @@ namespace wavex::protos::http::http3 {
         bool decoder::decode_header_block(
             const std::string_view block,
             std::vector<std::pair<std::string, std::string> > &out_headers,
-            bool &is_blocked) const {
+            bool &is_blocked,
+            const uint64_t max_field_section_size) const {
             is_blocked = false;
             if (block.empty()) return false;
             std::size_t cursor = 0;
@@ -597,6 +611,16 @@ namespace wavex::protos::http::http3 {
                 base = req_insert_count - delta_base - 1;
             }
 
+            uint64_t accumulated_section_size = 0;
+            auto add_header = [&](std::string name, std::string value) -> bool {
+                accumulated_section_size += name.size() + value.size() + 32;
+                if (max_field_section_size > 0 && accumulated_section_size > max_field_section_size) {
+                    return false;
+                }
+                out_headers.emplace_back(std::move(name), std::move(value));
+                return true;
+            };
+
             while (cursor < block.size()) {
                 // Case 1: Indexed Header Field (starts with 1xxxxxxx)
                 if (const auto b = static_cast<uint8_t>(block[cursor]); (b & 0x80) != 0) {
@@ -606,14 +630,13 @@ namespace wavex::protos::http::http3 {
 
                     if (is_static) {
                         if (index >= STATIC_TABLE.size()) return false;
-                        out_headers.emplace_back(
+                        if (!add_header(
                             std::string(STATIC_TABLE[index].name),
-                            std::string(STATIC_TABLE[index].value)
-                        );
+                            std::string(STATIC_TABLE[index].value))) return false;
                     } else {
                         const auto *e = dt_.get_relative(base, index);
                         if (!e) return false;
-                        out_headers.emplace_back(e->name, e->value);
+                        if (!add_header(e->name, e->value)) return false;
                     }
                 }
                 // Case 2: Literal Header with Name Reference (starts with 01xxxxxx)
@@ -634,7 +657,7 @@ namespace wavex::protos::http::http3 {
 
                     std::string value;
                     if (!http2::hpack::decode_string(block, cursor, value)) return false;
-                    out_headers.emplace_back(std::move(name), std::move(value));
+                    if (!add_header(std::move(name), std::move(value))) return false;
                 }
                 // Case 3: Literal Header with Literal Name (starts with 001xxxxx)
                 else if ((b & 0x20) != 0) {
@@ -652,7 +675,7 @@ namespace wavex::protos::http::http3 {
 
                     std::string value;
                     if (!http2::hpack::decode_string(block, cursor, value)) return false;
-                    out_headers.emplace_back(std::move(name), std::move(value));
+                    if (!add_header(std::move(name), std::move(value))) return false;
                 }
                 // Case 4: Indexed Header Field with Post-Base Index (RFC 9204 §4.5.3: 0001xxxx, 4-bit prefix 0x10)
                 else if ((b & 0xf0) == 0x10) {
@@ -660,7 +683,7 @@ namespace wavex::protos::http::http3 {
                     if (!http2::hpack::decode_integer(block, cursor, 4, post_base_idx)) return false;
                     const auto *e = dt_.get_post_base(base, post_base_idx);
                     if (!e) return false;
-                    out_headers.emplace_back(e->name, e->value);
+                    if (!add_header(e->name, e->value)) return false;
                 }
                 // Case 5: Literal Header with Post-Base Name Reference (RFC 9204 §4.5.5: 0000xxxx, 3-bit prefix 0x00)
                 else if ((b & 0xf0) == 0x00) {
@@ -671,7 +694,7 @@ namespace wavex::protos::http::http3 {
 
                     std::string value;
                     if (!http2::hpack::decode_string(block, cursor, value)) return false;
-                    out_headers.emplace_back(e->name, std::move(value));
+                    if (!add_header(e->name, std::move(value))) return false;
                 } else {
                     return false;
                 }
@@ -681,9 +704,10 @@ namespace wavex::protos::http::http3 {
 
         bool decoder::decode_header_block(
             const std::string_view block,
-            std::vector<std::pair<std::string, std::string> > &out_headers) const {
+            std::vector<std::pair<std::string, std::string> > &out_headers,
+            const uint64_t max_field_section_size) const {
             bool is_blocked = false;
-            return decode_header_block(block, out_headers, is_blocked);
+            return decode_header_block(block, out_headers, is_blocked, max_field_section_size);
         }
     } // namespace qpack
 
@@ -724,7 +748,8 @@ namespace wavex::protos::http::http3 {
         const std::string_view buffer,
         request &req,
         std::size_t &bytes_consumed,
-        qpack::dynamic_table &dt) {
+        qpack::dynamic_table &dt,
+        const uint64_t max_field_section_size) {
         bytes_consumed = 0;
         if (buffer.empty()) return result::incomplete;
 
@@ -802,12 +827,21 @@ namespace wavex::protos::http::http3 {
 
                 const std::string_view block = remaining.substr(hdr_bytes, hdr.length);
                 std::vector<std::pair<std::string, std::string> > decoded;
-                if (bool is_blocked = false; !dec.decode_header_block(block, decoded, is_blocked)) {
+                if (bool is_blocked = false; !dec.decode_header_block(block, decoded, is_blocked, max_field_section_size)) {
                     if (is_blocked) {
                         return result::incomplete;
                     }
                     req.state_.reset();
                     return result::error;
+                }
+
+                uint64_t section_size = 0;
+                for (const auto &[name, val] : decoded) {
+                    section_size += name.size() + val.size() + 32;
+                    if (max_field_section_size > 0 && section_size > max_field_section_size) {
+                        req.state_.reset();
+                        return result::error;
+                    }
                 }
 
                 bool has_method = false;
@@ -934,9 +968,17 @@ namespace wavex::protos::http::http3 {
     parser::result parser::parse_request(
         const std::string_view buffer,
         request &req,
+        std::size_t &bytes_consumed,
+        qpack::dynamic_table &dt) {
+        return parse_request(buffer, req, bytes_consumed, dt, default_max_field_section_size());
+    }
+
+    parser::result parser::parse_request(
+        const std::string_view buffer,
+        request &req,
         std::size_t &bytes_consumed) {
         qpack::dynamic_table local_dt;
-        return parse_request(buffer, req, bytes_consumed, local_dt);
+        return parse_request(buffer, req, bytes_consumed, local_dt, default_max_field_section_size());
     }
 
     parser::result parser::parse_request(
@@ -944,14 +986,15 @@ namespace wavex::protos::http::http3 {
         request &req,
         std::size_t &bytes_consumed,
         connection_context &ctx) {
-        return parse_request(buffer, req, bytes_consumed, ctx.decode_table);
+        return parse_request(buffer, req, bytes_consumed, ctx.decode_table, ctx.max_field_section_size);
     }
 
     parser::result parser::parse_response(
         const std::string_view buffer,
         response &res,
         std::size_t &bytes_consumed,
-        qpack::dynamic_table &dt) {
+        qpack::dynamic_table &dt,
+        const uint64_t max_field_section_size) {
         bytes_consumed = 0;
         if (buffer.empty()) return result::incomplete;
 
@@ -1026,12 +1069,21 @@ namespace wavex::protos::http::http3 {
 
                 const std::string_view block = remaining.substr(hdr_bytes, hdr.length);
                 std::vector<std::pair<std::string, std::string> > decoded;
-                if (bool is_blocked = false; !dec.decode_header_block(block, decoded, is_blocked)) {
+                if (bool is_blocked = false; !dec.decode_header_block(block, decoded, is_blocked, max_field_section_size)) {
                     if (is_blocked) {
                         return result::incomplete;
                     }
                     res.state_.reset();
                     return result::error;
+                }
+
+                uint64_t section_size = 0;
+                for (const auto &[name, val] : decoded) {
+                    section_size += name.size() + val.size() + 32;
+                    if (max_field_section_size > 0 && section_size > max_field_section_size) {
+                        res.state_.reset();
+                        return result::error;
+                    }
                 }
 
                 bool has_status = false;
@@ -1127,9 +1179,17 @@ namespace wavex::protos::http::http3 {
     parser::result parser::parse_response(
         const std::string_view buffer,
         response &res,
+        std::size_t &bytes_consumed,
+        qpack::dynamic_table &dt) {
+        return parse_response(buffer, res, bytes_consumed, dt, default_max_field_section_size());
+    }
+
+    parser::result parser::parse_response(
+        const std::string_view buffer,
+        response &res,
         std::size_t &bytes_consumed) {
         qpack::dynamic_table local_dt;
-        return parse_response(buffer, res, bytes_consumed, local_dt);
+        return parse_response(buffer, res, bytes_consumed, local_dt, default_max_field_section_size());
     }
 
     parser::result parser::parse_response(
@@ -1137,7 +1197,7 @@ namespace wavex::protos::http::http3 {
         response &res,
         std::size_t &bytes_consumed,
         connection_context &ctx) {
-        return parse_response(buffer, res, bytes_consumed, ctx.decode_table);
+        return parse_response(buffer, res, bytes_consumed, ctx.decode_table, ctx.max_field_section_size);
     }
 
     // ─── http3::encoder ─────────────────────────────────────────────────────────────

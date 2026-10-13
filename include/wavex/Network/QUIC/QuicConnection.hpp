@@ -199,6 +199,7 @@ namespace wavex::network::quic {
         std::chrono::milliseconds idle_timeout_{30000};
         uint64_t max_data_{1024 * 1024}; // 1 MB
         uint64_t max_stream_data_{256 * 1024}; // 256 KB
+        uint64_t max_field_section_size_{65536}; // 64 KB (RFC 9114 SETTINGS_MAX_FIELD_SECTION_SIZE)
         uint64_t data_sent_{0};
         uint64_t data_received_{0};
         uint64_t cumulative_bytes_received_{0};
@@ -290,6 +291,16 @@ namespace wavex::network::quic {
         void set_idle_timeout(std::chrono::milliseconds timeout) noexcept {
             std::scoped_lock lock(mtx_);
             idle_timeout_ = timeout;
+        }
+
+        void set_max_field_section_size(const uint64_t max_size) noexcept {
+            std::scoped_lock lock(mtx_);
+            max_field_section_size_ = max_size;
+        }
+
+        [[nodiscard]] auto max_field_section_size() const noexcept -> uint64_t {
+            std::scoped_lock lock(mtx_);
+            return max_field_section_size_;
         }
 
         void set_user_context(std::shared_ptr<void> ctx) noexcept {

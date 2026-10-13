@@ -50,6 +50,7 @@ namespace wavex::server {
         std::string address_{"0.0.0.0"}; // complex (32 bytes)
         TlsConfig tls_config_{}; // complex
         Http2Server server_; // complex
+        uint64_t max_field_section_size_{65536}; // 8 bytes
         unsigned short port_{0}; // 2 bytes
         bool tls_enabled_{false}; // 1 byte
         bool allow_insecure_{false}; // 1 byte
@@ -128,6 +129,18 @@ namespace wavex::server {
             server_.allow_insecure(allow);
         }
 
+        void set_max_field_section_size(const uint64_t max_size) noexcept {
+            max_field_section_size_ = max_size;
+            if (quic_server_) {
+                quic_server_->set_max_field_section_size(max_size);
+            }
+            protos::http::http3codec::set_default_max_field_section_size(max_size);
+        }
+
+        [[nodiscard]] auto max_field_section_size() const noexcept -> uint64_t {
+            return max_field_section_size_;
+        }
+
         void run() {
             h2_router_->freeze();
             h3_router_->freeze();
@@ -140,6 +153,7 @@ namespace wavex::server {
 
             quic_server_ = std::make_unique<network::quic::QuicServer>(
                 server_.io_context(), address_, port_);
+            quic_server_->set_max_field_section_size(max_field_section_size_);
 
             if (tls_enabled_) {
                 std::string cert_path = tls_config_.cert_file;

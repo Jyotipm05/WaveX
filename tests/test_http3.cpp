@@ -881,6 +881,137 @@ void test_http3_reserved_frame_types_c9() {
     std::cout << "  [PASS] C9: Rejection of HTTP/2 Reserved Frame Types verified.\n";
 }
 
+void test_http3_max_field_section_size_enforcement_c10() {
+    std::cout << "[Test HTTP/3] C10: Enforcement & Configuration of MAX_FIELD_SECTION_SIZE (RFC 9114 §7.2.4.1)...\n";
+
+    // 1. Build a valid request headers frame
+    // Size calculation per RFC 9114 §7.2.4.1:
+    // :method (7) + GET (3) + 32 = 42
+    // :path (5) + /test (5) + 32 = 42
+    // :scheme (7) + https (5) + 32 = 44
+    // :authority (10) + wavex.local (11) + 32 = 53
+    // Total section size = 42 + 42 + 44 + 53 = 181 bytes
+    h3::request req;
+    req.method_type = method::GET;
+    req.target = "/test";
+    req.scheme = "https";
+    req.authority = "wavex.local";
+
+    const std::string headers_payload = qpk::encoder::encode_request_headers(
+        req.method_type, req.target, req.scheme, req.authority, req.headers);
+    const std::string wire_headers = h3::encoder::encode_frame(frame_type::HEADERS, headers_payload);
+
+    // 2. Direct QPACK decoder enforcement
+    {
+        qpk::dynamic_table dt;
+        const qpk::decoder dec(dt);
+        std::vector<std::pair<std::string, std::string>> out;
+        bool is_blocked = false;
+
+        // Limit 100 bytes (lower than 181 bytes) -> must fail
+        const bool ok_small = dec.decode_header_block(headers_payload, out, is_blocked, 100);
+        assert(!ok_small);
+
+        // Limit 250 bytes (greater than 181 bytes) -> must succeed
+        out.clear();
+        const bool ok_large = dec.decode_header_block(headers_payload, out, is_blocked, 250);
+        assert(ok_large);
+        assert(out.size() == 4);
+    }
+
+    // 3. parse_request with explicit max_field_section_size
+    {
+        qpk::dynamic_table dt;
+        h3::request parsed;
+        std::size_t consumed = 0;
+
+        // Limit 100 bytes -> rejected with error
+        const auto r1 = http3codec::parse_request(wire_headers, parsed, consumed, dt, 100);
+        assert(r1 == http3codec::result::error);
+
+        // Limit 250 bytes -> succeeds
+        consumed = 0;
+        const auto r2 = http3codec::parse_request(wire_headers, parsed, consumed, dt, 250);
+        assert(r2 == http3codec::result::success);
+        assert(parsed.method_type == method::GET);
+        assert(parsed.target == "/test");
+    }
+
+    // 4. parse_request with connection_context configuration
+    {
+        h3::connection_context ctx;
+        ctx.max_field_section_size = 120; // smaller than 181
+
+        h3::request parsed;
+        std::size_t consumed = 0;
+        const auto r_fail = http3codec::parse_request(wire_headers, parsed, consumed, ctx);
+        assert(r_fail == http3codec::result::error);
+
+        // Update context limit to 300
+        ctx.max_field_section_size = 300;
+        consumed = 0;
+        const auto r_pass = http3codec::parse_request(wire_headers, parsed, consumed, ctx);
+        assert(r_pass == http3codec::result::success);
+    }
+
+    // 5. Response headers enforcement
+    {
+        h3::response res;
+        res.status_code = 200;
+        res.headers.emplace_back("x-wavex-framework", "production-speed");
+        // :status (7) + 200 (3) + 32 = 42
+        // x-wavex-framework (17) + production-speed (16) + 32 = 65
+        // Total = 107 bytes
+
+        const std::string res_payload = qpk::encoder::encode_response_headers(res.status_code, res.headers);
+        const std::string res_wire = h3::encoder::encode_frame(frame_type::HEADERS, res_payload);
+
+        qpk::dynamic_table dt;
+        h3::response parsed_res;
+        std::size_t consumed = 0;
+
+        // Limit 80 -> fail
+        const auto r_fail = http3codec::parse_response(res_wire, parsed_res, consumed, dt, 80);
+        assert(r_fail == http3codec::result::error);
+
+        // Limit 150 -> pass
+        consumed = 0;
+        const auto r_pass = http3codec::parse_response(res_wire, parsed_res, consumed, dt, 150);
+        assert(r_pass == http3codec::result::success);
+        assert(parsed_res.status_code == 200);
+    }
+
+    // 6. QUIC connection and server instance configuration
+    {
+        asio::io_context io;
+        quic::QuicServer srv(io, 0);
+        assert(srv.max_field_section_size() == 65536);
+
+        srv.set_max_field_section_size(32768);
+        assert(srv.max_field_section_size() == 32768);
+
+        const auto cid = quic::ConnectionId::random(8);
+        const auto peer_cid = quic::ConnectionId::random(8);
+        asio::ip::udp::endpoint ep(asio::ip::address_v4::loopback(), 4433);
+        quic::QuicConnection conn(cid, peer_cid, ep, true, io.get_executor());
+
+        assert(conn.max_field_section_size() == 65536);
+        conn.set_max_field_section_size(16384);
+        assert(conn.max_field_section_size() == 16384);
+    }
+
+    // 7. Global default configuration
+    {
+        const uint64_t original = http3codec::default_max_field_section_size();
+        http3codec::set_default_max_field_section_size(123456);
+        assert(http3codec::default_max_field_section_size() == 123456);
+        http3codec::set_default_max_field_section_size(original);
+        assert(http3codec::default_max_field_section_size() == original);
+    }
+
+    std::cout << "  [PASS] C10: MAX_FIELD_SECTION_SIZE enforcement & multi-layer configuration verified.\n";
+}
+
 int main() {
     std::cout << "=== Running WaveX HTTP/3 Codec Tests ===\n";
     try {
@@ -895,6 +1026,7 @@ int main() {
         test_http3_session_unidirectional_routing_c7();
         test_http3_resumable_parser_c2();
         test_http3_reserved_frame_types_c9();
+        test_http3_max_field_section_size_enforcement_c10();
         std::cout << "=== All HTTP/3 Tests PASSED ===\n";
         return 0;
     } catch (const std::exception &ex) {

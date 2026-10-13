@@ -186,6 +186,7 @@ namespace wavex::network::quic {
                             const ConnectionId server_cid = ConnectionId::random(server_cid_len_);
                             conn = std::make_shared<QuicConnection>(server_cid, hdr.scid, sender_endpoint_, true,
                                                                     io_.get_executor(), hdr.dcid);
+                            conn->set_max_field_section_size(max_field_section_size_);
 
                             conn->set_outbound_callback([this, weak_conn = std::weak_ptr<QuicConnection>(conn)] {
                                 if (stopped_.load() || !running_.load()) return;
