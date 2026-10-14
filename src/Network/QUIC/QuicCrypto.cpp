@@ -26,11 +26,9 @@
 #endif
 
 #include <algorithm>
-#include <vector>
 
 #include <openssl/ssl.h>
 #include <openssl/evp.h>
-#include <openssl/kdf.h>
 #include <openssl/hmac.h>
 #include <openssl/crypto.h>
 
@@ -102,15 +100,27 @@ namespace wavex::network::quic {
 
     void ProtectionKeys::cleanse() noexcept {
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+        if (enc_ctx) {
+            EVP_CIPHER_CTX_free(enc_ctx);
+            enc_ctx = nullptr;
+        }
+        if (dec_ctx) {
+            EVP_CIPHER_CTX_free(dec_ctx);
+            dec_ctx = nullptr;
+        }
+        if (hp_ctx) {
+            EVP_CIPHER_CTX_free(hp_ctx);
+            hp_ctx = nullptr;
+        }
         OPENSSL_cleanse(secret.data(), secret.size());
         OPENSSL_cleanse(key.data(), key.size());
-        OPENSSL_cleanse(iv.data(), iv.size());
         OPENSSL_cleanse(hp.data(), hp.size());
+        OPENSSL_cleanse(iv.data(), iv.size());
 #else
         std::fill(secret.begin(), secret.end(), 0);
         std::fill(key.begin(), key.end(), 0);
-        std::fill(iv.begin(), iv.end(), 0);
         std::fill(hp.begin(), hp.end(), 0);
+        std::fill(iv.begin(), iv.end(), 0);
 #endif
         key_phase = 0;
         valid = false;
@@ -121,10 +131,16 @@ namespace wavex::network::quic {
     }
 
     ProtectionKeys::ProtectionKeys(const ProtectionKeys &other) noexcept
-        : secret(other.secret),
+        :
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+          enc_ctx(nullptr),
+          dec_ctx(nullptr),
+          hp_ctx(nullptr),
+#endif
+          secret(other.secret),
           key(other.key),
-          iv(other.iv),
           hp(other.hp),
+          iv(other.iv),
           key_phase(other.key_phase),
           valid(other.valid) {}
 
@@ -133,8 +149,8 @@ namespace wavex::network::quic {
             cleanse();
             secret = other.secret;
             key = other.key;
-            iv = other.iv;
             hp = other.hp;
+            iv = other.iv;
             key_phase = other.key_phase;
             valid = other.valid;
         }
@@ -142,22 +158,41 @@ namespace wavex::network::quic {
     }
 
     ProtectionKeys::ProtectionKeys(ProtectionKeys &&other) noexcept
-        : secret(other.secret),
+        :
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+          enc_ctx(other.enc_ctx),
+          dec_ctx(other.dec_ctx),
+          hp_ctx(other.hp_ctx),
+#endif
+          secret(other.secret),
           key(other.key),
-          iv(other.iv),
           hp(other.hp),
+          iv(other.iv),
           key_phase(other.key_phase),
           valid(other.valid) {
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+        other.enc_ctx = nullptr;
+        other.dec_ctx = nullptr;
+        other.hp_ctx = nullptr;
+#endif
         other.cleanse();
     }
 
     ProtectionKeys &ProtectionKeys::operator=(ProtectionKeys &&other) noexcept {
         if (this != &other) {
             cleanse();
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+            enc_ctx = other.enc_ctx;
+            dec_ctx = other.dec_ctx;
+            hp_ctx = other.hp_ctx;
+            other.enc_ctx = nullptr;
+            other.dec_ctx = nullptr;
+            other.hp_ctx = nullptr;
+#endif
             secret = other.secret;
             key = other.key;
-            iv = other.iv;
             hp = other.hp;
+            iv = other.iv;
             key_phase = other.key_phase;
             valid = other.valid;
             other.cleanse();
@@ -209,6 +244,18 @@ namespace wavex::network::quic {
         const uint8_t *secret, const std::size_t secret_len,
         ProtectionKeys &keys) noexcept {
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+        if (keys.enc_ctx) {
+            EVP_CIPHER_CTX_free(keys.enc_ctx);
+            keys.enc_ctx = nullptr;
+        }
+        if (keys.dec_ctx) {
+            EVP_CIPHER_CTX_free(keys.dec_ctx);
+            keys.dec_ctx = nullptr;
+        }
+        if (keys.hp_ctx) {
+            EVP_CIPHER_CTX_free(keys.hp_ctx);
+            keys.hp_ctx = nullptr;
+        }
         std::memcpy(keys.secret.data(), secret, (std::min)(secret_len, keys.secret.size()));
         // Key: HKDF-Expand-Label(secret, "quic key", "", 16)
         if (!hkdf_expand_label(secret, secret_len, "quic key", keys.key.data(), 16)) return false;
@@ -255,6 +302,15 @@ namespace wavex::network::quic {
         }
 
         // Header protection keys (hp) are NOT updated across key updates (RFC 9001 §6.1)
+        if (keys.enc_ctx) {
+            EVP_CIPHER_CTX_free(keys.enc_ctx);
+            keys.enc_ctx = nullptr;
+        }
+        if (keys.dec_ctx) {
+            EVP_CIPHER_CTX_free(keys.dec_ctx);
+            keys.dec_ctx = nullptr;
+        }
+
         // Cleanse existing keys before overwriting
         OPENSSL_cleanse(keys.secret.data(), keys.secret.size());
         OPENSSL_cleanse(keys.key.data(), keys.key.size());
@@ -289,9 +345,10 @@ namespace wavex::network::quic {
         if (hdr.is_long) {
             hdr.length = plaintext.size() + 16 + hdr.packet_number_len; // + 16 auth tag
         }
-        std::string header_bytes;
-        pack_packet_header(hdr, header_bytes);
-        const std::size_t pn_offset = header_bytes.size() - hdr.packet_number_len;
+        ciphertext_out.clear();
+        pack_packet_header(hdr, ciphertext_out);
+        const std::size_t header_len = ciphertext_out.size();
+        const std::size_t pn_offset = header_len - hdr.packet_number_len;
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
         // Calculate Nonce = IV ^ PacketNumber
@@ -300,41 +357,51 @@ namespace wavex::network::quic {
             nonce[11 - i] ^= static_cast<uint8_t>((hdr.packet_number >> (i * 8)) & 0xff);
         }
 
-        EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-        if (!ctx) return false;
+        if (!keys.enc_ctx) {
+            keys.enc_ctx = EVP_CIPHER_CTX_new();
+            if (!keys.enc_ctx) return false;
+        } else {
+            EVP_CIPHER_CTX_reset(keys.enc_ctx);
+        }
+
+        ciphertext_out.resize(header_len + plaintext.size() + 16);
+        auto *enc_dest = reinterpret_cast<uint8_t *>(ciphertext_out.data() + header_len);
 
         bool ok = true;
         int out_len = 0;
-        std::vector<uint8_t> encrypted(plaintext.size() + 16);
 
-        if (EVP_EncryptInit_ex(ctx, EVP_aes_128_gcm(), nullptr, keys.key.data(), nonce.data()) != 1) ok = false;
-        if (ok && EVP_EncryptUpdate(ctx, nullptr, &out_len, reinterpret_cast<const uint8_t *>(header_bytes.data()),
-                                    static_cast<int>(header_bytes.size())) != 1)
+        if (EVP_EncryptInit_ex(keys.enc_ctx, EVP_aes_128_gcm(), nullptr, keys.key.data(), nonce.data()) != 1) ok = false;
+        if (ok && EVP_EncryptUpdate(keys.enc_ctx, nullptr, &out_len, reinterpret_cast<const uint8_t *>(ciphertext_out.data()),
+                                    static_cast<int>(header_len)) != 1)
             ok = false;
-        if (ok && EVP_EncryptUpdate(ctx, encrypted.data(), &out_len,
+        if (ok && EVP_EncryptUpdate(keys.enc_ctx, enc_dest, &out_len,
                                     reinterpret_cast<const uint8_t *>(plaintext.data()),
                                     static_cast<int>(plaintext.size())) != 1)
             ok = false;
-        if (ok && EVP_EncryptFinal_ex(ctx, encrypted.data() + out_len, &out_len) != 1) ok = false;
-        if (ok && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, encrypted.data() + plaintext.size()) != 1)
+        int final_len = 0;
+        if (ok && EVP_EncryptFinal_ex(keys.enc_ctx, enc_dest + out_len, &final_len) != 1) ok = false;
+        if (ok && EVP_CIPHER_CTX_ctrl(keys.enc_ctx, EVP_CTRL_GCM_GET_TAG, 16, enc_dest + plaintext.size()) != 1)
             ok = false;
 
-        EVP_CIPHER_CTX_free(ctx);
-        if (!ok) return false;
-
-        ciphertext_out = header_bytes;
-        ciphertext_out.append(reinterpret_cast<const char *>(encrypted.data()), encrypted.size());
+        if (!ok) {
+            ciphertext_out.clear();
+            return false;
+        }
 
         // Apply RFC 9001 §5.4 Header Protection
         if (const std::size_t sample_offset = pn_offset + 4; ciphertext_out.size() >= sample_offset + 16) {
             const auto *sample = reinterpret_cast<const uint8_t *>(ciphertext_out.data() + sample_offset);
             uint8_t mask[16] = {0};
 
-            if (EVP_CIPHER_CTX *hp_ctx = EVP_CIPHER_CTX_new()) {
+            if (!keys.hp_ctx) {
+                keys.hp_ctx = EVP_CIPHER_CTX_new();
+            }
+            if (keys.hp_ctx) {
+                EVP_CIPHER_CTX_reset(keys.hp_ctx);
                 int hp_len = 0;
-                if (EVP_EncryptInit_ex(hp_ctx, EVP_aes_128_ecb(), nullptr, keys.hp.data(), nullptr) == 1 &&
-                    EVP_CIPHER_CTX_set_padding(hp_ctx, 0) == 1 &&
-                    EVP_EncryptUpdate(hp_ctx, mask, &hp_len, sample, 16) == 1) {
+                if (EVP_EncryptInit_ex(keys.hp_ctx, EVP_aes_128_ecb(), nullptr, keys.hp.data(), nullptr) == 1 &&
+                    EVP_CIPHER_CTX_set_padding(keys.hp_ctx, 0) == 1 &&
+                    EVP_EncryptUpdate(keys.hp_ctx, mask, &hp_len, sample, 16) == 1) {
                     // Mask first byte
                     if (hdr.is_long) {
                         ciphertext_out[0] ^= static_cast<char>(mask[0] & 0x0f);
@@ -347,13 +414,11 @@ namespace wavex::network::quic {
                         ciphertext_out[pn_offset + i] ^= static_cast<char>(mask[1 + i]);
                     }
                 }
-                EVP_CIPHER_CTX_free(hp_ctx);
             }
         }
         return true;
 #else
         // Passthrough with 16 zero tag bytes for non-SSL mock builds
-        ciphertext_out = header_bytes;
         ciphertext_out.append(plaintext);
         ciphertext_out.append(16, '\0');
         return true;
@@ -389,14 +454,17 @@ namespace wavex::network::quic {
         const auto *sample = reinterpret_cast<const uint8_t *>(packet_bytes.data() + sample_offset);
         uint8_t mask[16] = {0};
 
-        EVP_CIPHER_CTX *hp_ctx = EVP_CIPHER_CTX_new();
-        if (!hp_ctx) return false;
+        if (!keys.hp_ctx) {
+            keys.hp_ctx = EVP_CIPHER_CTX_new();
+            if (!keys.hp_ctx) return false;
+        } else {
+            EVP_CIPHER_CTX_reset(keys.hp_ctx);
+        }
 
         int hp_len = 0;
-        const bool hp_ok = (EVP_EncryptInit_ex(hp_ctx, EVP_aes_128_ecb(), nullptr, keys.hp.data(), nullptr) == 1 &&
-                            EVP_CIPHER_CTX_set_padding(hp_ctx, 0) == 1 &&
-                            EVP_EncryptUpdate(hp_ctx, mask, &hp_len, sample, 16) == 1);
-        EVP_CIPHER_CTX_free(hp_ctx);
+        const bool hp_ok = (EVP_EncryptInit_ex(keys.hp_ctx, EVP_aes_128_ecb(), nullptr, keys.hp.data(), nullptr) == 1 &&
+                            EVP_CIPHER_CTX_set_padding(keys.hp_ctx, 0) == 1 &&
+                            EVP_EncryptUpdate(keys.hp_ctx, mask, &hp_len, sample, 16) == 1);
         if (!hp_ok) {
             wavex::log::debug("[QUIC] unprotect_packet: HP cipher failed");
             return false;
@@ -432,10 +500,18 @@ namespace wavex::network::quic {
 
         // Step 2: Reconstruct the UNMASKED header for AAD
         const std::size_t real_hdr_len = pn_offset + pn_len;
-        std::string unmasked_hdr(packet_bytes.substr(0, real_hdr_len));
-        unmasked_hdr[0] = static_cast<char>(first_byte);
+        char hdr_buf_storage[128];
+        char *unmasked_hdr_ptr = hdr_buf_storage;
+        std::string unmasked_hdr_str;
+        if (real_hdr_len > sizeof(hdr_buf_storage)) {
+            unmasked_hdr_str.assign(packet_bytes.substr(0, real_hdr_len));
+            unmasked_hdr_ptr = unmasked_hdr_str.data();
+        } else {
+            std::memcpy(unmasked_hdr_ptr, packet_bytes.data(), real_hdr_len);
+        }
+        unmasked_hdr_ptr[0] = static_cast<char>(first_byte);
         for (std::size_t i = 0; i < pn_len; ++i) {
-            unmasked_hdr[pn_offset + i] = static_cast<char>(
+            unmasked_hdr_ptr[pn_offset + i] = static_cast<char>(
                 static_cast<uint8_t>(packet_bytes[pn_offset + i]) ^ mask[1 + i]);
         }
 
@@ -473,39 +549,46 @@ namespace wavex::network::quic {
             nonce[11 - i] ^= static_cast<uint8_t>((full_packet_num >> (i * 8)) & 0xff);
         }
 
-        EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-        if (!ctx) return false;
-
         const std::size_t cipher_len = payload.size() - 16;
         const auto *cipher_data = reinterpret_cast<const uint8_t *>(payload.data());
         const auto *tag_data = cipher_data + cipher_len;
 
-        std::vector<uint8_t> decrypted(cipher_len);
+        if (!effective_keys.dec_ctx) {
+            effective_keys.dec_ctx = EVP_CIPHER_CTX_new();
+            if (!effective_keys.dec_ctx) return false;
+        } else {
+            EVP_CIPHER_CTX_reset(effective_keys.dec_ctx);
+        }
+
+        plaintext_out.resize(cipher_len);
+        auto *plain_dest = reinterpret_cast<uint8_t *>(plaintext_out.data());
         int out_len = 0;
         bool ok = true;
 
-        if (EVP_DecryptInit_ex(ctx, EVP_aes_128_gcm(), nullptr, effective_keys.key.data(), nonce.data()) != 1) ok = false;
-        if (ok && EVP_DecryptUpdate(ctx, nullptr, &out_len, reinterpret_cast<const uint8_t *>(unmasked_hdr.data()),
-                                    static_cast<int>(unmasked_hdr.size())) != 1)
+        if (EVP_DecryptInit_ex(effective_keys.dec_ctx, EVP_aes_128_gcm(), nullptr, effective_keys.key.data(), nonce.data()) != 1) ok = false;
+        if (ok && EVP_DecryptUpdate(effective_keys.dec_ctx, nullptr, &out_len, reinterpret_cast<const uint8_t *>(unmasked_hdr_ptr),
+                                    static_cast<int>(real_hdr_len)) != 1)
             ok = false;
-        if (ok && EVP_DecryptUpdate(ctx, decrypted.data(), &out_len, cipher_data, static_cast<int>(cipher_len)) != 1)
+        if (ok && EVP_DecryptUpdate(effective_keys.dec_ctx, plain_dest, &out_len, cipher_data, static_cast<int>(cipher_len)) != 1)
             ok = false;
-        if (ok && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16, const_cast<uint8_t *>(tag_data)) != 1) ok = false;
-        if (ok && EVP_DecryptFinal_ex(ctx, decrypted.data() + out_len, &out_len) <= 0) {
+        if (ok && EVP_CIPHER_CTX_ctrl(effective_keys.dec_ctx, EVP_CTRL_GCM_SET_TAG, 16, const_cast<uint8_t *>(tag_data)) != 1) ok = false;
+        int final_len = 0;
+        if (ok && EVP_DecryptFinal_ex(effective_keys.dec_ctx, plain_dest + out_len, &final_len) <= 0) {
             wavex::log::debug("[QUIC] unprotect_packet: AEAD GCM tag verification failed (pn={}, type={})",
                               full_packet_num, static_cast<int>(hdr.type));
             ok = false;
         }
 
-        EVP_CIPHER_CTX_free(ctx);
-        if (!ok) return false;
+        if (!ok) {
+            plaintext_out.clear();
+            return false;
+        }
 
         // Only commit updated keys if authentication tag verified successfully (RFC 9001 §6.2)
         if (key_updated) {
-            keys = candidate_keys;
+            keys = std::move(candidate_keys);
         }
 
-        plaintext_out.assign(reinterpret_cast<const char *>(decrypted.data()), cipher_len);
         return true;
 #else
         // Mock decode: strip 16 byte trailing tag

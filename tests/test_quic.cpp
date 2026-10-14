@@ -9,23 +9,23 @@
  * @brief Unit and integration tests for WaveX RFC 9000 & 9001 QUIC Transport protocol.
  */
 
-#include <iostream>
 #include <cassert>
-#include <string>
-#include <vector>
-#include <thread>
 #include <chrono>
-#include <iomanip>
 #include <filesystem>
+#include <iomanip>
+#include <iostream>
 #include <source_location>
+#include <string>
+#include <thread>
+#include <vector>
 
-#include <wavex/Network/QUIC.hpp>
+#include <asio/as_tuple.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
-#include <asio/as_tuple.hpp>
-#include <asio/write.hpp>
 #include <asio/read.hpp>
+#include <asio/write.hpp>
 #include <asio/ip/address.hpp>
+#include <wavex/Network/QUIC.hpp>
 
 using namespace wavex::network::quic;
 namespace quic = wavex::network::quic;
@@ -99,7 +99,7 @@ static void test_connection_id_siphash_d3() {
     assert(h0 == 0x726fdb47dd0e0e31ULL);
 
     // 1-byte message (0x00) -> output: 0x74f839c593dc67fdULL (from official vectors.h)
-    const uint8_t msg1 = 0x00;
+    constexpr uint8_t msg1 = 0x00;
     const uint64_t h1 = siphash24(&msg1, 1, k0, k1);
     assert(h1 == 0x74f839c593dc67fdULL);
 
@@ -128,7 +128,7 @@ static void test_connection_id_siphash_d3() {
     cid_map[cid_a] = "conn_a";
     cid_map[cid_b] = "conn_b";
 
-    assert(cid_map.find(cid_a) != cid_map.end());
+    assert(cid_map.contains(cid_a));
     assert(cid_map[cid_a] == "conn_a");
     assert(cid_map[cid_b] == "conn_b");
 
@@ -305,7 +305,7 @@ static void test_quic_stream_chunk_buffering_e2() {
         large_payload.push_back(static_cast<char>('A' + (i % 26)));
     }
 
-    const std::size_t push_chunk_size = 8192;
+    constexpr std::size_t push_chunk_size = 8192;
     for (std::size_t offset = 0; offset < large_payload.size(); offset += push_chunk_size) {
         stream->push_inbound(std::string_view(large_payload).substr(offset, push_chunk_size), false);
     }
@@ -1983,7 +1983,7 @@ static void test_cert_resolution_d4() {
     bool conn_threw = false;
     try {
         conn.set_tls_credentials("missing_cert.crt", "missing_key.key");
-    } catch (const std::runtime_error &ex) {
+    } catch (...) {
         conn_threw = true;
     }
     assert(conn_threw);
@@ -1998,6 +1998,81 @@ static void test_cert_resolution_d4() {
     std::cout << "  [PASS] Clean Config-Time Certificate Resolution passed." << std::endl;
 }
 
+static void test_quic_cipher_ctx_caching_e3() {
+    std::cout << "Testing QUIC Cipher Context Caching and Zero-Allocation Framing (E3)..." << std::endl;
+
+    const auto dcid = ConnectionId::random(8);
+    ProtectionKeys client_keys{};
+    ProtectionKeys server_keys{};
+
+    assert(CryptoSuite::derive_initial_secrets(dcid, client_keys, server_keys));
+
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+    // Contexts must initially be null
+    assert(client_keys.enc_ctx == nullptr);
+    assert(client_keys.dec_ctx == nullptr);
+    assert(client_keys.hp_ctx == nullptr);
+#endif
+
+    PacketHeader hdr1{};
+    hdr1.is_long = true;
+    hdr1.type = PacketType::Initial;
+    hdr1.version = 1;
+    hdr1.dcid = dcid;
+    hdr1.scid = ConnectionId::random(8);
+    hdr1.packet_number = 1;
+    hdr1.packet_number_len = 4;
+
+    std::string protected_pkt1;
+    assert(CryptoSuite::protect_packet(client_keys, hdr1, "Payload Chunk Alpha", protected_pkt1));
+
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+    assert(client_keys.enc_ctx != nullptr);
+    assert(client_keys.hp_ctx != nullptr);
+    EVP_CIPHER_CTX *const cached_enc = client_keys.enc_ctx;
+    EVP_CIPHER_CTX *const cached_hp = client_keys.hp_ctx;
+
+    // Second packet must reuse the exact same cipher contexts (zero allocation)
+    PacketHeader hdr2 = hdr1;
+    hdr2.packet_number = 2;
+    std::string protected_pkt2;
+    assert(CryptoSuite::protect_packet(client_keys, hdr2, "Payload Chunk Beta", protected_pkt2));
+    assert(client_keys.enc_ctx == cached_enc);
+    assert(client_keys.hp_ctx == cached_hp);
+
+    // Decryption must lazily initialize dec_ctx and reuse it on subsequent packets
+    PacketHeader dec_hdr1{};
+    std::string dec_payload1;
+    assert(CryptoSuite::unprotect_packet(client_keys, dec_hdr1, protected_pkt1, dec_payload1, 0, dcid.length()));
+    assert(dec_payload1 == "Payload Chunk Alpha");
+    assert(client_keys.dec_ctx != nullptr);
+    EVP_CIPHER_CTX *const cached_dec = client_keys.dec_ctx;
+
+    PacketHeader dec_hdr2{};
+    std::string dec_payload2;
+    assert(CryptoSuite::unprotect_packet(client_keys, dec_hdr2, protected_pkt2, dec_payload2, 1, dcid.length()));
+    assert(dec_payload2 == "Payload Chunk Beta");
+    assert(client_keys.dec_ctx == cached_dec);
+
+    // Test move semantics preserves cached contexts
+    ProtectionKeys moved_keys(std::move(client_keys));
+    assert(moved_keys.enc_ctx == cached_enc);
+    assert(moved_keys.dec_ctx == cached_dec);
+    assert(moved_keys.hp_ctx == cached_hp);
+    assert(client_keys.enc_ctx == nullptr);
+    assert(client_keys.dec_ctx == nullptr);
+    assert(client_keys.hp_ctx == nullptr);
+
+    // Cleanse must free contexts and reset pointers to nullptr
+    moved_keys.cleanse();
+    assert(moved_keys.enc_ctx == nullptr);
+    assert(moved_keys.dec_ctx == nullptr);
+    assert(moved_keys.hp_ctx == nullptr);
+#endif
+
+    std::cout << "  [PASS] QUIC Cipher Context Caching (E3) passed." << std::endl;
+}
+
 int main() {
     std::cout << "=== Running WaveX QUIC Transport Tests ===\n";
     try {
@@ -2007,6 +2082,7 @@ int main() {
         test_connection_id_boundaries();
         test_connection_id_siphash_d3();
         test_cert_resolution_d4();
+        test_quic_cipher_ctx_caching_e3();
         test_stream_id_allocation();
         test_rfc9001_appendix_a();
         test_frames();

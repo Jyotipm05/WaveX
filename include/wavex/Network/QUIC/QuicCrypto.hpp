@@ -15,6 +15,7 @@
 #pragma once
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+#include <openssl/evp.h>
 
 #include <array>
 #include <cstdint>
@@ -27,19 +28,27 @@
 namespace wavex::network::quic {
     struct ProtectionKeys {
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        mutable EVP_CIPHER_CTX *enc_ctx{nullptr};
+        mutable EVP_CIPHER_CTX *dec_ctx{nullptr};
+        mutable EVP_CIPHER_CTX *hp_ctx{nullptr};
         std::array<uint8_t, 32> secret{};
         std::array<uint8_t, 16> key{};
-        std::array<uint8_t, 12> iv{};
         std::array<uint8_t, 16> hp{};
+        std::array<uint8_t, 12> iv{};
         uint8_t key_phase{0};
         bool valid{false};
 
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         ProtectionKeys() noexcept = default;
+
         ~ProtectionKeys() noexcept;
+
         ProtectionKeys(const ProtectionKeys &other) noexcept;
+
         ProtectionKeys &operator=(const ProtectionKeys &other) noexcept;
+
         ProtectionKeys(ProtectionKeys &&other) noexcept;
+
         ProtectionKeys &operator=(ProtectionKeys &&other) noexcept;
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
