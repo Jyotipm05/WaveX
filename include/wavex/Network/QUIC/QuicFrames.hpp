@@ -14,6 +14,7 @@
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -53,16 +54,22 @@ namespace wavex::network::quic {
     };
 
     struct CryptoFrame {
+        // ─── 2. Member Variables ────
+        std::string_view data{};
+        std::shared_ptr<const std::string> owned_data{};
         uint64_t offset{0};
-        std::string data{};
     };
 
     struct NewTokenFrame {
-        std::string token{};
+        // ─── 2. Member Variables ────
+        std::string_view token{};
+        std::shared_ptr<const std::string> owned_token{};
     };
 
     struct StreamFrame {
-        std::string data{};
+        // ─── 2. Member Variables ────
+        std::string_view data{};
+        std::shared_ptr<const std::string> owned_data{};
         uint64_t stream_id{0};
         uint64_t offset{0};
         bool fin{false};
@@ -99,10 +106,17 @@ namespace wavex::network::quic {
     };
 
     struct ConnectionCloseFrame {
-        std::string reason_phrase{};
+        // ─── 2. Member Variables ────
+        std::string_view reason_phrase{};
+        std::shared_ptr<const std::string> owned_reason{};
         uint64_t error_code{0};
         uint64_t frame_type{0};
         bool is_application{false};
+
+        // ─── 3. Constructors ────
+        ConnectionCloseFrame() = default;
+        ConnectionCloseFrame(std::string_view reason, uint64_t err = 0, uint64_t ft = 0, bool is_app = false)
+            : reason_phrase(reason), owned_reason(nullptr), error_code(err), frame_type(ft), is_application(is_app) {}
     };
 
     struct HandshakeDoneFrame {

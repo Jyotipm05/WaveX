@@ -2073,6 +2073,98 @@ static void test_quic_cipher_ctx_caching_e3() {
     std::cout << "  [PASS] QUIC Cipher Context Caching (E3) passed." << std::endl;
 }
 
+static void test_quic_zero_copy_frames_and_writes_e5() {
+    std::cout << "Testing Zero-Copy Frame Views and Write Streaming (E5)..." << std::endl;
+
+    // 1. Verify parse_frames creates zero-copy string_view referencing the input payload
+    std::string serialized_frames;
+    {
+        StreamFrame sf;
+        sf.stream_id = 12;
+        sf.offset = 4096;
+        sf.fin = false;
+        sf.has_offset = true;
+        sf.has_length = true;
+        sf.data = "ZeroCopyStreamChunk123456789";
+        serialize_frame(sf, serialized_frames);
+
+        CryptoFrame cf;
+        cf.offset = 0;
+        cf.data = "ZeroCopyCryptoChunk987654321";
+        serialize_frame(cf, serialized_frames);
+
+        ConnectionCloseFrame ccf{"ZeroCopyCloseReason", 0x101, 0, true};
+        serialize_frame(ccf, serialized_frames);
+    }
+
+    std::vector<Frame> parsed;
+    assert(parse_frames(serialized_frames, parsed));
+    assert(parsed.size() == 3);
+
+    const auto &parsed_sf = std::get<StreamFrame>(parsed[0]);
+    assert(parsed_sf.data == "ZeroCopyStreamChunk123456789");
+    // Pointer must fall inside serialized_frames (zero heap copy)
+    assert(parsed_sf.data.data() >= serialized_frames.data());
+    assert(parsed_sf.data.data() < serialized_frames.data() + serialized_frames.size());
+
+    const auto &parsed_cf = std::get<CryptoFrame>(parsed[1]);
+    assert(parsed_cf.data == "ZeroCopyCryptoChunk987654321");
+    assert(parsed_cf.data.data() >= serialized_frames.data());
+    assert(parsed_cf.data.data() < serialized_frames.data() + serialized_frames.size());
+
+    const auto &parsed_ccf = std::get<ConnectionCloseFrame>(parsed[2]);
+    assert(parsed_ccf.reason_phrase == "ZeroCopyCloseReason");
+    assert(parsed_ccf.reason_phrase.data() >= serialized_frames.data());
+    assert(parsed_ccf.reason_phrase.data() < serialized_frames.data() + serialized_frames.size());
+
+    // 2. StreamBuffer zero-copy peek and consume
+    wavex::utils::StreamBuffer sb;
+    sb.append("HeaderPrefix");
+    sb.append("BodyContent12345");
+    assert(sb.size() == 28);
+
+    const std::string_view peek1 = sb.peek(12);
+    assert(peek1 == "HeaderPrefix");
+    sb.consume(12);
+    assert(sb.size() == 16);
+
+    const std::string_view peek2 = sb.peek(16);
+    assert(peek2 == "BodyContent12345");
+    sb.consume(16);
+    assert(sb.empty());
+
+    // 3. Multi-buffer async_write_some zero-copy plumbing
+    asio::io_context io;
+    const auto cid = ConnectionId::random(8);
+    const auto peer_cid = ConnectionId::random(8);
+    asio::ip::udp::endpoint ep(asio::ip::address_v4::loopback(), 4433);
+    auto conn = std::make_shared<QuicConnection>(cid, peer_cid, ep, true, io.get_executor());
+
+    auto stream = std::make_shared<QuicStream>(conn, 0, io.get_executor());
+
+    const std::string part_a = "PartAlpha_";
+    const std::string part_b = "PartBeta_";
+    const std::array<asio::const_buffer, 2> bufs{
+        asio::buffer(part_a),
+        asio::buffer(part_b)
+    };
+
+    bool write_completed = false;
+    std::size_t written_bytes = 0;
+    stream->async_write_some(bufs, [&](const std::error_code ec, const std::size_t n) {
+        assert(!ec);
+        written_bytes = n;
+        write_completed = true;
+        conn->close();
+    });
+
+    io.run();
+    assert(write_completed);
+    assert(written_bytes == part_a.size() + part_b.size());
+
+    std::cout << "  [PASS] Zero-Copy Frame Views and Write Streaming (E5) passed." << std::endl;
+}
+
 int main() {
     std::cout << "=== Running WaveX QUIC Transport Tests ===\n";
     try {
@@ -2083,6 +2175,7 @@ int main() {
         test_connection_id_siphash_d3();
         test_cert_resolution_d4();
         test_quic_cipher_ctx_caching_e3();
+        test_quic_zero_copy_frames_and_writes_e5();
         test_stream_id_allocation();
         test_rfc9001_appendix_a();
         test_frames();

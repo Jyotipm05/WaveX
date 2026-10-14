@@ -532,9 +532,10 @@ namespace wavex::network::quic {
         const std::string_view payload = packet_bytes.substr(real_hdr_len, total_packet_len - real_hdr_len);
 
         // Step 4: Handle RFC 9001 §6 Key Update if Key Phase bit has changed
-        ProtectionKeys candidate_keys = keys;
+        ProtectionKeys candidate_keys;
         bool key_updated = false;
         if (!hdr.is_long && hdr.key_phase != (keys.key_phase != 0)) {
+            candidate_keys = keys;
             if (!update_keys(candidate_keys)) {
                 return false;
             }

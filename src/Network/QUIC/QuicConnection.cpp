@@ -613,7 +613,7 @@ namespace wavex::network::quic {
                 hdr.packet_number = allocate_next_pn(PacketType::Initial);
                 cf.offset = crypto_send_offset_initial_;
                 crypto_send_offset_initial_ += chunk.size();
-                cf.data = std::string(chunk);
+                cf.data = chunk;
 
                 if (ack_trackers_[0].has_packets) {
                     AckFrame ack = ack_trackers_[0].build_ack_frame();
@@ -636,7 +636,7 @@ namespace wavex::network::quic {
                 hdr.packet_number = allocate_next_pn(PacketType::Handshake);
                 cf.offset = crypto_send_offset_handshake_;
                 crypto_send_offset_handshake_ += chunk.size();
-                cf.data = std::string(chunk);
+                cf.data = chunk;
 
                 if (ack_trackers_[1].has_packets) {
                     AckFrame ack = ack_trackers_[1].build_ack_frame();
@@ -653,7 +653,7 @@ namespace wavex::network::quic {
                 hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
                 cf.offset = crypto_send_offset_app_;
                 crypto_send_offset_app_ += chunk.size();
-                cf.data = std::string(chunk);
+                cf.data = chunk;
                 if (ack_trackers_[2].has_packets && ack_trackers_[2].needs_ack()) {
                     AckFrame ack = ack_trackers_[2].build_ack_frame();
                     serialize_frame(ack, payload);
@@ -674,6 +674,8 @@ namespace wavex::network::quic {
                 wavex::log::error("[QUIC] queue_crypto_frame: CryptoSuite::protect_packet failed for write_level={}!",
                                   current_write_level_);
             } else {
+                cf.owned_data = std::make_shared<const std::string>(cf.data);
+                cf.data = *cf.owned_data;
                 track_sent_packet(hdr.type, hdr.packet_number, packet.size(), {cf});
                 pending_outbound_datagrams_.push_back(std::move(packet));
             }
@@ -1641,7 +1643,7 @@ namespace wavex::network::quic {
 
                 StreamFrame sf;
                 sf.stream_id = sid;
-                sf.data = queue.substr(0, chunk_len);
+                sf.data = queue.peek(chunk_len);
                 sf.fin = chunk_fin;
                 sf.has_length = true;
 
@@ -1651,11 +1653,6 @@ namespace wavex::network::quic {
                 cur_offset += chunk_len;
                 data_sent_ += chunk_len;
                 stream_sent += chunk_len;
-
-                queue.erase(0, chunk_len);
-                if (chunk_fin) {
-                    stream_send_fin_[sid] = false;
-                }
 
                 std::string payload;
                 serialize_frame(sf, payload);
@@ -1670,9 +1667,16 @@ namespace wavex::network::quic {
                 std::string packet;
                 const auto &keys = one_rtt_keys_local_.valid ? one_rtt_keys_local_ : initial_keys_local_;
                 if (CryptoSuite::protect_packet(keys, hdr, payload, packet)) {
+                    sf.owned_data = std::make_shared<const std::string>(sf.data);
+                    sf.data = *sf.owned_data;
                     track_sent_packet(PacketType::OneRTT, hdr.packet_number, packet.size(), {sf});
                     cumulative_bytes_sent_ += packet.size();
                     pending_outbound_datagrams_.push_back(std::move(packet));
+                }
+
+                queue.consume(chunk_len);
+                if (chunk_fin) {
+                    stream_send_fin_[sid] = false;
                 }
 
                 if (chunk_len == 0 && chunk_fin) {

@@ -56,4 +56,4 @@ This rule governs compiler baselines, CMake target linkage, compiler-specific wo
 
 ## 6. Build & Test Invariants
 - **Allowed**: Compile and run tests (`cmake --build --preset fast-dev`, `cmake --build --preset fast-dev-mingw`, `ctest --preset run-tests --output-on-failure`).
-- **Prohibited**: NEVER run CMake configuration commands (`cmake --preset ...`, `cmake -B ...`). Only the user is allowed to configure the project. See [never-config-cmake.md](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/rules/never-config-cmake.md).
+- **Prohibited**: NEVER run CMake configuration commands (`cmake --preset ...`, `cmake -B ...`). Only the user is allowed to configure the project. See [never-config-cmake.md](never-config-cmake.md).

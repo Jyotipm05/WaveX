@@ -69,6 +69,25 @@ namespace wavex::utils {
             buffer_.append(chunk.data(), chunk.size());
         }
 
+        [[nodiscard]] std::string_view peek(const std::size_t max_bytes = static_cast<std::size_t>(-1)) const noexcept {
+            if (empty()) return {};
+            const std::size_t to_view = (std::min)(max_bytes, size());
+            return std::string_view(buffer_.data() + read_offset_, to_view);
+        }
+
+        void consume(const std::size_t bytes) noexcept {
+            if (bytes == 0) return;
+            const std::size_t to_consume = (std::min)(bytes, size());
+            read_offset_ += to_consume;
+            if (read_offset_ >= buffer_.size()) {
+                buffer_.clear();
+                read_offset_ = 0;
+            } else if (read_offset_ >= 16384 && read_offset_ >= buffer_.size() / 2) {
+                buffer_.erase(0, read_offset_);
+                read_offset_ = 0;
+            }
+        }
+
         std::size_t read(uint8_t *dest, const std::size_t max_bytes) noexcept {
             if (!dest || max_bytes == 0 || empty()) return 0;
             const std::size_t to_copy = (std::min)(max_bytes, size());

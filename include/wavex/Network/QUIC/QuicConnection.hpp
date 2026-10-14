@@ -43,6 +43,7 @@
 #include <wavex/Network/QUIC/QuicCrypto.hpp>
 #include <wavex/Network/QUIC/CongestionControl.hpp>
 #include <wavex/Network/QUIC/QuicStream.hpp>
+#include <wavex/Utils/StreamBuffer.hpp>
 
 namespace wavex::network::quic {
     /**
@@ -166,7 +167,7 @@ namespace wavex::network::quic {
         std::unordered_map<uint64_t, std::shared_ptr<QuicStream> > streams_{};
         std::unordered_map<uint64_t, uint64_t> stream_send_offsets_{};
         std::unordered_map<uint64_t, uint64_t> stream_data_sent_{};
-        std::unordered_map<uint64_t, std::string> stream_send_queues_{};
+        std::unordered_map<uint64_t, wavex::utils::StreamBuffer> stream_send_queues_{};
         std::unordered_map<uint64_t, bool> stream_send_fin_{};
         std::deque<std::string> pending_outbound_datagrams_{};
         std::deque<std::string> buffered_handshake_packets_{};

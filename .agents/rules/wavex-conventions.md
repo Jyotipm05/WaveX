@@ -67,11 +67,11 @@ trigger: always_on
 - NEVER modify test assertions, expected output, or fixtures when debugging test failures without explicit user consent. Root causes must be fixed in framework implementations.
 
 ## 11. Associated Rules
-- [toolchain-and-build.md](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/rules/toolchain-and-build.md) (Compilers, Winsock, CMake)
-- [class-struct-layout.md](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/rules/class-struct-layout.md) (Member packing & layout)
-- [asio-socket-lifecycle.md](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/rules/asio-socket-lifecycle.md) (Sockets, coroutines, buffers)
-- [optional-dependency-guards.md](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/rules/optional-dependency-guards.md) (Dependency header guards)
-- [never-config-cmake.md](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/rules/never-config-cmake.md) (CMake configure safety)
-- [future-protocols-architecture.md](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/rules/future-protocols-architecture.md) (Protocol extensions)
-- [quic-transport-invariants.md](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/rules/quic-transport-invariants.md) (QUIC transport & crypto)
-- [test-invariants.md](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/rules/test-invariants.md) (Unit tests, stream isolation, CTest flushing)
+- [toolchain-and-build.md](toolchain-and-build.md) (Compilers, Winsock, CMake)
+- [class-struct-layout.md](class-struct-layout.md) (Member packing & layout)
+- [asio-socket-lifecycle.md](asio-socket-lifecycle.md) (Sockets, coroutines, buffers)
+- [optional-dependency-guards.md](optional-dependency-guards.md) (Dependency header guards)
+- [never-config-cmake.md](never-config-cmake.md) (CMake configure safety)
+- [future-protocols-architecture.md](future-protocols-architecture.md) (Protocol extensions)
+- [quic-transport-invariants.md](quic-transport-invariants.md) (QUIC transport & crypto)
+- [test-invariants.md](test-invariants.md) (Unit tests, stream isolation, CTest flushing)

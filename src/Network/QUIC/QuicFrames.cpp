@@ -131,7 +131,7 @@ namespace wavex::network::quic {
                 }
                 if (cursor + len > payload.size())
                     PARSE_FAIL("STREAM len exceeds payload bounds");
-                sf.data = std::string(payload.substr(cursor, len));
+                sf.data = payload.substr(cursor, len);
                 cursor += len;
                 out_frames.emplace_back(std::move(sf));
                 continue;
@@ -198,7 +198,7 @@ namespace wavex::network::quic {
                     PARSE_FAIL("CRYPTO decode len");
                 if (cursor + len > payload.size())
                     PARSE_FAIL("CRYPTO len exceeds payload bounds");
-                cf.data = std::string(payload.substr(cursor, len));
+                cf.data = payload.substr(cursor, len);
                 cursor += len;
                 out_frames.emplace_back(std::move(cf));
             } else if (raw_type == 0x07) {
@@ -208,7 +208,7 @@ namespace wavex::network::quic {
                     PARSE_FAIL("NEW_TOKEN decode len");
                 if (cursor + len > payload.size())
                     PARSE_FAIL("NEW_TOKEN token exceeds payload bounds");
-                ntf.token = std::string(payload.substr(cursor, len));
+                ntf.token = payload.substr(cursor, len);
                 cursor += len;
                 out_frames.emplace_back(std::move(ntf));
             } else if (raw_type == 0x10) {
@@ -259,7 +259,7 @@ namespace wavex::network::quic {
                     PARSE_FAIL("CONNECTION_CLOSE decode reason_phrase len");
                 if (cursor + r_len > payload.size())
                     PARSE_FAIL("CONNECTION_CLOSE reason exceeds payload bounds");
-                ccf.reason_phrase = std::string(payload.substr(cursor, r_len));
+                ccf.reason_phrase = payload.substr(cursor, r_len);
                 cursor += r_len;
                 out_frames.emplace_back(std::move(ccf));
             } else if (raw_type == 0x18) {

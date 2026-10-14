@@ -275,15 +275,20 @@ namespace wavex::network::quic {
                     auto executor = asio::get_associated_executor(*shared_h, self->get_executor());
 
                     const std::size_t len = asio::buffer_size(buffers);
-                    std::string payload;
-                    payload.reserve(len);
+                    std::error_code ec;
                     for (auto b = asio::buffer_sequence_begin(buffers);
                          b != asio::buffer_sequence_end(buffers); ++b) {
                         asio::const_buffer cb(*b);
-                        payload.append(static_cast<const char *>(cb.data()), cb.size());
+                        if (cb.size() > 0) {
+                            ec = self->write_outbound(
+                                std::string_view(static_cast<const char *>(cb.data()), cb.size()),
+                                false);
+                            if (ec) break;
+                        }
                     }
-
-                    std::error_code ec = self->write_outbound(payload, false);
+                    if (!ec && len == 0) {
+                        ec = self->write_outbound(std::string_view{}, false);
+                    }
                     asio::post(executor, [shared_h, ec, len] {
                         (*shared_h)(ec, ec ? 0 : len);
                     });
