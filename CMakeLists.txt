@@ -87,6 +87,7 @@ endif ()
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+cmake_policy(SET CMP0168 NEW)
 
 # Override MSVC's -external:I flag → plain -I so compile_commands.json uses
 # standard flags that clangd can parse. vcpkg passes all system includes

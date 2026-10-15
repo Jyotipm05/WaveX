@@ -2165,6 +2165,149 @@ static void test_quic_zero_copy_frames_and_writes_e5() {
     std::cout << "  [PASS] Zero-Copy Frame Views and Write Streaming (E5) passed." << std::endl;
 }
 
+static void test_quic_datagram_coalescing_e4() {
+    std::cout << "Testing Datagram Coalescing & Batch Outbound Sending (E4)..." << std::endl;
+
+    asio::io_context io;
+    const auto client_cid = ConnectionId::random(8);
+    const auto server_cid = ConnectionId::random(8);
+    asio::ip::udp::endpoint ep(asio::ip::address_v4::loopback(), 4433);
+    auto conn = std::make_shared<QuicConnection>(server_cid, client_cid, ep, true, io.get_executor());
+
+    ProtectionKeys client_keys, server_keys;
+    CryptoSuite::derive_initial_secrets(client_cid, client_keys, server_keys);
+
+    auto make_protected_packet = [&](PacketType type, bool is_long, uint64_t pn, const std::string &payload_str) -> std::string {
+        PacketHeader hdr;
+        hdr.is_long = is_long;
+        hdr.type = type;
+        hdr.version = QUIC_VERSION_1;
+        hdr.dcid = client_cid;
+        hdr.scid = server_cid;
+        hdr.packet_number = pn;
+        hdr.packet_number_len = 4;
+
+        std::string pkt;
+        bool ok = CryptoSuite::protect_packet(server_keys, hdr, payload_str, pkt);
+        assert(ok);
+        return pkt;
+    };
+
+    // 1. Coalescing Long-Header + Long-Header packets within MTU (Initial + Handshake)
+    {
+        std::string pkt1 = make_protected_packet(PacketType::Initial, true, 1, "InitialCryptoPayload100Bytes");
+        std::string pkt2 = make_protected_packet(PacketType::Handshake, true, 2, "HandshakeCryptoPayload200Bytes");
+
+        const std::size_t expected_total_size = pkt1.size() + pkt2.size();
+        assert(expected_total_size < 1200);
+
+        conn->queue_outbound_packet(pkt1);
+        conn->queue_outbound_packet(pkt2);
+
+        auto dgrams = conn->poll_outgoing_datagrams();
+        assert(dgrams.size() == 1);
+        assert(dgrams[0].size() == expected_total_size);
+        assert(dgrams[0].substr(0, pkt1.size()) == pkt1);
+        assert(dgrams[0].substr(pkt1.size()) == pkt2);
+
+        // Verify receiver handle_datagram successfully unpacks both coalesced packets
+        auto receiver_conn = std::make_shared<QuicConnection>(client_cid, server_cid, ep, false, io.get_executor());
+        receiver_conn->handle_datagram(dgrams[0]);
+    }
+
+    // 2. Coalescing Long-Header + Short-Header (1-RTT) packet
+    {
+        std::string pkt_long = make_protected_packet(PacketType::Handshake, true, 3, "HandshakePayload300");
+        std::string pkt_short = make_protected_packet(PacketType::OneRTT, false, 4, "OneRttPayload150");
+
+        const std::size_t expected_total_size = pkt_long.size() + pkt_short.size();
+        assert(expected_total_size < 1200);
+
+        conn->queue_outbound_packet(pkt_long);
+        conn->queue_outbound_packet(pkt_short);
+
+        auto dgrams = conn->poll_outgoing_datagrams();
+        assert(dgrams.size() == 1);
+        assert(dgrams[0].size() == expected_total_size);
+        assert(dgrams[0].substr(0, pkt_long.size()) == pkt_long);
+        assert(dgrams[0].substr(pkt_long.size()) == pkt_short);
+    }
+
+    // 3. RFC 9000 §12.2 Invariant: Multiple Short-Header packets MUST NOT be coalesced
+    {
+        std::string pkt_short1 = make_protected_packet(PacketType::OneRTT, false, 5, "ShortPacket1");
+        std::string pkt_short2 = make_protected_packet(PacketType::OneRTT, false, 6, "ShortPacket2");
+
+        conn->queue_outbound_packet(pkt_short1);
+        conn->queue_outbound_packet(pkt_short2);
+
+        auto dgrams = conn->poll_outgoing_datagrams();
+        assert(dgrams.size() == 2);
+        assert(dgrams[0] == pkt_short1);
+        assert(dgrams[1] == pkt_short2);
+    }
+
+    // 4. Long + Short + Short: Short terminates the first coalesced datagram
+    {
+        std::string pkt_long = make_protected_packet(PacketType::Handshake, true, 7, "LongHandshake");
+        std::string pkt_short1 = make_protected_packet(PacketType::OneRTT, false, 8, "Short1");
+        std::string pkt_short2 = make_protected_packet(PacketType::OneRTT, false, 9, "Short2");
+
+        conn->queue_outbound_packet(pkt_long);
+        conn->queue_outbound_packet(pkt_short1);
+        conn->queue_outbound_packet(pkt_short2);
+
+        auto dgrams = conn->poll_outgoing_datagrams();
+        assert(dgrams.size() == 2);
+        assert(dgrams[0].size() == pkt_long.size() + pkt_short1.size());
+        assert(dgrams[1] == pkt_short2);
+    }
+
+    // 5. MTU Boundary limit enforcement (default 1200 bytes)
+    {
+        std::string large_payload1(750, 'A');
+        std::string large_payload2(500, 'B');
+
+        std::string pkt_large1 = make_protected_packet(PacketType::Initial, true, 10, large_payload1);
+        std::string pkt_large2 = make_protected_packet(PacketType::Handshake, true, 11, large_payload2);
+
+        assert(pkt_large1.size() + pkt_large2.size() > 1200);
+
+        conn->queue_outbound_packet(pkt_large1);
+        conn->queue_outbound_packet(pkt_large2);
+
+        auto dgrams = conn->poll_outgoing_datagrams();
+        assert(dgrams.size() == 2);
+        assert(dgrams[0] == pkt_large1);
+        assert(dgrams[1] == pkt_large2);
+    }
+
+    // 6. Configurable MTU boundary
+    {
+        conn->set_max_datagram_size(1500);
+        assert(conn->max_datagram_size() == 1500);
+
+        std::string large_payload1(750, 'A');
+        std::string large_payload2(500, 'B');
+
+        std::string pkt_large1 = make_protected_packet(PacketType::Initial, true, 12, large_payload1);
+        std::string pkt_large2 = make_protected_packet(PacketType::Handshake, true, 13, large_payload2);
+
+        assert(pkt_large1.size() + pkt_large2.size() <= 1500);
+
+        conn->queue_outbound_packet(pkt_large1);
+        conn->queue_outbound_packet(pkt_large2);
+
+        auto dgrams = conn->poll_outgoing_datagrams();
+        assert(dgrams.size() == 1);
+        assert(dgrams[0].size() == pkt_large1.size() + pkt_large2.size());
+
+        conn->set_max_datagram_size(1200);
+    }
+
+    std::cout << "  [PASS] Datagram Coalescing & Batch Outbound Sending (E4) passed." << std::endl;
+}
+
 int main() {
     std::cout << "=== Running WaveX QUIC Transport Tests ===\n";
     try {
@@ -2176,6 +2319,7 @@ int main() {
         test_cert_resolution_d4();
         test_quic_cipher_ctx_caching_e3();
         test_quic_zero_copy_frames_and_writes_e5();
+        test_quic_datagram_coalescing_e4();
         test_stream_id_allocation();
         test_rfc9001_appendix_a();
         test_frames();

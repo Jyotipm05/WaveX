@@ -1753,13 +1753,49 @@ namespace wavex::network::quic {
 
     std::vector<std::string> QuicConnection::poll_outgoing_datagrams() {
         std::lock_guard lock(mtx_);
-        std::vector<std::string> pkts;
-        pkts.reserve(pending_outbound_datagrams_.size());
+        std::vector<std::string> datagrams;
+        std::string current_dgram;
+        bool current_dgram_ends_with_short = false;
+
+        const std::size_t max_dgram_limit = static_cast<std::size_t>(max_datagram_size_);
+
         while (!pending_outbound_datagrams_.empty()) {
-            pkts.push_back(std::move(pending_outbound_datagrams_.front()));
+            std::string pkt = std::move(pending_outbound_datagrams_.front());
             pending_outbound_datagrams_.pop_front();
+            if (pkt.empty()) continue;
+
+            const auto first_byte = static_cast<uint8_t>(pkt[0]);
+            const bool is_long = (first_byte & 0x80) != 0;
+
+            // RFC 9000 §12.2 Coalescing rules:
+            // 1. Packets must not exceed maximum datagram size (default 1200 bytes).
+            // 2. Only long-header packets can be followed by another packet in the same datagram
+            //    (long headers contain an explicit Length field).
+            // 3. Short-header packets lack a Length field, so senders MUST NOT coalesce multiple short-header
+            //    packets into a single datagram, and a short-header packet can only be the last packet in a datagram.
+            if (!current_dgram.empty() && !current_dgram_ends_with_short &&
+                (current_dgram.size() + pkt.size() <= max_dgram_limit)) {
+                current_dgram.append(pkt);
+                if (!is_long) {
+                    current_dgram_ends_with_short = true;
+                }
+            } else {
+                if (!current_dgram.empty()) {
+                    datagrams.push_back(std::move(current_dgram));
+                    current_dgram.clear();
+                    current_dgram_ends_with_short = false;
+                }
+
+                current_dgram = std::move(pkt);
+                current_dgram_ends_with_short = !is_long;
+            }
         }
-        return pkts;
+
+        if (!current_dgram.empty()) {
+            datagrams.push_back(std::move(current_dgram));
+        }
+
+        return datagrams;
     }
 
     void QuicConnection::close(const TransportError err, const std::string_view reason) {

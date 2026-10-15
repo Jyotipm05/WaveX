@@ -816,6 +816,7 @@ namespace wavex::network::quic {
     void basic_quic_acceptor::flush_outbound(const std::shared_ptr<QuicConnection> &conn) {
         auto datagrams = conn->poll_outgoing_datagrams();
         for (auto &dgram: datagrams) {
+            if (dgram.empty()) continue;
             auto buf = std::make_shared<std::string>(std::move(dgram));
             udp_socket_.async_send_to(
                 asio::buffer(*buf), conn->peer_endpoint(),

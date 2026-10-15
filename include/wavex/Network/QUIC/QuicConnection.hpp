@@ -201,6 +201,7 @@ namespace wavex::network::quic {
         uint64_t max_data_{1024 * 1024}; // 1 MB
         uint64_t max_stream_data_{256 * 1024}; // 256 KB
         uint64_t max_field_section_size_{65536}; // 64 KB (RFC 9114 SETTINGS_MAX_FIELD_SECTION_SIZE)
+        uint64_t max_datagram_size_{1200}; // MTU limit (RFC 9000 §14 default: 1200 bytes)
         uint64_t data_sent_{0};
         uint64_t data_received_{0};
         uint64_t cumulative_bytes_received_{0};
@@ -302,6 +303,21 @@ namespace wavex::network::quic {
         [[nodiscard]] auto max_field_section_size() const noexcept -> uint64_t {
             std::scoped_lock lock(mtx_);
             return max_field_section_size_;
+        }
+
+        void set_max_datagram_size(const std::size_t size) noexcept {
+            std::scoped_lock lock(mtx_);
+            max_datagram_size_ = size;
+        }
+
+        [[nodiscard]] auto max_datagram_size() const noexcept -> std::size_t {
+            std::scoped_lock lock(mtx_);
+            return static_cast<std::size_t>(max_datagram_size_);
+        }
+
+        void queue_outbound_packet(std::string packet) {
+            std::scoped_lock lock(mtx_);
+            pending_outbound_datagrams_.push_back(std::move(packet));
         }
 
         void set_user_context(std::shared_ptr<void> ctx) noexcept {
