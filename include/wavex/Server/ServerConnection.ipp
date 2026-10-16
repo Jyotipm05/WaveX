@@ -22,6 +22,7 @@
 #include <system_error>
 
 #include <wavex/Base/Logger.hpp>
+#include <wavex/Base/Memory.hpp>
 #include <wavex/Base/MiddleWare.hpp>
 
 #include <asio/as_tuple.hpp>
@@ -195,9 +196,15 @@ namespace wavex::server {
                     break;
                 }
 
+                // Request-scoped monotonic arena (4KB inline bump allocator)
+                wavex::memory::RequestArena arena;
+
                 std::string_view unconsumed(stream_buf.data() + stream_buf_consumed,
                                             stream_buf.size() - stream_buf_consumed);
                 CustReq req;
+                if constexpr (requires { req.set_arena(arena.resource()); }) {
+                    req.set_arena(arena.resource());
+                }
                 auto p_res = req.parse_stream(unconsumed, conn_ctx);
 
                 while (p_res == CustomCodec::result::incomplete &&
@@ -244,6 +251,9 @@ namespace wavex::server {
 
                     if (max_request_size_ > 0 && stream_buf.size() > max_request_size_) [[unlikely]] {
                         CustRes err_res;
+                        if constexpr (requires { err_res.set_arena(arena.resource()); }) {
+                            err_res.set_arena(arena.resource());
+                        }
                         err_res.status(413).send("Payload Too Large");
                         std::string err_wire = err_res.serialize();
                         co_await asio::async_write(stream, asio::buffer(err_wire),
@@ -259,6 +269,9 @@ namespace wavex::server {
 
                 if (p_res != CustomCodec::result::success) [[unlikely]] {
                     CustRes err_res;
+                    if constexpr (requires { err_res.set_arena(arena.resource()); }) {
+                        err_res.set_arena(arena.resource());
+                    }
                     err_res.status(400).send("Bad Request");
                     std::string err_wire = err_res.serialize();
                     co_await asio::async_write(stream, asio::buffer(err_wire),
@@ -275,6 +288,9 @@ namespace wavex::server {
                 // Hard cap: reject requests that overflow query param or header limits
                 if (req.has_query_param_overflow()) [[unlikely]] {
                     CustRes err_res;
+                    if constexpr (requires { err_res.set_arena(arena.resource()); }) {
+                        err_res.set_arena(arena.resource());
+                    }
                     CustTraits::prepare_response(req, err_res, false, 0, 0);
                     err_res.status(431).send("Request Header Fields Too Large");
                     std::string err_wire = err_res.serialize();
@@ -285,6 +301,7 @@ namespace wavex::server {
                         stream_buf.erase(0, stream_buf_consumed);
                         stream_buf_consumed = 0;
                     }
+                    arena.release();
                     if (!keep) {
                         co_await drain_and_abort(stream);
                         break;
@@ -299,6 +316,9 @@ namespace wavex::server {
                 auto match = router.resolve(req.method_type(), req.path());
 
                 CustRes res;
+                if constexpr (requires { res.set_arena(arena.resource()); }) {
+                    res.set_arena(arena.resource());
+                }
                 if constexpr (requires { res.stream_id(req.stream_id()); }) {
                     res.stream_id(req.stream_id());
                 }
@@ -409,10 +429,20 @@ namespace wavex::server {
 
                 // Server writes serialized response if headers were not already flushed by streaming
                 if (!res.is_headers_sent()) [[likely]] {
-                    std::string wire_resp = res.serialize();
-                    co_await asio::async_write(stream, asio::buffer(wire_resp),
-                                               asio::use_awaitable);
+                    if constexpr (requires { res.serialize_to(std::declval<std::pmr::string &>()); }) {
+                        std::pmr::string wire_resp(arena.resource());
+                        res.serialize_to(wire_resp);
+                        co_await asio::async_write(stream, asio::buffer(wire_resp),
+                                                   asio::use_awaitable);
+                    } else {
+                        std::string wire_resp = res.serialize();
+                        co_await asio::async_write(stream, asio::buffer(wire_resp),
+                                                   asio::use_awaitable);
+                    }
                 }
+
+                // O(1) bulk release of request-scoped arena allocations
+                arena.release();
 
                 stream_buf_consumed += req.consumed_bytes();
                 if (stream_buf_consumed >= 4096) [[unlikely]] {

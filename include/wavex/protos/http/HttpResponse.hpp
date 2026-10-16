@@ -121,7 +121,12 @@ namespace wavex::protos::http {
 
         HttpResponse() = default;
 
-        explicit HttpResponse(asio::ip::tcp::socket *socket) : socket_(socket) {
+        explicit HttpResponse(std::pmr::memory_resource *mr) noexcept
+            : base::Response(mr) {
+        }
+
+        explicit HttpResponse(asio::ip::tcp::socket *socket, std::pmr::memory_resource *mr = nullptr)
+            : base::Response(mr), socket_(socket) {
         }
 
         ~HttpResponse() = default;
@@ -448,7 +453,7 @@ namespace wavex::protos::http {
          */
         void serialize_to(std::pmr::string &out) const {
             const std::string wire = serialize_impl();
-            out.append(wire.data(), wire.size());
+            out.assign(wire.data(), wire.size());
         }
 
         /**

@@ -100,6 +100,10 @@ namespace wavex::memory {
             : mr_(buf_.data(), buf_.size(), &get_thread_local_pool()) {
         }
 
+        explicit RequestArena(std::pmr::memory_resource *upstream) noexcept
+            : mr_(buf_.data(), buf_.size(), upstream ? upstream : &get_thread_local_pool()) {
+        }
+
         ~RequestArena() = default;
 
         // Non-copyable, non-movable — lifetime is tied to the request block.

@@ -8,6 +8,7 @@
  */
 
 #include <wavex/Base/Memory.hpp>
+#include <wavex/protos/http/http.hpp>
 
 #include <iostream>
 #include <memory_resource>
@@ -131,6 +132,83 @@ void test_thread_local_pool_accessible() {
     check(true, "thread-local pool release() does not crash");
 }
 
+// ─── Test: Request and Response arena wiring (Issue F1) ──────────────────────
+
+void test_request_and_response_arena_wiring() {
+    wavex::memory::RequestArena arena;
+    auto *mr = arena.resource();
+
+    // Construct request and response with arena
+    wavex::protos::http::Http1Request req(mr);
+    wavex::protos::http::Http1Response res(mr);
+
+    check(req.arena() == mr, "Http1Request::arena() returns injected memory resource");
+    check(res.arena() == mr, "Http1Response::arena() returns injected memory resource");
+
+    // Test parse_stream / extract_path_query with encoded query parameters
+    const std::string raw_http1 = "GET /search?q=modern%20c%2B%2B&page=1&limit=50 HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    std::string_view raw_view = raw_http1;
+    const auto pres = req.parse_stream(raw_view);
+    check(pres == wavex::protos::http::http1codec::parser::result::success, "req.parse_stream succeeds");
+    check(req.query_param("q") == "modern c++", "query_param q decoded from arena");
+    check(req.query_param("page") == "1", "query_param page decoded from arena");
+    check(req.query_param("limit") == "50", "query_param limit decoded from arena");
+
+    // Test set_params with percent-encoded route parameters
+    wavex::base::FlatMap<std::string_view, std::string_view> route_params;
+    route_params.insert_or_assign("category", "high%20performance");
+    route_params.insert_or_assign("id", "42");
+    req.set_params(route_params);
+
+    check(req.param("category") == "high performance", "route param category decoded from arena");
+    check(req.param("id") == "42", "route param id matches");
+
+    // Test res.serialize_to with PMR string backed by the arena
+    res.status(200).send("{\"status\":\"ok\"}");
+    std::pmr::string wire_resp(mr);
+    res.serialize_to(wire_resp);
+
+    check(!wire_resp.empty(), "res.serialize_to produces non-empty PMR output");
+    check(wire_resp.find("200 OK") != std::string::npos, "serialized response contains 200 OK");
+    check(wire_resp.find("{\"status\":\"ok\"}") != std::string::npos, "serialized response contains body");
+
+    // Reclaim arena memory
+    arena.release();
+    check(true, "arena.release() after request cycle succeeds");
+}
+
+// ─── Test: HTTP/3 Request and Response arena wiring (Issue F1) ───────────────
+
+void test_http3_request_arena_wiring() {
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+    wavex::memory::RequestArena arena;
+    auto *mr = arena.resource();
+
+    wavex::protos::http::Http3Request h3_req(mr);
+    wavex::protos::http::Http3Response h3_res(mr);
+
+    check(h3_req.arena() == mr, "Http3Request::arena() returns injected memory resource");
+    check(h3_res.arena() == mr, "Http3Response::arena() returns injected memory resource");
+
+    // Test dynamic route param population in Http3Request using arena
+    wavex::base::FlatMap<std::string_view, std::string_view> h3_params;
+    h3_params.insert_or_assign("action", "quic%20nitro");
+    h3_req.set_params(h3_params);
+    check(h3_req.param("action") == "quic nitro", "Http3Request param decoded into arena");
+
+    // Test serialize_to for Http3Response into arena PMR string
+    h3_res.status(200).send("HTTP/3 arena body payload");
+    std::pmr::string h3_wire(mr);
+    h3_res.serialize_to(h3_wire);
+    check(!h3_wire.empty(), "Http3Response::serialize_to produces non-empty wire data");
+
+    arena.release();
+    check(true, "HTTP/3 arena cycle completed with clean release()");
+#else
+    check(true, "HTTP/3 arena test skipped (WAVEX_HAS_SSL disabled)");
+#endif
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -142,6 +220,8 @@ int main() {
     test_large_allocation_overflow();
     test_make_in_arena();
     test_thread_local_pool_accessible();
+    test_request_and_response_arena_wiring();
+    test_http3_request_arena_wiring();
 
     std::cout << "\n" << tests_passed << "/" << tests_run << " tests passed.\n";
     return tests_passed == tests_run ? 0 : 1;

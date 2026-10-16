@@ -27,6 +27,7 @@
 
 #pragma once
 
+#include <memory_resource>
 #include <string_view>
 #include <utility>
 
@@ -43,6 +44,10 @@ namespace wavex::base {
     class Request {
     public:
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        /// Pointer to the request-scoped PMR memory resource (e.g. RequestArena).
+        /// May be nullptr if no arena was injected.
+        std::pmr::memory_resource *arena_mr_{nullptr};
+
         /// Path parameters populated by the router (e.g. :id -> "123")
         /// Keys and values are string_view slices into the request stream buffer.
         FlatMap<std::string_view, std::string_view> params;
@@ -53,10 +58,24 @@ namespace wavex::base {
 
     protected:
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        Request() = default;
+
+        explicit Request(std::pmr::memory_resource *mr) noexcept : arena_mr_(mr) {}
+
         ~Request() = default;
+
+        Request(const Request &) = default;
+        Request &operator=(const Request &) = default;
+        Request(Request &&) noexcept = default;
+        Request &operator=(Request &&) noexcept = default;
 
     public:
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
+        /// Access the injected request arena memory resource (or nullptr if none)
+        [[nodiscard]] std::pmr::memory_resource *arena() const noexcept { return arena_mr_; }
+
+        /// Inject or update the request arena memory resource
+        void set_arena(std::pmr::memory_resource *mr) noexcept { arena_mr_ = mr; }
         /// The request path/target, e.g. "/user/123"
         template<typename Self>
         [[nodiscard]] decltype(auto) path(this Self &&self) {

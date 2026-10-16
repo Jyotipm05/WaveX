@@ -82,15 +82,20 @@ namespace wavex::protos::http {
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         HttpRequest() = default;
 
+        explicit HttpRequest(std::pmr::memory_resource *mr) noexcept
+            : Request(mr) {
+        }
+
         ~HttpRequest() = default;
 
         /// Construct from a raw buffer (server side).
-        explicit HttpRequest(std::string buffer)
-            : buffer_(std::move(buffer)) {
+        explicit HttpRequest(std::string buffer, std::pmr::memory_resource *mr = nullptr)
+            : Request(mr), buffer_(std::move(buffer)) {
         }
 
         /// Construct with method and target URL/path (client side).
-        HttpRequest(const http::method m, const std::string_view target) {
+        HttpRequest(const http::method m, const std::string_view target, std::pmr::memory_resource *mr = nullptr)
+            : Request(mr) {
             parsed_.method_type = m;
             raw_target_owned_ = std::string(target);
             extract_path_query(raw_target_owned_);
@@ -261,7 +266,6 @@ namespace wavex::protos::http {
         template<typename ParamContainer>
         void set_params(const ParamContainer &route_params) {
             params.clear();
-            params_decoded_buf_.clear();
 
             bool any_encoded = false;
             size_t total_est_len = 0;
@@ -279,8 +283,6 @@ namespace wavex::protos::http {
                 return;
             }
 
-            params_decoded_buf_.reserve(total_est_len + 16);
-
             struct ParamSlice {
                 std::string_view key;
                 size_t val_start{0};
@@ -291,27 +293,44 @@ namespace wavex::protos::http {
             std::array<ParamSlice, 32> slices{};
             size_t count = 0;
 
+            char *arena_buf = nullptr;
+            size_t arena_offset = 0;
+            if (arena_mr_) {
+                arena_buf = static_cast<char *>(arena_mr_->allocate(total_est_len + 16, alignof(char)));
+            } else {
+                params_decoded_buf_.clear();
+                params_decoded_buf_.reserve(total_est_len + 16);
+            }
+
             for (const auto &[k, v]: route_params) {
                 if (count >= slices.size()) {
                     params.insert_or_assign(k, v);
                     continue;
                 }
                 if (v.find('%') != std::string_view::npos) {
-                    const size_t v_start = params_decoded_buf_.size();
-                    params_decoded_buf_ += wavex::uri::decode(v);
-                    const size_t v_len = params_decoded_buf_.size() - v_start;
-                    slices[count++] = ParamSlice{k, v_start, v_len, true, {}};
+                    const std::string dec = wavex::uri::decode(v);
+                    if (arena_buf) {
+                        const size_t v_start = arena_offset;
+                        std::memcpy(arena_buf + arena_offset, dec.data(), dec.size());
+                        arena_offset += dec.size();
+                        slices[count++] = ParamSlice{k, v_start, dec.size(), true, {}};
+                    } else {
+                        const size_t v_start = params_decoded_buf_.size();
+                        params_decoded_buf_ += dec;
+                        const size_t v_len = params_decoded_buf_.size() - v_start;
+                        slices[count++] = ParamSlice{k, v_start, v_len, true, {}};
+                    }
                 } else {
                     slices[count++] = ParamSlice{k, 0, 0, false, v};
                 }
             }
 
+            const char *base = arena_buf ? arena_buf : params_decoded_buf_.data();
             for (size_t i = 0; i < count; ++i) {
-                const auto &sl = slices[i];
-                if (sl.is_decoded) {
+                if (const auto &sl = slices[i]; sl.is_decoded) {
                     params.insert_or_assign(
                         sl.key,
-                        std::string_view(params_decoded_buf_.data() + sl.val_start, sl.val_len));
+                        std::string_view(base + sl.val_start, sl.val_len));
                 } else {
                     params.insert_or_assign(sl.key, sl.raw_val);
                 }
@@ -328,7 +347,7 @@ namespace wavex::protos::http {
             if (val.find('%') != std::string_view::npos) {
                 const char *old_base = params_decoded_buf_.data();
                 const size_t old_len = params_decoded_buf_.size();
-                std::string decoded = wavex::uri::decode(val);
+                const std::string decoded = uri::decode(val);
                 params_decoded_buf_ += decoded;
                 if (params_decoded_buf_.data() != old_base && old_base != nullptr) {
                     rebase_params_views(old_base, old_len);
@@ -479,8 +498,7 @@ namespace wavex::protos::http {
                 if (auto res = utils::Compressor::decompress(d, fmt)) return *res;
                 return std::nullopt;
             };
-            const auto enc = header_impl("Content-Encoding");
-            if (enc.has_value()) {
+            if (const auto enc = header_impl("Content-Encoding"); enc.has_value()) {
                 if (enc->find("gzip") != std::string_view::npos) {
                     return decompress_helper(body_impl(), utils::CompressionFormat::Gzip);
                 }
@@ -537,10 +555,10 @@ namespace wavex::protos::http {
         void extract_path_query(const std::string_view full_target) {
             std::string_view path_and_query = full_target;
             if (const size_t scheme_pos = full_target.find("://"); scheme_pos != std::string_view::npos) {
-                const size_t path_start = full_target.find('/', scheme_pos + 3);
-                if (path_start != std::string_view::npos) {
+                if (const size_t path_start = full_target.find('/', scheme_pos + 3);
+                    path_start != std::string_view::npos) [[likely]] {
                     path_and_query = full_target.substr(path_start);
-                } else {
+                } else [[unlikely]] {
                     path_and_query = "/";
                 }
             }
@@ -554,8 +572,6 @@ namespace wavex::protos::http {
                 // Query: parse key=value pairs into FlatMap via contiguous linear buffer
                 std::string_view qs = path_and_query.substr(q + 1);
                 query.clear();
-                query_decoded_buf_.clear();
-                query_decoded_buf_.reserve(qs.size() + 16);
 
                 struct QuerySlice {
                     size_t k_start{0}, k_len{0};
@@ -565,6 +581,15 @@ namespace wavex::protos::http {
                 std::array<QuerySlice, kMaxQueryParams> slices{};
                 std::size_t param_count = 0;
 
+                char *arena_buf = nullptr;
+                size_t arena_offset = 0;
+                if (arena_mr_) [[likely]] {
+                    arena_buf = static_cast<char *>(arena_mr_->allocate(qs.size() + 16, alignof(char)));
+                } else [[unlikely]] {
+                    query_decoded_buf_.clear();
+                    query_decoded_buf_.reserve(qs.size() + 16);
+                }
+
                 while (!qs.empty() && param_count < kMaxQueryParams) {
                     const size_t amp = qs.find('&');
                     const std::string_view pair = (amp != std::string_view::npos)
@@ -573,19 +598,41 @@ namespace wavex::protos::http {
 
                     if (!pair.empty()) {
                         const size_t eq = pair.find('=');
-                        const size_t k_start = query_decoded_buf_.size();
-                        query_decoded_buf_ += wavex::uri::decode(pair.substr(0, eq));
-                        const size_t k_len = query_decoded_buf_.size() - k_start;
-
-                        size_t v_start = query_decoded_buf_.size();
-                        size_t v_len = 0;
+                        const std::string_view raw_k = pair.substr(0, eq);
+                        const std::string_view raw_v = (eq != std::string_view::npos)
+                                                           ? pair.substr(eq + 1)
+                                                           : std::string_view{};
                         const bool has_val = (eq != std::string_view::npos);
-                        if (has_val) {
-                            query_decoded_buf_ += wavex::uri::decode(pair.substr(eq + 1));
-                            v_len = query_decoded_buf_.size() - v_start;
-                        }
 
-                        slices[param_count] = QuerySlice{k_start, k_len, v_start, v_len, has_val};
+                        if (arena_buf) {
+                            const size_t k_start = arena_offset;
+                            const std::string dec_k = wavex::uri::decode(raw_k);
+                            std::memcpy(arena_buf + arena_offset, dec_k.data(), dec_k.size());
+                            arena_offset += dec_k.size();
+                            const size_t k_len = dec_k.size();
+
+                            size_t v_start = arena_offset;
+                            size_t v_len = 0;
+                            if (has_val) {
+                                const std::string dec_v = wavex::uri::decode(raw_v);
+                                std::memcpy(arena_buf + arena_offset, dec_v.data(), dec_v.size());
+                                arena_offset += dec_v.size();
+                                v_len = dec_v.size();
+                            }
+                            slices[param_count] = QuerySlice{k_start, k_len, v_start, v_len, has_val};
+                        } else {
+                            const size_t k_start = query_decoded_buf_.size();
+                            query_decoded_buf_ += wavex::uri::decode(raw_k);
+                            const size_t k_len = query_decoded_buf_.size() - k_start;
+
+                            size_t v_start = query_decoded_buf_.size();
+                            size_t v_len = 0;
+                            if (has_val) {
+                                query_decoded_buf_ += wavex::uri::decode(raw_v);
+                                v_len = query_decoded_buf_.size() - v_start;
+                            }
+                            slices[param_count] = QuerySlice{k_start, k_len, v_start, v_len, has_val};
+                        }
                         ++param_count;
                     }
 
@@ -593,11 +640,12 @@ namespace wavex::protos::http {
                     qs = qs.substr(amp + 1);
                 }
 
+                const char *base = arena_buf ? arena_buf : query_decoded_buf_.data();
                 for (size_t i = 0; i < param_count; ++i) {
                     const auto &sl = slices[i];
-                    const std::string_view k(query_decoded_buf_.data() + sl.k_start, sl.k_len);
+                    const std::string_view k(base + sl.k_start, sl.k_len);
                     const std::string_view v = sl.has_val
-                                                   ? std::string_view(query_decoded_buf_.data() + sl.v_start, sl.v_len)
+                                                   ? std::string_view(base + sl.v_start, sl.v_len)
                                                    : std::string_view{};
                     query.insert_or_assign(k, v);
                 }
