@@ -53,7 +53,9 @@ export namespace wavex::base {
 
 export namespace wavex::memory {
     using memory::RequestArena;
+    using memory::ConnectionMemoryPool;
     using memory::get_thread_local_pool;
+    using memory::get_default_upstream_resource;
 } // export namespace wavex::memory
 
 export namespace wavex::uri {

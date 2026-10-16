@@ -14,6 +14,8 @@
 #include <memory_resource>
 #include <string>
 #include <cstring>
+#include <thread>
+#include <new>
 
 namespace {
     int tests_run{0};
@@ -209,6 +211,67 @@ void test_http3_request_arena_wiring() {
 #endif
 }
 
+// ─── Test: ConnectionMemoryPool lifecycle (Issue F2) ─────────────────────────
+
+void test_connection_memory_pool() {
+    wavex::memory::ConnectionMemoryPool conn_pool;
+    auto *conn_mr = conn_pool.resource();
+
+    // Verify allocation directly through ConnectionMemoryPool
+    void *p = conn_mr->allocate(512, 8);
+    check(p != nullptr, "ConnectionMemoryPool allocates successfully");
+    std::memset(p, 0x3C, 512);
+    conn_mr->deallocate(p, 512, 8);
+
+    // Verify RequestArena utilizing ConnectionMemoryPool as custom upstream
+    wavex::memory::RequestArena arena(conn_mr);
+    auto *mr = arena.resource();
+
+    // Small allocation fits in inline 4KB buffer
+    void *p_small = mr->allocate(128, 8);
+    check(p_small != nullptr, "arena with conn_pool allocated small buffer");
+
+    // Large allocation (8KB) overflows safely to ConnectionMemoryPool
+    void *p_large = mr->allocate(8192, 8);
+    check(p_large != nullptr, "arena with conn_pool overflows to ConnectionMemoryPool");
+    std::memset(p_large, 0x4B, 8192);
+
+    arena.release();
+    check(true, "arena with conn_pool releases cleanly");
+}
+
+// ─── Test: Multi-worker thread termination & cross-thread resumption (Issue F2) ──
+
+void test_multi_worker_thread_safety_f2() {
+    // Verifies that RequestArena's default upstream (global new_delete_resource)
+    // is safe when a coroutine suspends on one worker and resumes on another,
+    // or when a worker thread terminates during scale-down.
+    alignas(64) std::byte arena_storage[sizeof(wavex::memory::RequestArena)];
+    auto *arena_ptr = reinterpret_cast<wavex::memory::RequestArena *>(arena_storage);
+
+    // 1. Worker thread constructs arena and forces an overflow allocation (> 4KB inline buffer)
+    std::thread worker([&]() {
+        ::new (static_cast<void *>(arena_ptr)) wavex::memory::RequestArena();
+        void *p = arena_ptr->resource()->allocate(8192, 8);
+        check(p != nullptr, "worker thread allocated >4KB overflow block in RequestArena");
+        std::memset(p, 0x5A, 8192);
+    });
+
+    // Worker terminates and joins! (If upstream was thread_local, its pool would now be destroyed)
+    worker.join();
+
+    // 2. Resuming on a different worker thread (simulated by main thread):
+    // Allocate additional memory from the existing arena
+    void *p2 = arena_ptr->resource()->allocate(4096, 8);
+    check(p2 != nullptr, "resumed thread allocates successfully after initial worker terminated");
+    std::memset(p2, 0xA5, 4096);
+
+    // 3. Reclaim memory and destroy arena on the resumed thread
+    arena_ptr->release();
+    arena_ptr->~RequestArena();
+    check(true, "arena successfully released and destroyed across thread termination (F2)");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -222,7 +285,10 @@ int main() {
     test_thread_local_pool_accessible();
     test_request_and_response_arena_wiring();
     test_http3_request_arena_wiring();
+    test_connection_memory_pool();
+    test_multi_worker_thread_safety_f2();
 
     std::cout << "\n" << tests_passed << "/" << tests_run << " tests passed.\n";
     return tests_passed == tests_run ? 0 : 1;
 }
+

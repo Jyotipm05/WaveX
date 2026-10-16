@@ -42,15 +42,28 @@
 
 namespace wavex::memory {
     /**
+     * @brief Returns the default thread-safe upstream memory resource for RequestArena.
+     *
+     * In multi-worker architectures where coroutines can suspend, migrate,
+     * or be stolen across worker threads, using an unsynchronized thread-local pool
+     * causes data races on cross-thread deallocation and use-after-free if a worker
+     * thread terminates during scale-down.
+     *
+     * std::pmr::new_delete_resource() provides global, thread-safe fallback allocation
+     * for the rare requests whose memory footprint exceeds the 4KB inline buffer.
+     */
+    [[nodiscard]] inline std::pmr::memory_resource *get_default_upstream_resource() noexcept {
+        return std::pmr::new_delete_resource();
+    }
+
+    /**
      * @brief Returns the calling thread's lock-free slab pool.
      *
-     * Each worker thread owns its own unsynchronized_pool_resource, so there
-     * is zero mutex contention between threads. Connections are pinned to a
-     * single worker thread, guaranteeing single-threaded access to this pool
-     * during any given request lifecycle.
-     *
-     * Call .release() on the returned pool when the worker thread is idle to
-     * return cached slab memory back to the global heap / OS.
+     * NOTE: This pool is strictly thread-local (unsynchronized_pool_resource).
+     * It must ONLY be used for single-threaded tasks where execution is guaranteed
+     * never to migrate across threads (no task stealing or multi-threaded coroutine resumptions).
+     * For coroutines and RequestArena, use get_default_upstream_resource() or
+     * ConnectionMemoryPool to avoid data races and use-after-free on worker thread exit.
      */
     [[nodiscard]] inline std::pmr::unsynchronized_pool_resource &get_thread_local_pool() noexcept {
         // Upstream fallback is the global new/delete heap (Tier 2).
@@ -65,6 +78,45 @@ namespace wavex::memory {
     }
 
     /**
+     * @class ConnectionMemoryPool
+     * @brief Per-connection memory resource that outlives any single request
+     *        and travels safely with the connection coroutine across worker thread hops.
+     *
+     * Tied to the connection lifetime rather than any single worker thread. Provides pooling
+     * across sequential requests on keep-alive connections without risk of worker
+     * thread-local lifetime hazards or cross-thread data races.
+     */
+    class ConnectionMemoryPool {
+    private:
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        std::pmr::synchronized_pool_resource pool_;
+
+    public:
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        ConnectionMemoryPool()
+            : pool_(std::pmr::pool_options{
+                        .max_blocks_per_chunk = 32,
+                        .largest_required_pool_block = 512 * 1024
+                    },
+                    std::pmr::new_delete_resource()) {}
+
+        explicit ConnectionMemoryPool(const std::pmr::pool_options &opts)
+            : pool_(opts, std::pmr::new_delete_resource()) {}
+
+        ~ConnectionMemoryPool() = default;
+
+        ConnectionMemoryPool(const ConnectionMemoryPool &) = delete;
+        ConnectionMemoryPool &operator=(const ConnectionMemoryPool &) = delete;
+        ConnectionMemoryPool(ConnectionMemoryPool &&) = delete;
+        ConnectionMemoryPool &operator=(ConnectionMemoryPool &&) = delete;
+
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
+        [[nodiscard]] std::pmr::memory_resource *resource() noexcept {
+            return &pool_;
+        }
+    };
+
+    /**
      * @class RequestArena
      * @brief RAII wrapper combining a 4KB inline buffer with a monotonic bump allocator.
      *
@@ -72,6 +124,10 @@ namespace wavex::memory {
      * the end of each request. All allocations within a request advance a single
      * bump pointer — O(1) allocation with zero calls to global malloc for
      * requests whose total allocation footprint fits within 4KB.
+     *
+     * Fallback for allocations > 4KB uses get_default_upstream_resource() (global new/delete)
+     * or a custom per-connection resource, guaranteeing safety across multi-worker thread
+     * transitions and worker scale-down events (Issue F2).
      *
      * Usage in Server::handle_connection():
      * @code
@@ -97,11 +153,11 @@ namespace wavex::memory {
     public:
         // ─── 3. Constructors & Destructor ────────────────────────────────────
         RequestArena() noexcept
-            : buf_{}, mr_(buf_.data(), buf_.size(), &get_thread_local_pool()) {
+            : buf_{}, mr_(buf_.data(), buf_.size(), get_default_upstream_resource()) {
         }
 
         explicit RequestArena(std::pmr::memory_resource *upstream) noexcept
-            : buf_{}, mr_(buf_.data(), buf_.size(), upstream ? upstream : &get_thread_local_pool()) {
+            : buf_{}, mr_(buf_.data(), buf_.size(), upstream ? upstream : get_default_upstream_resource()) {
         }
 
         ~RequestArena() = default;
