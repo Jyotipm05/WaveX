@@ -481,6 +481,9 @@ namespace wavex::protos::http {
                 }
             }
 
+            const std::size_t est_headers = (!headers_.empty() ? headers_.size() : headers_views_.size()) * 48;
+            out.reserve(128 + res.body.size() + est_headers);
+
             if constexpr (requires { encoder_type::serialize_into(res, out); }) {
                 encoder_type::serialize_into(res, out);
             } else {

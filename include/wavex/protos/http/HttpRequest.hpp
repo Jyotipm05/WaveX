@@ -157,13 +157,21 @@ namespace wavex::protos::http {
               raw_target_owned_(std::move(other.raw_target_owned_)),
               path_target_owned_(std::move(other.path_target_owned_)),
               body_owned_(std::move(other.body_owned_)),
-              query_decoded_buf_(std::move(other.query_decoded_buf_), arena_mr_),
-              params_decoded_buf_(std::move(other.params_decoded_buf_), arena_mr_),
+              query_decoded_buf_(arena_mr_),
+              params_decoded_buf_(arena_mr_),
               headers_owned_(std::move(other.headers_owned_)),
               consumed_(other.consumed_),
               query_param_overflow_(other.query_param_overflow_) {
-            rebase_query_views(other.query_decoded_buf_.data(), query_decoded_buf_.size());
-            rebase_params_views(other.params_decoded_buf_.data(), params_decoded_buf_.size());
+            const char *old_q_base = other.query_decoded_buf_.data();
+            const size_t old_q_len = other.query_decoded_buf_.size();
+            const char *old_p_base = other.params_decoded_buf_.data();
+            const size_t old_p_len = other.params_decoded_buf_.size();
+
+            query_decoded_buf_ = std::move(other.query_decoded_buf_);
+            params_decoded_buf_ = std::move(other.params_decoded_buf_);
+
+            rebase_query_views(old_q_base, old_q_len);
+            rebase_params_views(old_p_base, old_p_len);
         }
 
         HttpRequest &operator=(HttpRequest &&other) noexcept {

@@ -106,6 +106,8 @@ namespace wavex::server {
 
         static_assert(ArenaAware<CustReq> && ArenaAware<CustRes>,
                       "CustReq and CustRes must be constructible with std::pmr::memory_resource*");
+        static_assert(requires(CustRes &r, std::pmr::string &s) { r.serialize_to(s); },
+                      "CustRes must provide serialize_to(std::pmr::string&)");
 
         auto &stream = *stream_ptr;
         auto weak_stream = std::weak_ptr<Stream>(stream_ptr);
@@ -175,7 +177,10 @@ namespace wavex::server {
         auto &conn_ctx = CustTraits::get_connection_context(stream, default_conn_ctx);
         auto executor = co_await asio::this_coro::executor;
 
+        // Per-connection memory pool: outlives individual requests and travels safely across worker hops
+
         try {
+            wavex::memory::ConnectionMemoryPool conn_pool;
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
             // Asynchronously perform TLS handshake on worker thread if SSL stream
             if constexpr (requires
@@ -202,8 +207,8 @@ namespace wavex::server {
                     break;
                 }
 
-                // Request-scoped monotonic arena (4KB inline bump allocator)
-                wavex::memory::RequestArena arena;
+                // Request-scoped monotonic arena with per-connection fallback pool (4KB inline bump allocator)
+                wavex::memory::RequestArena arena(conn_pool.resource());
 
                 std::string_view unconsumed(stream_buf.data() + stream_buf_consumed,
                                             stream_buf.size() - stream_buf_consumed);

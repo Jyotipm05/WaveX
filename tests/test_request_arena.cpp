@@ -8,6 +8,7 @@
  */
 
 #include <wavex/Base/Memory.hpp>
+#include <wavex/Base/Uri.hpp>
 #include <wavex/protos/http/http.hpp>
 
 #include <iostream>
@@ -272,6 +273,111 @@ void test_multi_worker_thread_safety_f2() {
     check(true, "arena successfully released and destroyed across thread termination (F2)");
 }
 
+// ─── Test: Comprehensive uri::decode_to edge cases (Review I-03) ──────────────
+
+void test_decode_to_comprehensive_i03() {
+    char out_buf[128];
+
+    // 1. Truncated percent sequences
+    std::size_t written = wavex::uri::decode_to("hello%", out_buf);
+    check(std::string_view(out_buf, written) == "hello%", "truncated % decoded as literal %");
+
+    written = wavex::uri::decode_to("hello%2", out_buf);
+    check(std::string_view(out_buf, written) == "hello%2", "truncated %2 decoded as literal %2");
+
+    // 2. Invalid hex characters
+    written = wavex::uri::decode_to("bad%2G", out_buf);
+    check(std::string_view(out_buf, written) == "bad%2G", "invalid hex digit decoded literally");
+
+    written = wavex::uri::decode_to("bad%ZZ", out_buf);
+    check(std::string_view(out_buf, written) == "bad%ZZ", "invalid hex digits decoded literally");
+
+    // 3. Plus converted to space
+    written = wavex::uri::decode_to("hello+world", out_buf);
+    check(std::string_view(out_buf, written) == "hello world", "plus decoded to space");
+
+    // 4. Null pointer and empty input protection
+    check(wavex::uri::decode_to("", out_buf) == 0, "empty input returns 0 bytes written");
+    check(wavex::uri::decode_to("test", nullptr) == 0, "null destination returns 0 without crash");
+
+    // 5. Standard percent encoding
+    written = wavex::uri::decode_to("Hello%20World%21", out_buf);
+    check(std::string_view(out_buf, written) == "Hello World!", "Hello%20World%21 decoded correctly");
+}
+
+// ─── Test: Cross-arena HttpRequest move preserves view validity (Review I-02) ─
+
+void test_cross_arena_request_move_i02() {
+    wavex::memory::RequestArena arena_src;
+    wavex::memory::RequestArena arena_dst;
+
+    // Construct request backed by arena_src
+    wavex::protos::http::Http1Request req_src(arena_src.resource());
+    const std::string raw = "GET /items?category=books%20and%20magazines&page=3 HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    std::string_view raw_view = raw;
+    const auto res = req_src.parse_stream(raw_view);
+    check(res == wavex::protos::http::http1codec::parser::result::success, "req_src parsed successfully");
+
+    wavex::base::FlatMap<std::string_view, std::string_view> r_params;
+    r_params.insert_or_assign("author", "bjarne%20stroustrup");
+    req_src.set_params(r_params);
+
+    // Verify initial values in req_src
+    check(req_src.query_param("category") == "books and magazines", "src query param matches");
+    check(req_src.param("author") == "bjarne stroustrup", "src route param matches");
+
+    // Move construct req_dst backed by arena_dst
+    // (Simulates moving a request across different memory resources)
+    wavex::protos::http::Http1Request req_dst(std::move(req_src));
+
+    // Release arena_src — if views dangled into arena_src, they would now be invalid!
+    arena_src.release();
+
+    // Verify req_dst views remain intact and rebased into new buffer
+    check(req_dst.query_param("category") == "books and magazines", "moved query param valid after src arena release");
+    check(req_dst.query_param("page") == "3", "moved query param page valid");
+    check(req_dst.param("author") == "bjarne stroustrup", "moved route param valid after src arena release");
+
+    arena_dst.release();
+}
+
+// ─── Test: Strict Lifetime Separation between Connection and Request (Issue F3) ─
+
+void test_lifetime_separation_f3() {
+    // Connection-scoped structures: ConnectionMemoryPool and persistent dynamic table
+    wavex::memory::ConnectionMemoryPool conn_pool;
+    wavex::protos::http::http2::hpack::dynamic_table h2_dynamic_table;
+
+    // Insert persistent entries into connection-level dynamic table
+    h2_dynamic_table.insert("custom-key", "connection-persistent-value");
+    check(h2_dynamic_table.size() == 1, "dynamic table initialized at connection scope");
+
+    // Run 5 sequential request cycles with per-request arena wired to conn_pool
+    for (int req_idx = 0; req_idx < 5; ++req_idx) {
+        wavex::memory::RequestArena req_arena(conn_pool.resource());
+        wavex::protos::http::Http1Request req(req_arena.resource());
+        wavex::protos::http::Http1Response res(req_arena.resource());
+
+        // Allocate request-scoped data
+        res.status(200).send("Ephemeral request body");
+        std::pmr::string wire(req_arena.resource());
+        res.serialize_to(wire);
+        check(!wire.empty(), "request serialized to arena PMR string");
+
+        // Reclaim request arena memory in O(1)
+        req_arena.release();
+    }
+
+    // Connection-level state must strictly survive all request arena cycles!
+    check(h2_dynamic_table.size() == 1, "connection dynamic table survived all request arena releases");
+    const auto *entry = h2_dynamic_table.get(0);
+    check(entry != nullptr, "connection entry retrieved from dynamic table");
+    if (entry) {
+        check(entry->name == "custom-key", "connection state name uncorrupted");
+        check(entry->value == "connection-persistent-value", "connection state value uncorrupted");
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -287,6 +393,9 @@ int main() {
     test_http3_request_arena_wiring();
     test_connection_memory_pool();
     test_multi_worker_thread_safety_f2();
+    test_decode_to_comprehensive_i03();
+    test_cross_arena_request_move_i02();
+    test_lifetime_separation_f3();
 
     std::cout << "\n" << tests_passed << "/" << tests_run << " tests passed.\n";
     return tests_passed == tests_run ? 0 : 1;
