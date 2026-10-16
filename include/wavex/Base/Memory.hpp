@@ -97,11 +97,11 @@ namespace wavex::memory {
     public:
         // ─── 3. Constructors & Destructor ────────────────────────────────────
         RequestArena() noexcept
-            : mr_(buf_.data(), buf_.size(), &get_thread_local_pool()) {
+            : buf_{}, mr_(buf_.data(), buf_.size(), &get_thread_local_pool()) {
         }
 
         explicit RequestArena(std::pmr::memory_resource *upstream) noexcept
-            : mr_(buf_.data(), buf_.size(), upstream ? upstream : &get_thread_local_pool()) {
+            : buf_{}, mr_(buf_.data(), buf_.size(), upstream ? upstream : &get_thread_local_pool()) {
         }
 
         ~RequestArena() = default;

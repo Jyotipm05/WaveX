@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2026 Jyotipriya Mondal
+// Copyright (c) 2026 Jyotipriya Mondal
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -31,6 +31,18 @@ namespace wavex::uri {
      * @return     Percent-encoded string safe for use in a URI component
      */
     std::string encode(std::string_view raw);
+
+    /**
+     * @brief Decode a percent-encoded string directly into caller-provided storage.
+     *
+     * Converts %XX sequences back to their byte values and '+' to space.
+     * The destination buffer @p out_buf must be at least encoded.size() bytes.
+     *
+     * @param encoded  Percent-encoded input
+     * @param out_buf  Output buffer of at least encoded.size() bytes
+     * @return         Number of bytes written to out_buf
+     */
+    std::size_t decode_to(std::string_view encoded, char *out_buf);
 
     /**
      * @brief Decode a percent-encoded string.

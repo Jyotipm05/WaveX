@@ -55,6 +55,7 @@ export namespace wavex::protos::http {
     using http::Http3Response;
     using http::http3response;
 #endif
+    using http::StringSink;
 
 
     // Templated codec helpers

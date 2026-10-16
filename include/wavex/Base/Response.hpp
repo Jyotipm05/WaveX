@@ -39,9 +39,9 @@ namespace wavex::base {
     class Response {
     protected:
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
-        /// Pointer to the request-scoped PMR memory resource (e.g. RequestArena).
-        /// May be nullptr if no arena was injected.
-        std::pmr::memory_resource *arena_mr_{nullptr};
+        /// Pointer to the PMR memory resource (e.g. RequestArena or default resource).
+        /// Guaranteed non-null: defaults to std::pmr::get_default_resource().
+        std::pmr::memory_resource *arena_mr_{std::pmr::get_default_resource()};
 
         /// Response headers — contiguous FlatMap for zero-node allocation.
         /// Concrete subclasses (HttpResponse) own the backing string storage and
@@ -56,7 +56,8 @@ namespace wavex::base {
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         Response() = default;
 
-        explicit Response(std::pmr::memory_resource *mr) noexcept : arena_mr_(mr) {}
+        explicit Response(std::pmr::memory_resource *mr) noexcept
+            : arena_mr_(mr ? mr : std::pmr::get_default_resource()) {}
 
         ~Response() = default;
 
@@ -67,11 +68,8 @@ namespace wavex::base {
 
     public:
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
-        /// Access the injected request arena memory resource (or nullptr if none)
+        /// Access the request arena memory resource (guaranteed non-null)
         [[nodiscard]] std::pmr::memory_resource *arena() const noexcept { return arena_mr_; }
-
-        /// Inject or update the request arena memory resource
-        void set_arena(std::pmr::memory_resource *mr) noexcept { arena_mr_ = mr; }
 
         /// Set the response status code
         template<typename Self>

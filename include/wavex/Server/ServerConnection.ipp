@@ -93,6 +93,9 @@ namespace wavex::server {
     }
 
 
+    template<typename T>
+    concept ArenaAware = std::constructible_from<T, std::pmr::memory_resource *>;
+
     template<typename Codec, typename RouterType>
     template<typename CustomCodec, typename CustomRouter, typename Stream>
     asio::awaitable<void> Server<Codec, RouterType>::handle_connection_impl(
@@ -100,6 +103,9 @@ namespace wavex::server {
         using CustTraits = protos::protocol_traits<CustomCodec>;
         using CustReq = CustomRouter::RequestType;
         using CustRes = CustomRouter::ResponseType;
+
+        static_assert(ArenaAware<CustReq> && ArenaAware<CustRes>,
+                      "CustReq and CustRes must be constructible with std::pmr::memory_resource*");
 
         auto &stream = *stream_ptr;
         auto weak_stream = std::weak_ptr<Stream>(stream_ptr);
@@ -201,10 +207,7 @@ namespace wavex::server {
 
                 std::string_view unconsumed(stream_buf.data() + stream_buf_consumed,
                                             stream_buf.size() - stream_buf_consumed);
-                CustReq req;
-                if constexpr (requires { req.set_arena(arena.resource()); }) {
-                    req.set_arena(arena.resource());
-                }
+                CustReq req(arena.resource());
                 auto p_res = req.parse_stream(unconsumed, conn_ctx);
 
                 while (p_res == CustomCodec::result::incomplete &&
@@ -250,12 +253,10 @@ namespace wavex::server {
                     stream_buf.append(buffer, bytes_read);
 
                     if (max_request_size_ > 0 && stream_buf.size() > max_request_size_) [[unlikely]] {
-                        CustRes err_res;
-                        if constexpr (requires { err_res.set_arena(arena.resource()); }) {
-                            err_res.set_arena(arena.resource());
-                        }
+                        CustRes err_res(arena.resource());
                         err_res.status(413).send("Payload Too Large");
-                        std::string err_wire = err_res.serialize();
+                        std::pmr::string err_wire(arena.resource());
+                        err_res.serialize_to(err_wire);
                         co_await asio::async_write(stream, asio::buffer(err_wire),
                                                    asio::use_awaitable);
                         co_await drain_and_abort(stream);
@@ -268,12 +269,10 @@ namespace wavex::server {
                 }
 
                 if (p_res != CustomCodec::result::success) [[unlikely]] {
-                    CustRes err_res;
-                    if constexpr (requires { err_res.set_arena(arena.resource()); }) {
-                        err_res.set_arena(arena.resource());
-                    }
+                    CustRes err_res(arena.resource());
                     err_res.status(400).send("Bad Request");
-                    std::string err_wire = err_res.serialize();
+                    std::pmr::string err_wire(arena.resource());
+                    err_res.serialize_to(err_wire);
                     co_await asio::async_write(stream, asio::buffer(err_wire),
                                                asio::use_awaitable);
                     co_await drain_and_abort(stream);
@@ -287,13 +286,11 @@ namespace wavex::server {
 
                 // Hard cap: reject requests that overflow query param or header limits
                 if (req.has_query_param_overflow()) [[unlikely]] {
-                    CustRes err_res;
-                    if constexpr (requires { err_res.set_arena(arena.resource()); }) {
-                        err_res.set_arena(arena.resource());
-                    }
+                    CustRes err_res(arena.resource());
                     CustTraits::prepare_response(req, err_res, false, 0, 0);
                     err_res.status(431).send("Request Header Fields Too Large");
-                    std::string err_wire = err_res.serialize();
+                    std::pmr::string err_wire(arena.resource());
+                    err_res.serialize_to(err_wire);
                     co_await asio::async_write(stream, asio::buffer(err_wire),
                                                asio::use_awaitable);
                     stream_buf_consumed += req.consumed_bytes();
@@ -315,10 +312,7 @@ namespace wavex::server {
 
                 auto match = router.resolve(req.method_type(), req.path());
 
-                CustRes res;
-                if constexpr (requires { res.set_arena(arena.resource()); }) {
-                    res.set_arena(arena.resource());
-                }
+                CustRes res(arena.resource());
                 if constexpr (requires { res.stream_id(req.stream_id()); }) {
                     res.stream_id(req.stream_id());
                 }
@@ -429,16 +423,10 @@ namespace wavex::server {
 
                 // Server writes serialized response if headers were not already flushed by streaming
                 if (!res.is_headers_sent()) [[likely]] {
-                    if constexpr (requires { res.serialize_to(std::declval<std::pmr::string &>()); }) {
-                        std::pmr::string wire_resp(arena.resource());
-                        res.serialize_to(wire_resp);
-                        co_await asio::async_write(stream, asio::buffer(wire_resp),
-                                                   asio::use_awaitable);
-                    } else {
-                        std::string wire_resp = res.serialize();
-                        co_await asio::async_write(stream, asio::buffer(wire_resp),
-                                                   asio::use_awaitable);
-                    }
+                    std::pmr::string wire_resp(arena.resource());
+                    res.serialize_to(wire_resp);
+                    co_await asio::async_write(stream, asio::buffer(wire_resp),
+                                               asio::use_awaitable);
                 }
 
                 // O(1) bulk release of request-scoped arena allocations

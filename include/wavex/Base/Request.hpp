@@ -44,9 +44,9 @@ namespace wavex::base {
     class Request {
     public:
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
-        /// Pointer to the request-scoped PMR memory resource (e.g. RequestArena).
-        /// May be nullptr if no arena was injected.
-        std::pmr::memory_resource *arena_mr_{nullptr};
+        /// Pointer to the PMR memory resource (e.g. RequestArena or default resource).
+        /// Guaranteed non-null: defaults to std::pmr::get_default_resource().
+        std::pmr::memory_resource *arena_mr_{std::pmr::get_default_resource()};
 
         /// Path parameters populated by the router (e.g. :id -> "123")
         /// Keys and values are string_view slices into the request stream buffer.
@@ -60,7 +60,8 @@ namespace wavex::base {
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         Request() = default;
 
-        explicit Request(std::pmr::memory_resource *mr) noexcept : arena_mr_(mr) {}
+        explicit Request(std::pmr::memory_resource *mr) noexcept
+            : arena_mr_(mr ? mr : std::pmr::get_default_resource()) {}
 
         ~Request() = default;
 
@@ -71,11 +72,8 @@ namespace wavex::base {
 
     public:
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
-        /// Access the injected request arena memory resource (or nullptr if none)
+        /// Access the request arena memory resource (guaranteed non-null)
         [[nodiscard]] std::pmr::memory_resource *arena() const noexcept { return arena_mr_; }
-
-        /// Inject or update the request arena memory resource
-        void set_arena(std::pmr::memory_resource *mr) noexcept { arena_mr_ = mr; }
         /// The request path/target, e.g. "/user/123"
         template<typename Self>
         [[nodiscard]] decltype(auto) path(this Self &&self) {

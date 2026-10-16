@@ -59,6 +59,7 @@ export namespace wavex::memory {
 export namespace wavex::uri {
     using uri::encode;
     using uri::decode;
+    using uri::decode_to;
 } // export namespace wavex::uri
 
 export namespace wavex::url {

@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2026 Jyotipriya Mondal
+// Copyright (c) 2026 Jyotipriya Mondal
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -78,16 +78,12 @@ namespace wavex::uri {
         return out;
     }
 
-    std::string decode(const std::string_view encoded) {
-        std::string out;
-        if (encoded.empty()) return out;
+    std::size_t decode_to(const std::string_view encoded, char *dst) {
+        if (encoded.empty() || !dst) return 0;
 
-        // Allocate maximum possible size upfront — no reallocation will occur.
-        out.resize(encoded.size());
-
+        char *start = dst;
         const char *src = encoded.data();
         const char *src_end = src + encoded.size();
-        char *dst = out.data();
 
         while (src < src_end) {
             if (const char c = *src; c == '%') [[unlikely]] {
@@ -118,7 +114,17 @@ namespace wavex::uri {
             }
         }
 
-        out.resize(static_cast<size_t>(dst - out.data()));
+        return static_cast<std::size_t>(dst - start);
+    }
+
+    std::string decode(const std::string_view encoded) {
+        std::string out;
+        if (encoded.empty()) return out;
+
+        // Allocate maximum possible size upfront — no reallocation will occur.
+        out.resize(encoded.size());
+        const size_t written = decode_to(encoded, out.data());
+        out.resize(written);
         return out;
     }
 }

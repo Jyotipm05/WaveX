@@ -41,6 +41,15 @@ namespace wavex::protos::http {
     };
 
     /**
+     * @brief Concept for any string container/sink that supports append and reserve.
+     */
+    template<typename S>
+    concept StringSink = requires(S &s, std::string_view v) {
+        s.append(v.data(), v.size());
+        s.reserve(std::size_t{});
+    };
+
+    /**
      * @class HttpResponse
      * @brief HTTP response parameterized on Codec — supports both server-side creation & client parsing.
      * @tparam Codec Protocol codec defining parser, encoder, decoder, request, and response types.
@@ -442,25 +451,10 @@ namespace wavex::protos::http {
         }
 
         /**
-         * @brief Serialize the HTTP response directly into a PMR/arena-backed string.
-         *
-         * Writes the wire HTTP representation (status line + headers + body) into
-         * an existing pmr::string to avoid a separate heap allocation.
-         * Use this overload in Server::handle_connection() to serialize into the
-         * request arena buffer.
-         *
-         * @param out  Output string to append the serialized response into.
+         * @brief Serialize the HTTP response directly into any string sink (std::string, pmr::string).
          */
-        void serialize_to(std::pmr::string &out) const {
-            const std::string wire = serialize_impl();
-            out.assign(wire.data(), wire.size());
-        }
-
-        /**
-         * @brief Serialize the HTTP response into wire format via Codec::encoder.
-         * @return Serialized HTTP response string ready to be transmitted over the socket.
-         */
-        [[nodiscard]] std::string serialize_impl() const {
+        template<StringSink Out>
+        void serialize_into(Out &out) const {
             response_type res;
             if constexpr (requires { res.stream_id = stream_id_; }) {
                 res.stream_id = stream_id_;
@@ -487,7 +481,35 @@ namespace wavex::protos::http {
                 }
             }
 
-            return encoder_type::serialize(res);
+            if constexpr (requires { encoder_type::serialize_into(res, out); }) {
+                encoder_type::serialize_into(res, out);
+            } else {
+                const std::string wire = encoder_type::serialize(res);
+                out.append(wire.data(), wire.size());
+            }
+        }
+
+        /**
+         * @brief Serialize the HTTP response into wire format via Codec::encoder.
+         * @return Serialized HTTP response string ready to be transmitted over the socket.
+         */
+        [[nodiscard]] std::string serialize_impl() const {
+            std::string out;
+            serialize_into(out);
+            return out;
+        }
+
+        /**
+         * @brief Serialize the HTTP response directly into a PMR/arena-backed string.
+         *
+         * Writes the wire HTTP representation (status line + headers + body) into
+         * an existing pmr::string to avoid a separate heap allocation.
+         *
+         * @param out  Output string to append the serialized response into.
+         */
+        void serialize_to(std::pmr::string &out) const {
+            out.clear();
+            serialize_into(out);
         }
 
         /// Access status text as zero-copy std::string_view
