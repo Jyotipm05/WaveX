@@ -6,25 +6,22 @@
 
 /**
  * @file Memory.hpp
- * @brief Per-request monotonic arena allocator and thread-local slab pool.
+ * @brief Per-request monotonic arena allocator and connection-scoped slab pool.
  *
  * Architecture (3-tier):
- *   Tier 0: 4KB alignas(64) inline buffer — bump allocation, 0 malloc calls
- *   Tier 1: thread_local unsynchronized_pool_resource — 0 locks, fast slab alloc
- *   Tier 2: std::pmr::new_delete_resource() — global heap fallback (rare)
+ *   Tier 0: RequestArena (std::pmr::monotonic_buffer_resource) — 4KB initial block size
+ *           allocated lazily from connection pool, bump allocation, 0 malloc calls
+ *   Tier 1: ConnectionMemoryPool (std::pmr::synchronized_pool_resource) — connection-scoped
+ *           thread-safe slab pool
+ *   Tier 2: std::pmr::new_delete_resource() — global heap fallback (thread-safe)
  *
  * Lifecycle:
- *   - RequestArena is constructed at the *start* of processing each HTTP request
- *     (request-scoped, NOT connection-scoped).
- *   - arena.release() is called at the *end* of each request to reclaim all
- *     arena memory in O(1) — a single pointer reset with zero free() calls.
- *   - The 4KB inline buffer lives on the stack/frame of the request block and
- *     is destroyed when the request scope exits.
- *
- * Idle trimming:
- *   - Call wavex::memory::get_thread_local_pool().release() when a worker thread
- *     is idle to return cached slab memory to the OS.
- *   - server.trim_memory() posts this call to all worker threads.
+ *   - ConnectionMemoryPool is created once per connection (connection-scoped).
+ *   - RequestArena is constructed at the start of processing each HTTP request
+ *     (request-scoped). Its initial 4KB block is allocated lazily from ConnectionMemoryPool.
+ *   - arena.release() is called at the end of each request to reclaim all
+ *     arena memory in O(1) and return slabs to the ConnectionMemoryPool.
+ *   - When the connection becomes idle, conn_pool.release() frees cached chunks.
  *
  * string_view safety contract:
  *   - Views allocated into the arena (req.params, req.query, res.headers_) are
@@ -50,7 +47,7 @@ namespace wavex::memory {
      * thread terminates during scale-down.
      *
      * std::pmr::new_delete_resource() provides global, thread-safe fallback allocation
-     * for the rare requests whose memory footprint exceeds the 4KB inline buffer.
+     * for requests exceeding the initial block size.
      */
     [[nodiscard]] inline std::pmr::memory_resource *get_default_upstream_resource() noexcept {
         return std::pmr::new_delete_resource();
@@ -114,6 +111,13 @@ namespace wavex::memory {
         [[nodiscard]] std::pmr::memory_resource *resource() noexcept {
             return &pool_;
         }
+
+        /**
+         * @brief Release cached memory blocks back to upstream (called when connection terminates).
+         */
+        void release() noexcept {
+            pool_.release();
+        }
     };
 
     /**
@@ -125,33 +129,23 @@ namespace wavex::memory {
      * bump pointer — O(1) allocation with zero calls to global malloc for
      * requests whose total allocation footprint fits within 4KB.
      *
-     * Fallback for allocations > 4KB uses get_default_upstream_resource() (global new/delete)
-     * or a custom per-connection resource, guaranteeing safety across multi-worker thread
-     * transitions and worker scale-down events (Issue F2).
-     *
-     * Usage in Server::handle_connection():
-     * @code
-     *   while (is_running_) {
-     *       wavex::memory::RequestArena arena;
-     *       RequestType  req(arena.resource());
-     *       ResponseType res(arena.resource());
-     *       // ... parse, route, handle, serialize, write ...
-     *       arena.release(); // O(1) reclamation
-     *   }
-     * @endcode
+     * Fallback for allocations > 4KB uses ConnectionMemoryPool or get_default_upstream_resource()
+     * (global new/delete), guaranteeing safety across multi-worker thread transitions and
+     * worker scale-down events (Issue F2).
      */
     class RequestArena {
     public:
-        // ─── 1. Constants & Definitions ──────────────────────────────────────
+        // ─── 1. Constants & Definitions (TOP) ────────────────────────────────
         static constexpr std::size_t kInlineBytes = 4096;
+        static constexpr std::size_t kInitialBlockSize = kInlineBytes; ///< Backward compatibility alias
 
     private:
-        // ─── 2. Member Variables (Arranged for cache-line alignment) ─────────
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
         alignas(64) std::array<std::byte, kInlineBytes> buf_{};
         std::pmr::monotonic_buffer_resource mr_;
 
     public:
-        // ─── 3. Constructors & Destructor ────────────────────────────────────
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         RequestArena() noexcept
             : buf_{}, mr_(buf_.data(), buf_.size(), get_default_upstream_resource()) {
         }
@@ -164,14 +158,11 @@ namespace wavex::memory {
 
         // Non-copyable, non-movable — lifetime is tied to the request block.
         RequestArena(const RequestArena &) = delete;
-
         RequestArena &operator=(const RequestArena &) = delete;
-
         RequestArena(RequestArena &&) = delete;
-
         RequestArena &operator=(RequestArena &&) = delete;
 
-        // ─── 4. Member Functions ─────────────────────────────────────────────
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
         /**
          * @brief Returns the PMR memory resource backed by this arena.
          * Pass this pointer to any PMR-aware container or allocator.
@@ -181,13 +172,10 @@ namespace wavex::memory {
         }
 
         /**
-         * @brief O(1) release — resets the bump pointer to offset 0.
+         * @brief O(1) release — resets the bump pointer and returns overflow blocks to upstream.
          *
          * All memory allocated from this arena since construction (or since the
-         * last release()) is reclaimed instantly. No destructors are called on
-         * trivially reclaimable objects (FlatMap entries, string_view pairs).
-         *
-         * After calling release(), the arena is ready for a fresh request.
+         * last release()) is reclaimed instantly.
          */
         void release() noexcept {
             mr_.release();

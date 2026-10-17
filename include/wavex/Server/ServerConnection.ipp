@@ -242,9 +242,12 @@ namespace wavex::server {
                         }
                     });
 
-                    char buffer[4096];
+                    const std::size_t prev_size = stream_buf.size();
+                    stream_buf.resize(prev_size + 4096);
                     auto [read_ec, bytes_read] = co_await stream.async_read_some(
-                        asio::buffer(buffer), asio::as_tuple(asio::use_awaitable));
+                        asio::buffer(stream_buf.data() + prev_size, 4096),
+                        asio::as_tuple(asio::use_awaitable));
+                    stream_buf.resize(prev_size + bytes_read);
 
                     std::error_code timer_ec;
                     std::ignore = timer.cancel(timer_ec);
@@ -254,8 +257,6 @@ namespace wavex::server {
                     if (timed_out || read_ec || bytes_read == 0) [[unlikely]] {
                         co_return;
                     }
-
-                    stream_buf.append(buffer, bytes_read);
 
                     if (max_request_size_ > 0 && stream_buf.size() > max_request_size_) [[unlikely]] {
                         CustRes err_res(arena.resource());

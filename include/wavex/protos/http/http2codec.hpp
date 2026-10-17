@@ -1319,12 +1319,20 @@ namespace wavex::protos::http {
             /**
              * @brief Serialize an HTTP/2 response into wire-format frames (HEADERS [+ DATA]).
              */
-            static std::string serialize(const response &res) {
-                std::string wire;
-
+            /**
+             * @brief Serialize an HTTP/2 response directly into a sink (HEADERS [+ DATA]).
+             */
+            template<typename Out>
+            static void serialize_into(const response &res, Out &out) {
                 // 1. HPACK encode headers
                 const std::string header_block = hpack::encoder::encode_response_headers(
                     res.status_code, res.headers);
+
+                // Upper bound reserve: frame header (9) + header block + DATA frames overhead + body
+                const std::size_t est = 9 + header_block.size() + (!res.body.empty() ? 9 + res.body.size() : 0);
+                if (out.capacity() < out.size() + est) {
+                    out.reserve(out.size() + est);
+                }
 
                 // 2. Build HEADERS frame
                 frame_header h_hdr;
@@ -1339,8 +1347,8 @@ namespace wavex::protos::http {
                 std::array<uint8_t, frame_header::HEADER_SIZE> h_bytes{};
                 pack_frame_header(h_hdr, h_bytes);
 
-                wire.append(reinterpret_cast<const char *>(h_bytes.data()), h_bytes.size());
-                wire.append(header_block);
+                out.append(reinterpret_cast<const char *>(h_bytes.data()), h_bytes.size());
+                out.append(header_block);
 
                 // 3. Build DATA frame(s) if body present
                 if (!res.body.empty()) {
@@ -1360,13 +1368,17 @@ namespace wavex::protos::http {
                         std::array<uint8_t, frame_header::HEADER_SIZE> d_bytes{};
                         pack_frame_header(d_hdr, d_bytes);
 
-                        wire.append(reinterpret_cast<const char *>(d_bytes.data()), d_bytes.size());
-                        wire.append(res.body.substr(offset, chunk_len));
+                        out.append(reinterpret_cast<const char *>(d_bytes.data()), d_bytes.size());
+                        out.append(res.body.substr(offset, chunk_len));
 
                         offset += chunk_len;
                     }
                 }
+            }
 
+            static std::string serialize(const response &res) {
+                std::string wire;
+                serialize_into(res, wire);
                 return wire;
             }
 
@@ -1698,6 +1710,12 @@ namespace wavex::protos::http {
         /** @brief Serialize an HTTP/2 response into wire-format binary frames. */
         static std::string serialize(const response &res) {
             return encoder::serialize(res);
+        }
+
+        /** @brief Serialize an HTTP/2 response into wire-format binary frames directly into a sink. */
+        template<typename Out>
+        static void serialize_into(const response &res, Out &out) {
+            encoder::serialize_into(res, out);
         }
 
         /** @brief Serialize an HTTP/2 request into wire-format binary frames. */

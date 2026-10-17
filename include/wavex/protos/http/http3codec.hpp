@@ -679,6 +679,35 @@ namespace wavex::protos::http {
 
             static std::string serialize_request(const request &req, const qpack::dynamic_table *dt = nullptr);
 
+            template<typename Out>
+            static void serialize_into(const response &res, Out &out, qpack::dynamic_table *dt = nullptr) {
+                const std::string header_block = qpack::encoder::encode_response_headers(
+                    res.status_code,
+                    res.headers,
+                    dt
+                );
+
+                const std::size_t est = 16 + header_block.size() + (!res.body.empty() ? 16 + res.body.size() : 0);
+                if (out.capacity() < out.size() + est) {
+                    out.reserve(out.size() + est);
+                }
+
+                uint8_t vi[8];
+                std::size_t n = VarInt::encode(static_cast<uint64_t>(frame_type::HEADERS), vi, sizeof(vi));
+                out.append(reinterpret_cast<const char *>(vi), n);
+                n = VarInt::encode(header_block.size(), vi, sizeof(vi));
+                out.append(reinterpret_cast<const char *>(vi), n);
+                out.append(header_block);
+
+                if (!res.body.empty()) {
+                    n = VarInt::encode(static_cast<uint64_t>(frame_type::DATA), vi, sizeof(vi));
+                    out.append(reinterpret_cast<const char *>(vi), n);
+                    n = VarInt::encode(res.body.size(), vi, sizeof(vi));
+                    out.append(reinterpret_cast<const char *>(vi), n);
+                    out.append(res.body);
+                }
+            }
+
             static std::string serialize_response(const response &res, qpack::dynamic_table *dt = nullptr);
 
             static std::string serialize(const response &res);
@@ -948,6 +977,11 @@ namespace wavex::protos::http {
 
         static std::string format_chunk(const std::string_view data) {
             return encoder::format_chunk(data);
+        }
+
+        template<typename Out>
+        static void serialize_into(const response &res, Out &out) {
+            encoder::serialize_into(res, out);
         }
 
         [[nodiscard]] static constexpr std::string_view format_terminal_chunk() noexcept {

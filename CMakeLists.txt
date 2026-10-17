@@ -89,12 +89,7 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 cmake_policy(SET CMP0168 NEW)
 
-# Override MSVC's -external:I flag → plain -I so compile_commands.json uses
-# standard flags that clangd can parse. vcpkg passes all system includes
-# (asio, nlohmann, re2, OpenSSL) via -external:I which clangd silently ignores.
-#if (MSVC)
-#    set(CMAKE_INCLUDE_SYSTEM_FLAG_CXX "-I ")
-#endif ()
+add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 
 option(WAVEX_TEST "Build tests for the wavex library" OFF)
 option(WAVEX_TEST_TSAN "Build tests with Thread Sanitizer (TSan) only" OFF)

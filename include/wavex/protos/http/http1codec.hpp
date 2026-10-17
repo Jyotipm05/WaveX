@@ -75,19 +75,19 @@ namespace wavex::protos::http {
          * Replaces std::to_string(v) which allocates a temporary std::string.
          * std::to_chars writes into a stack buffer; we then append the used range.
          */
-        inline void append_uint(std::string &out, const unsigned int v) {
+        template<typename Out>
+        inline void append_uint(Out &out, const unsigned int v) {
             char buf[10];
             if (const auto [end, ec] = std::to_chars(buf, buf + sizeof(buf), v); ec == std::errc{})
-                out.
-                        append(buf, end);
+                out.append(buf, static_cast<std::size_t>(end - buf));
         }
 
         /** @brief Same as append_uint but for std::size_t (Content-Length). */
-        inline void append_size(std::string &out, const std::size_t v) {
+        template<typename Out>
+        inline void append_size(Out &out, const std::size_t v) {
             char buf[20];
             if (const auto [end, ec] = std::to_chars(buf, buf + sizeof(buf), v); ec == std::errc{})
-                out.
-                        append(buf, end);
+                out.append(buf, static_cast<std::size_t>(end - buf));
         }
     } // namespace detail
     // ─────────────────────────────────────────────────────────────────────────────
@@ -610,48 +610,54 @@ namespace wavex::protos::http {
          *   res.body = "Hello, World!";
          *   auto bytes = encoder::serialize(res);
          */
-        static std::string serialize(const response &res) {
-            // ── Accurate reserve estimate ─────────────────────────────────────────
-            // "HTTP/1.1 200 OK\r\n" ≈ 17 bytes baseline,
-            // each header:  name + ": " + value + "\r\n"
-            // auto CL header: "Content-Length: " + 20 digits + "\r\n" ≈ 40 bytes
-            // blank line:  "\r\n" = 2 bytes
-            std::size_t est = 32 + res.body.size() + 40;
+        /**
+         * @brief Serialise an HTTP response directly into any sink implementing append / push_back.
+         */
+        template<typename Out>
+        static void serialize_into(const response &res, Out &out) {
+            // Upper-bound reserve estimate to prevent arena fragmentation
+            std::size_t est = 68 + res.body.size();
             for (const auto &[name, value]: res.headers) est += name.size() + value.size() + 4;
-
-            std::string out;
-            out.reserve(est);
+            if (out.capacity() < out.size() + est) {
+                out.reserve(out.size() + est);
+            }
 
             // ── Status line ───────────────────────────────────────────────────────
-            out += "HTTP/";
-            out += static_cast<char>('0' + res.version_major); // no allocation
-            out += '.';
-            out += static_cast<char>('0' + res.version_minor);
-            out += ' ';
-            detail::append_uint(out, res.status_code); // no allocation
-            out += ' ';
-            out += res.status_text;
-            out += "\r\n";
+            out.append("HTTP/");
+            out.push_back(static_cast<char>('0' + res.version_major));
+            out.push_back('.');
+            out.push_back(static_cast<char>('0' + res.version_minor));
+            out.push_back(' ');
+            detail::append_uint(out, res.status_code);
+            out.push_back(' ');
+            out.append(res.status_text);
+            out.append("\r\n");
 
             // ── Headers + fused Content-Length check ──────────────────────────────
-            // Detect presence of an existing Content-Length while writing headers
-            // to avoid a second get_header() scan afterwards.
             bool has_cl = false;
             for (const auto &[name, value]: res.headers) {
-                out += name;
-                out += ": ";
-                out += value;
-                out += "\r\n";
+                out.append(name);
+                out.append(": ");
+                out.append(value);
+                out.append("\r\n");
                 if (!has_cl && detail::is_equal(name, "Content-Length")) has_cl = true;
             }
 
             if (!has_cl && !res.body.empty()) {
-                out += "Content-Length: ";
-                detail::append_size(out, res.body.size()); // no allocation
-                out += "\r\n";
+                out.append("Content-Length: ");
+                detail::append_size(out, res.body.size());
+                out.append("\r\n");
             }
-            out += "\r\n";
-            out += res.body;
+            out.append("\r\n");
+            out.append(res.body);
+        }
+
+        /**
+         * @brief Serialise an HTTP response to wire format.
+         */
+        static std::string serialize(const response &res) {
+            std::string out;
+            serialize_into(res, out);
             return out;
         }
 
@@ -871,6 +877,12 @@ namespace wavex::protos::http {
         /** @brief Serialize an HTTP/1.x response to wire format. */
         static std::string serialize(const response &res) {
             return encoder::serialize(res);
+        }
+
+        /** @brief Serialize an HTTP/1.x response directly into a provided sink. */
+        template<typename Out>
+        static void serialize_into(const response &res, Out &out) {
+            encoder::serialize_into(res, out);
         }
 
         /** @brief Serialize an HTTP/1.x request to wire format. */

@@ -1232,16 +1232,8 @@ namespace wavex::protos::http::http3 {
     }
 
     std::string encoder::serialize_response(const response &res, qpack::dynamic_table *dt) {
-        const std::string header_block = qpack::encoder::encode_response_headers(
-            res.status_code,
-            res.headers,
-            dt
-        );
-
-        std::string out = encode_frame(frame_type::HEADERS, header_block);
-        if (!res.body.empty()) {
-            out += encode_data_frame(res.body);
-        }
+        std::string out;
+        serialize_into(res, out, dt);
         return out;
     }
 

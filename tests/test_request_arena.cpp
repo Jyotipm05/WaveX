@@ -378,6 +378,105 @@ void test_lifetime_separation_f3() {
     }
 }
 
+// ─── Test: Zero-copy direct sink emission via serialize_into (Review Issue 1) ─
+
+void test_serialize_into_direct_sink() {
+    wavex::memory::RequestArena arena;
+
+    // HTTP/1.x response direct emission
+    wavex::protos::http::Http1Response res1(arena.resource());
+    res1.status(200);
+    res1.set("Content-Type", "text/plain");
+    res1.send("Zero-copy response payload");
+
+    std::pmr::string sink1(arena.resource());
+    res1.serialize_to(sink1);
+    check(sink1.starts_with("HTTP/1.1 200 OK\r\n"), "HTTP/1.1 serialize_into emitted status line");
+    check(sink1.find("Content-Length: 26\r\n") != std::string::npos, "Content-Length emitted");
+    check(sink1.ends_with("Zero-copy response payload"), "Body emitted to sink");
+
+    // HTTP/2 response direct emission
+    wavex::protos::http::Http2Response res2(arena.resource());
+    res2.status(200);
+    res2.send("H2 payload");
+    std::pmr::string sink2(arena.resource());
+    res2.serialize_to(sink2);
+    check(!sink2.empty(), "HTTP/2 serialize_into emitted wire frames");
+
+    arena.release();
+}
+
+// ─── Test: Lazy RequestArena and ConnectionMemoryPool::release() (Review Issue 2) ─
+
+void test_lazy_arena_and_pool_release() {
+    wavex::memory::ConnectionMemoryPool conn_pool;
+
+    {
+        // Construct RequestArena backed by conn_pool
+        wavex::memory::RequestArena req_arena(conn_pool.resource());
+        check(req_arena.resource() != nullptr, "arena resource is non-null");
+
+        // Allocate from arena
+        void *p1 = req_arena.resource()->allocate(128);
+        check(p1 != nullptr, "allocated 128 bytes from arena");
+
+        // Allocate >4KB to trigger slab overflow
+        void *p2 = req_arena.resource()->allocate(8192);
+        check(p2 != nullptr, "allocated 8KB slab from pool");
+
+        req_arena.release();
+    }
+
+    // Call conn_pool.release() simulating connection idle state
+    conn_pool.release();
+    check(true, "conn_pool.release() executed without error");
+}
+
+// ─── Test: set_param percent-decoding with decode_to (Review Issue 5 & 6) ─────
+
+void test_set_param_percent_decoding() {
+    wavex::memory::RequestArena arena;
+    wavex::protos::http::Http1Request req(arena.resource());
+
+    // Single param with percent-encoding
+    req.set_param("action", "delete%20user");
+    check(req.param("action") == "delete user", "set_param decoded percent sequence");
+
+    // Additional param triggering buffer growth and rebase
+    req.set_param("filter", "name%3Dadmin%26active%3Dtrue");
+    check(req.param("action") == "delete user", "prior param remained valid after rebase");
+    check(req.param("filter") == "name=admin&active=true", "second param decoded correctly");
+
+    // Non-encoded param
+    req.set_param("plain", "simple_value");
+    check(req.param("plain") == "simple_value", "plain param stored correctly");
+
+    arena.release();
+}
+
+// ─── Test: Allocator Non-Propagation in Move Assignment (Review Issue 7) ──────
+
+void test_move_assignment_pmr_allocator_consistency() {
+    wavex::memory::RequestArena arena_src;
+    wavex::memory::RequestArena arena_dst;
+
+    wavex::protos::http::Http1Request req_src(arena_src.resource());
+    req_src.set_param("title", "Modern%20C%2B%2B23");
+    check(req_src.param("title") == "Modern C++23", "src param set");
+
+    wavex::protos::http::Http1Request req_dst(arena_dst.resource());
+    // Move-assign req_dst = std::move(req_src)
+    req_dst = std::move(req_src);
+
+    // Release src arena
+    arena_src.release();
+
+    // Verify req_dst remains consistent and views valid
+    check(req_dst.param("title") == "Modern C++23", "moved param remains valid in dst");
+
+    arena_dst.release();
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -396,6 +495,10 @@ int main() {
     test_decode_to_comprehensive_i03();
     test_cross_arena_request_move_i02();
     test_lifetime_separation_f3();
+    test_serialize_into_direct_sink();
+    test_lazy_arena_and_pool_release();
+    test_set_param_percent_decoding();
+    test_move_assignment_pmr_allocator_consistency();
 
     std::cout << "\n" << tests_passed << "/" << tests_run << " tests passed.\n";
     return tests_passed == tests_run ? 0 : 1;
