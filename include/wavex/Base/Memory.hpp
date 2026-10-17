@@ -19,8 +19,10 @@
  *   - ConnectionMemoryPool is created once per connection (connection-scoped).
  *   - RequestArena is constructed at the start of processing each HTTP request
  *     (request-scoped). Its initial 4KB block is allocated lazily from ConnectionMemoryPool.
- *   - arena.release() is called at the end of each request to reclaim all
- *     arena memory in O(1) and return slabs to the ConnectionMemoryPool.
+ *   - The arena is declared before the request/response objects, so scope exit destroys
+ *     them first and then the arena, reclaiming all memory in O(1) and returning slabs
+ *     to the ConnectionMemoryPool. An explicit arena.release() is only valid once every
+ *     object allocated from the arena has been destroyed.
  *   - When the connection becomes idle, conn_pool.release() frees cached chunks.
  *
  * string_view safety contract:
@@ -35,7 +37,9 @@
 
 #include <array>
 #include <cstddef>
+#include <memory>
 #include <memory_resource>
+#include <new>
 
 namespace wavex::memory {
     /**
@@ -122,12 +126,30 @@ namespace wavex::memory {
 
     /**
      * @class RequestArena
-     * @brief RAII wrapper combining a 4KB inline buffer with a monotonic bump allocator.
+     * @brief Movable RAII handle owning a monotonic bump allocator (4KB initial block).
      *
-     * Constructed once per HTTP request, destroyed (or reset via release()) at
-     * the end of each request. All allocations within a request advance a single
-     * bump pointer — O(1) allocation with zero calls to global malloc for
-     * requests whose total allocation footprint fits within 4KB.
+     * Constructed once per HTTP request and destroyed (or reset via release()) at the
+     * end of each request. All allocations within a request advance a single bump
+     * pointer — O(1) allocation. Blocks come from upstream (ConnectionMemoryPool or
+     * global new/delete).
+     *
+     * The monotonic_buffer_resource itself is neither copyable nor movable, and every
+     * object allocated from it stores a pointer to it. RequestArena therefore keeps the
+     * resource at a *stable heap address* (carved from the same upstream) and is itself
+     * only a 2-pointer handle: moving the handle never changes resource(), so objects
+     * already allocated from the arena stay valid. The destructor releases all blocks
+     * and returns the control block to upstream.
+     *
+     * Moved-from state: resource() returns nullptr, release() is a no-op. Request and
+     * Response treat a null resource as the default resource.
+     *
+     * LIFETIME RULE: every object that allocated from this arena (pmr::string, Request,
+     * Response, ...) must be destroyed BEFORE release() or the arena's destruction.
+     * Some standard libraries (e.g. MSVC STL with iterator debugging) touch allocator
+     * memory inside container destructors, so destroying such an object after
+     * release() is a use-after-free even though pmr deallocation is a no-op.
+     * Declare the arena before the objects that use it so reverse-order destruction
+     * is correct automatically, and prefer scope exit over an explicit release().
      *
      * Fallback for allocations > 4KB uses ConnectionMemoryPool or get_default_upstream_resource()
      * (global new/delete), guaranteeing safety across multi-worker thread transitions and
@@ -136,49 +158,78 @@ namespace wavex::memory {
     class RequestArena {
     public:
         // ─── 1. Constants & Definitions (TOP) ────────────────────────────────
-        static constexpr std::size_t kInlineBytes = 4096;
-        static constexpr std::size_t kInitialBlockSize = kInlineBytes; ///< Backward compatibility alias
+        static constexpr std::size_t kInitialBlockSize = 4096;
+        static constexpr std::size_t kInlineBytes = kInitialBlockSize; ///< Backward compatibility alias
 
     private:
+        using Resource = std::pmr::monotonic_buffer_resource;
+
+        /// Destroys the resource (returning its blocks to upstream) and then
+        /// returns the control block itself to the upstream it was carved from.
+        struct Deleter {
+            std::pmr::memory_resource *host;
+
+            void operator()(Resource *p) const noexcept {
+                if (p == nullptr) return;
+                p->~Resource();
+                host->deallocate(p, sizeof(Resource), alignof(Resource));
+            }
+        };
+
+        using Handle = std::unique_ptr<Resource, Deleter>;
+
+        static Handle make(std::pmr::memory_resource *upstream) {
+            std::pmr::memory_resource *const up = upstream ? upstream : get_default_upstream_resource();
+            void *raw = up->allocate(sizeof(Resource), alignof(Resource));
+            // monotonic_buffer_resource's constructor is noexcept and allocates lazily,
+            // so nothing can leak between allocate() and the unique_ptr taking ownership.
+            return Handle(::new(raw) Resource(kInitialBlockSize, up), Deleter{up});
+        }
+
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
-        alignas(64) std::array<std::byte, kInlineBytes> buf_{};
-        std::pmr::monotonic_buffer_resource mr_;
+        Handle mr_;
 
     public:
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
-        RequestArena() noexcept
-            : buf_{}, mr_(buf_.data(), buf_.size(), get_default_upstream_resource()) {
+        RequestArena()
+            : mr_(make(nullptr)) {
         }
 
-        explicit RequestArena(std::pmr::memory_resource *upstream) noexcept
-            : buf_{}, mr_(buf_.data(), buf_.size(), upstream ? upstream : get_default_upstream_resource()) {
+        /// @throws std::bad_alloc if the upstream cannot provide the control block.
+        explicit RequestArena(std::pmr::memory_resource *upstream)
+            : mr_(make(upstream)) {
         }
 
         ~RequestArena() = default;
 
-        // Non-copyable, non-movable — lifetime is tied to the request block.
+        // Not copyable: allocated objects point at the resource, so a copy is meaningless.
         RequestArena(const RequestArena &) = delete;
         RequestArena &operator=(const RequestArena &) = delete;
-        RequestArena(RequestArena &&) = delete;
-        RequestArena &operator=(RequestArena &&) = delete;
+
+        // Movable: the resource keeps its address, so existing allocations stay valid.
+        // Move-assignment destroys this arena's previous resource (and its blocks).
+        RequestArena(RequestArena &&) noexcept = default;
+        RequestArena &operator=(RequestArena &&) noexcept = default;
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
         /**
          * @brief Returns the PMR memory resource backed by this arena.
          * Pass this pointer to any PMR-aware container or allocator.
+         * Returns nullptr for a moved-from arena.
          */
         [[nodiscard]] std::pmr::memory_resource *resource() noexcept {
-            return &mr_;
+            return mr_.get();
         }
 
         /**
          * @brief O(1) release — resets the bump pointer and returns overflow blocks to upstream.
          *
          * All memory allocated from this arena since construction (or since the
-         * last release()) is reclaimed instantly.
+         * last release()) is reclaimed instantly. Every object allocated from the
+         * arena must already be destroyed (see the lifetime rule above).
          */
         void release() noexcept {
-            mr_.release();
+            if (mr_) mr_->release();
         }
     };
 

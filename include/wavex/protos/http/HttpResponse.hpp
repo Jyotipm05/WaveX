@@ -31,6 +31,7 @@
 #include <asio/use_awaitable.hpp>
 #include <wavex/Base/Response.hpp>
 #include <wavex/Base/MimeTypes.hpp>
+#include <wavex/Base/StringSink.hpp>
 #include <wavex/protos/http/http1codec.hpp>
 
 namespace wavex::protos::http {
@@ -40,14 +41,7 @@ namespace wavex::protos::http {
         Deflate // Planned for future zlib update
     };
 
-    /**
-     * @brief Concept for any string container/sink that supports append and reserve.
-     */
-    template<typename S>
-    concept StringSink = requires(S &s, std::string_view v) {
-        s.append(v.data(), v.size());
-        s.reserve(std::size_t{});
-    };
+    using base::StringSink;
 
     /**
      * @class HttpResponse
@@ -144,8 +138,8 @@ namespace wavex::protos::http {
          * @brief Copy constructor — deep-copies backing stores and rebases all
          *        string_view members so they point into THIS object's buffers.
          */
-        HttpResponse(const HttpResponse &other)
-            : Response(other),
+        HttpResponse(const HttpResponse &other, std::pmr::memory_resource *mr)
+            : Response(other, mr),
               socket_(other.socket_),
               write_sink_(other.write_sink_),
               stream_id_(other.stream_id_),
@@ -234,6 +228,9 @@ namespace wavex::protos::http {
             }
         }
 
+        HttpResponse(const HttpResponse &other)
+            : HttpResponse(other, other.arena_mr_) {}
+
         HttpResponse &operator=(const HttpResponse &other) {
             if (this != &other) {
                 base::Response::operator=(other);
@@ -284,8 +281,8 @@ namespace wavex::protos::http {
             return *this;
         }
 
-        HttpResponse(HttpResponse &&other) noexcept
-            : base::Response(std::move(other)),
+        HttpResponse(HttpResponse &&other, std::pmr::memory_resource *mr)
+            : base::Response(std::move(other), mr),
               socket_(other.socket_),
               write_sink_(std::move(other.write_sink_)),
               stream_id_(other.stream_id_),
@@ -308,6 +305,9 @@ namespace wavex::protos::http {
                 }
             }
         }
+
+        HttpResponse(HttpResponse &&other) noexcept
+            : HttpResponse(std::move(other), other.arena_mr_) {}
 
         HttpResponse &operator=(HttpResponse &&other) noexcept {
             if (this != &other) {
@@ -480,9 +480,6 @@ namespace wavex::protos::http {
                     res.headers.emplace_back(name, value);
                 }
             }
-
-            const std::size_t est_headers = (!headers_.empty() ? headers_.size() : headers_views_.size()) * 48;
-            out.reserve(128 + res.body.size() + est_headers);
 
             if constexpr (requires { encoder_type::serialize_into(res, out); }) {
                 encoder_type::serialize_into(res, out);

@@ -29,6 +29,7 @@ module;
 #include <wavex/Base/Request.hpp>
 #include <wavex/Base/Response.hpp>
 #include <wavex/Base/MiddleWare.hpp>
+#include <wavex/Base/StringSink.hpp>
 
 export module wavex:middleware;
 
@@ -49,6 +50,8 @@ export namespace wavex::base {
     using base::keep_alive;
     using base::sse_stay_active;
     using base::body_limit;
+    using base::StringSink;
+    using base::resize_and_overwrite_compat;
 } // export namespace wavex::base
 
 export namespace wavex::memory {

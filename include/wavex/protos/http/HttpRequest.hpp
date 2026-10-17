@@ -35,18 +35,13 @@
 #include <wavex/Utils/Multipart.hpp>
 #include <wavex/Utils/Compression.hpp>
 #include <wavex/Utils/FsUtils.hpp>
+#include <wavex/Base/StringSink.hpp>
 
 namespace wavex::protos::http {
     namespace detail {
         template<typename String, typename Op>
         inline void resize_and_overwrite_compat(String &str, const std::size_t count, Op &&op) {
-#if defined(__cpp_lib_string_resize_and_overwrite) && __cpp_lib_string_resize_and_overwrite >= 202110L
-            str.resize_and_overwrite(count, std::forward<Op>(op));
-#else
-            str.resize(count);
-            const std::size_t actual = op(str.data(), count);
-            str.resize(actual);
-#endif
+            wavex::base::resize_and_overwrite_compat(str, count, std::forward<Op>(op));
         }
     } // namespace detail
 
@@ -125,8 +120,8 @@ namespace wavex::protos::http {
             extract_path_query(raw_target_owned_);
         }
 
-        HttpRequest(const HttpRequest &other)
-            : Request(other),
+        HttpRequest(const HttpRequest &other, std::pmr::memory_resource *mr)
+            : Request(other, mr),
               buffer_(other.buffer_),
               parsed_(other.parsed_),
               path_(other.path_),
@@ -138,9 +133,15 @@ namespace wavex::protos::http {
               headers_owned_(other.headers_owned_),
               consumed_(other.consumed_),
               query_param_overflow_(other.query_param_overflow_) {
+            if (!path_target_owned_.empty()) {
+                parsed_.target = path_target_owned_;
+            }
             rebase_query_views(other.query_decoded_buf_.data(), other.query_decoded_buf_.size());
             rebase_params_views(other.params_decoded_buf_.data(), other.params_decoded_buf_.size());
         }
+
+        HttpRequest(const HttpRequest &other)
+            : HttpRequest(other, other.arena_mr_) {}
 
         HttpRequest &operator=(const HttpRequest &other) {
             if (this != &other) {
@@ -152,6 +153,9 @@ namespace wavex::protos::http {
                 path_ = other.path_;
                 raw_target_owned_ = other.raw_target_owned_;
                 path_target_owned_ = other.path_target_owned_;
+                if (!path_target_owned_.empty()) {
+                    parsed_.target = path_target_owned_;
+                }
                 body_owned_ = other.body_owned_;
                 query_decoded_buf_ = other.query_decoded_buf_;
                 params_decoded_buf_ = other.params_decoded_buf_;
@@ -164,8 +168,8 @@ namespace wavex::protos::http {
             return *this;
         }
 
-        HttpRequest(HttpRequest &&other) noexcept
-            : Request(std::move(other)),
+        HttpRequest(HttpRequest &&other, std::pmr::memory_resource *mr)
+            : Request(std::move(other), mr),
               buffer_(std::move(other.buffer_)),
               parsed_(std::move(other.parsed_)),
               path_(std::move(other.path_)),
@@ -177,6 +181,9 @@ namespace wavex::protos::http {
               headers_owned_(std::move(other.headers_owned_)),
               consumed_(other.consumed_),
               query_param_overflow_(other.query_param_overflow_) {
+            if (!path_target_owned_.empty()) {
+                parsed_.target = path_target_owned_;
+            }
             const char *old_q_base = other.query_decoded_buf_.data();
             const size_t old_q_len = other.query_decoded_buf_.size();
             const char *old_p_base = other.params_decoded_buf_.data();
@@ -188,6 +195,9 @@ namespace wavex::protos::http {
             rebase_query_views(old_q_base, old_q_len);
             rebase_params_views(old_p_base, old_p_len);
         }
+
+        HttpRequest(HttpRequest &&other) noexcept
+            : HttpRequest(std::move(other), other.arena_mr_) {}
 
         HttpRequest &operator=(HttpRequest &&other) noexcept {
             if (this != &other) {
@@ -205,6 +215,9 @@ namespace wavex::protos::http {
                 path_ = std::move(other.path_);
                 raw_target_owned_ = std::move(other.raw_target_owned_);
                 path_target_owned_ = std::move(other.path_target_owned_);
+                if (!path_target_owned_.empty()) {
+                    parsed_.target = path_target_owned_;
+                }
                 body_owned_ = std::move(other.body_owned_);
                 query_decoded_buf_ = std::move(other.query_decoded_buf_);
                 params_decoded_buf_ = std::move(other.params_decoded_buf_);
@@ -330,16 +343,23 @@ namespace wavex::protos::http {
                 bool is_decoded{false};
                 std::string_view raw_val{};
             };
-            std::array<ParamSlice, 32> slices{};
+
+            const size_t num_params = route_params.size();
+            std::array<ParamSlice, 32> inline_slices{};
+            std::vector<ParamSlice> heap_slices;
+            ParamSlice *slices = nullptr;
+            if (num_params <= inline_slices.size()) {
+                slices = inline_slices.data();
+            } else {
+                heap_slices.resize(num_params);
+                slices = heap_slices.data();
+            }
+
             size_t count = 0;
             size_t buf_offset = 0;
 
-            detail::resize_and_overwrite_compat(params_decoded_buf_, total_est_len, [&](char *buf, size_t) {
+            detail::resize_and_overwrite_compat(params_decoded_buf_, total_est_len, [&](char *buf, size_t) noexcept {
                 for (const auto &[k, v]: route_params) {
-                    if (count >= slices.size()) {
-                        params.insert_or_assign(k, v);
-                        continue;
-                    }
                     if (v.find('%') != std::string_view::npos) {
                         const size_t v_start = buf_offset;
                         const size_t v_len = wavex::uri::decode_to(v, buf + buf_offset);

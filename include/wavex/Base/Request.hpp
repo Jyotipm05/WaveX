@@ -70,6 +70,16 @@ namespace wavex::base {
         Request(Request &&) noexcept = default;
         Request &operator=(Request &&) noexcept = default;
 
+        Request(const Request &other, std::pmr::memory_resource *mr) noexcept
+            : arena_mr_(mr ? mr : std::pmr::get_default_resource()),
+              params(other.params),
+              query(other.query) {}
+
+        Request(Request &&other, std::pmr::memory_resource *mr) noexcept
+            : arena_mr_(mr ? mr : std::pmr::get_default_resource()),
+              params(std::move(other.params)),
+              query(std::move(other.query)) {}
+
     public:
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
         /// Access the request arena memory resource (guaranteed non-null)

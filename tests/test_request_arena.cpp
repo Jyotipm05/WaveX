@@ -13,6 +13,8 @@
 
 #include <iostream>
 #include <memory_resource>
+#include <optional>
+#include <type_traits>
 #include <string>
 #include <cstring>
 #include <thread>
@@ -26,9 +28,9 @@ namespace {
         ++tests_run;
         if (condition) {
             ++tests_passed;
-            std::cout << "  [PASS] " << name << "\n";
+            std::cout << "  [PASS] " << name << std::endl;
         } else {
-            std::cout << "  [FAIL] " << name << "\n";
+            std::cout << "  [FAIL] " << name << std::endl;
         }
     }
 }
@@ -141,39 +143,41 @@ void test_request_and_response_arena_wiring() {
     wavex::memory::RequestArena arena;
     auto *mr = arena.resource();
 
-    // Construct request and response with arena
-    wavex::protos::http::Http1Request req(mr);
-    wavex::protos::http::Http1Response res(mr);
+    {
+        // Construct request and response with arena
+        wavex::protos::http::Http1Request req(mr);
+        wavex::protos::http::Http1Response res(mr);
 
-    check(req.arena() == mr, "Http1Request::arena() returns injected memory resource");
-    check(res.arena() == mr, "Http1Response::arena() returns injected memory resource");
+        check(req.arena() == mr, "Http1Request::arena() returns injected memory resource");
+        check(res.arena() == mr, "Http1Response::arena() returns injected memory resource");
 
-    // Test parse_stream / extract_path_query with encoded query parameters
-    const std::string raw_http1 = "GET /search?q=modern%20c%2B%2B&page=1&limit=50 HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    std::string_view raw_view = raw_http1;
-    const auto pres = req.parse_stream(raw_view);
-    check(pres == wavex::protos::http::http1codec::parser::result::success, "req.parse_stream succeeds");
-    check(req.query_param("q") == "modern c++", "query_param q decoded from arena");
-    check(req.query_param("page") == "1", "query_param page decoded from arena");
-    check(req.query_param("limit") == "50", "query_param limit decoded from arena");
+        // Test parse_stream / extract_path_query with encoded query parameters
+        const std::string raw_http1 = "GET /search?q=modern%20c%2B%2B&page=1&limit=50 HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        std::string_view raw_view = raw_http1;
+        const auto pres = req.parse_stream(raw_view);
+        check(pres == wavex::protos::http::http1codec::parser::result::success, "req.parse_stream succeeds");
+        check(req.query_param("q") == "modern c++", "query_param q decoded from arena");
+        check(req.query_param("page") == "1", "query_param page decoded from arena");
+        check(req.query_param("limit") == "50", "query_param limit decoded from arena");
 
-    // Test set_params with percent-encoded route parameters
-    wavex::base::FlatMap<std::string_view, std::string_view> route_params;
-    route_params.insert_or_assign("category", "high%20performance");
-    route_params.insert_or_assign("id", "42");
-    req.set_params(route_params);
+        // Test set_params with percent-encoded route parameters
+        wavex::base::FlatMap<std::string_view, std::string_view> route_params;
+        route_params.insert_or_assign("category", "high%20performance");
+        route_params.insert_or_assign("id", "42");
+        req.set_params(route_params);
 
-    check(req.param("category") == "high performance", "route param category decoded from arena");
-    check(req.param("id") == "42", "route param id matches");
+        check(req.param("category") == "high performance", "route param category decoded from arena");
+        check(req.param("id") == "42", "route param id matches");
 
-    // Test res.serialize_to with PMR string backed by the arena
-    res.status(200).send("{\"status\":\"ok\"}");
-    std::pmr::string wire_resp(mr);
-    res.serialize_to(wire_resp);
+        // Test res.serialize_to with PMR string backed by the arena
+        res.status(200).send("{\"status\":\"ok\"}");
+        std::pmr::string wire_resp(mr);
+        res.serialize_to(wire_resp);
 
-    check(!wire_resp.empty(), "res.serialize_to produces non-empty PMR output");
-    check(wire_resp.find("200 OK") != std::string::npos, "serialized response contains 200 OK");
-    check(wire_resp.find("{\"status\":\"ok\"}") != std::string::npos, "serialized response contains body");
+        check(!wire_resp.empty(), "res.serialize_to produces non-empty PMR output");
+        check(wire_resp.find("200 OK") != std::string::npos, "serialized response contains 200 OK");
+        check(wire_resp.find("{\"status\":\"ok\"}") != std::string::npos, "serialized response contains body");
+    }
 
     // Reclaim arena memory
     arena.release();
@@ -187,23 +191,25 @@ void test_http3_request_arena_wiring() {
     wavex::memory::RequestArena arena;
     auto *mr = arena.resource();
 
-    wavex::protos::http::Http3Request h3_req(mr);
-    wavex::protos::http::Http3Response h3_res(mr);
+    {
+        wavex::protos::http::Http3Request h3_req(mr);
+        wavex::protos::http::Http3Response h3_res(mr);
 
-    check(h3_req.arena() == mr, "Http3Request::arena() returns injected memory resource");
-    check(h3_res.arena() == mr, "Http3Response::arena() returns injected memory resource");
+        check(h3_req.arena() == mr, "Http3Request::arena() returns injected memory resource");
+        check(h3_res.arena() == mr, "Http3Response::arena() returns injected memory resource");
 
-    // Test dynamic route param population in Http3Request using arena
-    wavex::base::FlatMap<std::string_view, std::string_view> h3_params;
-    h3_params.insert_or_assign("action", "quic%20nitro");
-    h3_req.set_params(h3_params);
-    check(h3_req.param("action") == "quic nitro", "Http3Request param decoded into arena");
+        // Test dynamic route param population in Http3Request using arena
+        wavex::base::FlatMap<std::string_view, std::string_view> h3_params;
+        h3_params.insert_or_assign("action", "quic%20nitro");
+        h3_req.set_params(h3_params);
+        check(h3_req.param("action") == "quic nitro", "Http3Request param decoded into arena");
 
-    // Test serialize_to for Http3Response into arena PMR string
-    h3_res.status(200).send("HTTP/3 arena body payload");
-    std::pmr::string h3_wire(mr);
-    h3_res.serialize_to(h3_wire);
-    check(!h3_wire.empty(), "Http3Response::serialize_to produces non-empty wire data");
+        // Test serialize_to for Http3Response into arena PMR string
+        h3_res.status(200).send("HTTP/3 arena body payload");
+        std::pmr::string h3_wire(mr);
+        h3_res.serialize_to(h3_wire);
+        check(!h3_wire.empty(), "Http3Response::serialize_to produces non-empty wire data");
+    }
 
     arena.release();
     check(true, "HTTP/3 arena cycle completed with clean release()");
@@ -311,32 +317,39 @@ void test_cross_arena_request_move_i02() {
     wavex::memory::RequestArena arena_src;
     wavex::memory::RequestArena arena_dst;
 
-    // Construct request backed by arena_src
-    wavex::protos::http::Http1Request req_src(arena_src.resource());
+    // Construct request backed by arena_src. It lives in an optional so it can be
+    // destroyed BEFORE arena_src.release(): objects holding pmr containers must never
+    // outlive the memory they allocated from (MSVC debug iterators touch it in dtors).
+    std::optional<wavex::protos::http::Http1Request> req_src;
+    req_src.emplace(arena_src.resource());
     const std::string raw = "GET /items?category=books%20and%20magazines&page=3 HTTP/1.1\r\nHost: localhost\r\n\r\n";
     std::string_view raw_view = raw;
-    const auto res = req_src.parse_stream(raw_view);
+    const auto res = req_src->parse_stream(raw_view);
     check(res == wavex::protos::http::http1codec::parser::result::success, "req_src parsed successfully");
 
     wavex::base::FlatMap<std::string_view, std::string_view> r_params;
     r_params.insert_or_assign("author", "bjarne%20stroustrup");
-    req_src.set_params(r_params);
+    req_src->set_params(r_params);
 
     // Verify initial values in req_src
-    check(req_src.query_param("category") == "books and magazines", "src query param matches");
-    check(req_src.param("author") == "bjarne stroustrup", "src route param matches");
+    check(req_src->query_param("category") == "books and magazines", "src query param matches");
+    check(req_src->param("author") == "bjarne stroustrup", "src route param matches");
 
-    // Move construct req_dst backed by arena_dst
+    // Move construct req_dst backed by arena_dst using allocator-extended constructor
     // (Simulates moving a request across different memory resources)
-    wavex::protos::http::Http1Request req_dst(std::move(req_src));
+    {
+        wavex::protos::http::Http1Request req_dst(std::move(*req_src), arena_dst.resource());
 
-    // Release arena_src — if views dangled into arena_src, they would now be invalid!
-    arena_src.release();
+        // Destroy the moved-from source, then release arena_src — if req_dst views
+        // dangled into arena_src they would now be invalid!
+        req_src.reset();
+        arena_src.release();
 
-    // Verify req_dst views remain intact and rebased into new buffer
-    check(req_dst.query_param("category") == "books and magazines", "moved query param valid after src arena release");
-    check(req_dst.query_param("page") == "3", "moved query param page valid");
-    check(req_dst.param("author") == "bjarne stroustrup", "moved route param valid after src arena release");
+        // Verify req_dst views remain intact and rebased into new buffer
+        check(req_dst.query_param("category") == "books and magazines", "moved query param valid after src arena release");
+        check(req_dst.query_param("page") == "3", "moved query param page valid");
+        check(req_dst.param("author") == "bjarne stroustrup", "moved route param valid after src arena release");
+    }
 
     arena_dst.release();
 }
@@ -355,14 +368,16 @@ void test_lifetime_separation_f3() {
     // Run 5 sequential request cycles with per-request arena wired to conn_pool
     for (int req_idx = 0; req_idx < 5; ++req_idx) {
         wavex::memory::RequestArena req_arena(conn_pool.resource());
-        wavex::protos::http::Http1Request req(req_arena.resource());
-        wavex::protos::http::Http1Response res(req_arena.resource());
+        {
+            wavex::protos::http::Http1Request req(req_arena.resource());
+            wavex::protos::http::Http1Response res(req_arena.resource());
 
-        // Allocate request-scoped data
-        res.status(200).send("Ephemeral request body");
-        std::pmr::string wire(req_arena.resource());
-        res.serialize_to(wire);
-        check(!wire.empty(), "request serialized to arena PMR string");
+            // Allocate request-scoped data
+            res.status(200).send("Ephemeral request body");
+            std::pmr::string wire(req_arena.resource());
+            res.serialize_to(wire);
+            check(!wire.empty(), "request serialized to arena PMR string");
+        }
 
         // Reclaim request arena memory in O(1)
         req_arena.release();
@@ -383,25 +398,27 @@ void test_lifetime_separation_f3() {
 void test_serialize_into_direct_sink() {
     wavex::memory::RequestArena arena;
 
-    // HTTP/1.x response direct emission
-    wavex::protos::http::Http1Response res1(arena.resource());
-    res1.status(200);
-    res1.set("Content-Type", "text/plain");
-    res1.send("Zero-copy response payload");
+    {
+        // HTTP/1.x response direct emission
+        wavex::protos::http::Http1Response res1(arena.resource());
+        res1.status(200);
+        res1.set("Content-Type", "text/plain");
+        res1.send("Zero-copy response payload");
 
-    std::pmr::string sink1(arena.resource());
-    res1.serialize_to(sink1);
-    check(sink1.starts_with("HTTP/1.1 200 OK\r\n"), "HTTP/1.1 serialize_into emitted status line");
-    check(sink1.find("Content-Length: 26\r\n") != std::string::npos, "Content-Length emitted");
-    check(sink1.ends_with("Zero-copy response payload"), "Body emitted to sink");
+        std::pmr::string sink1(arena.resource());
+        res1.serialize_to(sink1);
+        check(sink1.starts_with("HTTP/1.1 200 OK\r\n"), "HTTP/1.1 serialize_into emitted status line");
+        check(sink1.find("Content-Length: 26\r\n") != std::string::npos, "Content-Length emitted");
+        check(sink1.ends_with("Zero-copy response payload"), "Body emitted to sink");
 
-    // HTTP/2 response direct emission
-    wavex::protos::http::Http2Response res2(arena.resource());
-    res2.status(200);
-    res2.send("H2 payload");
-    std::pmr::string sink2(arena.resource());
-    res2.serialize_to(sink2);
-    check(!sink2.empty(), "HTTP/2 serialize_into emitted wire frames");
+        // HTTP/2 response direct emission
+        wavex::protos::http::Http2Response res2(arena.resource());
+        res2.status(200);
+        res2.send("H2 payload");
+        std::pmr::string sink2(arena.resource());
+        res2.serialize_to(sink2);
+        check(!sink2.empty(), "HTTP/2 serialize_into emitted wire frames");
+    }
 
     arena.release();
 }
@@ -436,20 +453,22 @@ void test_lazy_arena_and_pool_release() {
 
 void test_set_param_percent_decoding() {
     wavex::memory::RequestArena arena;
-    wavex::protos::http::Http1Request req(arena.resource());
+    {
+        wavex::protos::http::Http1Request req(arena.resource());
 
-    // Single param with percent-encoding
-    req.set_param("action", "delete%20user");
-    check(req.param("action") == "delete user", "set_param decoded percent sequence");
+        // Single param with percent-encoding
+        req.set_param("action", "delete%20user");
+        check(req.param("action") == "delete user", "set_param decoded percent sequence");
 
-    // Additional param triggering buffer growth and rebase
-    req.set_param("filter", "name%3Dadmin%26active%3Dtrue");
-    check(req.param("action") == "delete user", "prior param remained valid after rebase");
-    check(req.param("filter") == "name=admin&active=true", "second param decoded correctly");
+        // Additional param triggering buffer growth and rebase
+        req.set_param("filter", "name%3Dadmin%26active%3Dtrue");
+        check(req.param("action") == "delete user", "prior param remained valid after rebase");
+        check(req.param("filter") == "name=admin&active=true", "second param decoded correctly");
 
-    // Non-encoded param
-    req.set_param("plain", "simple_value");
-    check(req.param("plain") == "simple_value", "plain param stored correctly");
+        // Non-encoded param
+        req.set_param("plain", "simple_value");
+        check(req.param("plain") == "simple_value", "plain param stored correctly");
+    }
 
     arena.release();
 }
@@ -460,47 +479,149 @@ void test_move_assignment_pmr_allocator_consistency() {
     wavex::memory::RequestArena arena_src;
     wavex::memory::RequestArena arena_dst;
 
-    wavex::protos::http::Http1Request req_src(arena_src.resource());
-    req_src.set_param("title", "Modern%20C%2B%2B23");
-    check(req_src.param("title") == "Modern C++23", "src param set");
+    {
+        wavex::protos::http::Http1Request req_src(arena_src.resource());
+        req_src.set_param("title", "Modern%20C%2B%2B23");
+        check(req_src.param("title") == "Modern C++23", "src param set");
 
-    wavex::protos::http::Http1Request req_dst(arena_dst.resource());
-    // Move-assign req_dst = std::move(req_src)
-    req_dst = std::move(req_src);
+        wavex::protos::http::Http1Request req_dst(arena_dst.resource());
+        // Move-assign req_dst = std::move(req_src)
+        req_dst = std::move(req_src);
 
-    // Release src arena
+        // Verify req_dst remains consistent and views valid
+        check(req_dst.param("title") == "Modern C++23", "moved param remains valid in dst");
+    }
+
     arena_src.release();
-
-    // Verify req_dst remains consistent and views valid
-    check(req_dst.param("title") == "Modern C++23", "moved param remains valid in dst");
-
     arena_dst.release();
+}
+
+// ─── Test: set_params with >32 route params (Issue 4 non-throwing callback) ──
+
+void test_set_params_large_route_params() {
+    wavex::memory::RequestArena arena;
+    {
+        wavex::protos::http::Http1Request req(arena.resource());
+
+        wavex::base::FlatMap<std::string_view, std::string_view> route_params;
+        // Insert 40 parameters (exceeds 32-entry threshold)
+        std::string keys[40];
+        std::string vals[40];
+        for (int i = 0; i < 40; ++i) {
+            keys[i] = "param_" + std::to_string(i);
+            vals[i] = (i % 2 == 0) ? ("val%20" + std::to_string(i)) : ("raw_" + std::to_string(i));
+            route_params.insert_or_assign(keys[i], vals[i]);
+        }
+
+        req.set_params(route_params);
+
+        check(req.param("param_0") == "val 0", "param_0 decoded with percent encoding");
+        check(req.param("param_1") == "raw_1", "param_1 raw preserved");
+        check(req.param("param_35") == "raw_35", "param_35 beyond 32 slices inserted successfully");
+        check(req.param("param_38") == "val 38", "param_38 beyond 32 slices decoded successfully");
+    }
+
+    arena.release();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─── Test: RequestArena is a movable handle with a stable resource ───────────
+
+void test_request_arena_move_semantics() {
+    static_assert(std::is_nothrow_move_constructible_v<wavex::memory::RequestArena>);
+    static_assert(std::is_nothrow_move_assignable_v<wavex::memory::RequestArena>);
+    static_assert(!std::is_copy_constructible_v<wavex::memory::RequestArena>);
+    static_assert(!std::is_copy_assignable_v<wavex::memory::RequestArena>);
+
+    wavex::memory::ConnectionMemoryPool conn_pool;
+
+    // Move construction: resource() address is unchanged, earlier allocations stay valid.
+    {
+        wavex::memory::RequestArena a(conn_pool.resource());
+        std::pmr::memory_resource *const mr = a.resource();
+        auto *bytes = static_cast<unsigned char *>(mr->allocate(256, 8));
+        std::memset(bytes, 0x5A, 256);
+
+        wavex::memory::RequestArena b(std::move(a));
+        check(b.resource() == mr, "move-constructed arena keeps the same resource address");
+        check(a.resource() == nullptr, "moved-from arena has no resource");
+        a.release(); // must be a harmless no-op
+        check(bytes[0] == 0x5A && bytes[255] == 0x5A, "allocation made before the move stays valid");
+
+        // Objects created after the move must be destroyed before b (declared after b).
+        std::pmr::string s("a string long enough to bypass the small string optimisation", b.resource());
+        check(s.size() > 32, "pmr::string allocates from the moved arena");
+    }
+
+    // Move assignment: previous resource is destroyed, the source's resource is adopted.
+    {
+        wavex::memory::RequestArena x(conn_pool.resource());
+        (void) x.resource()->allocate(128, 8);
+        wavex::memory::RequestArena y(conn_pool.resource());
+        std::pmr::memory_resource *const ry = y.resource();
+
+        x = std::move(y);
+        check(x.resource() == ry, "move-assigned arena adopts the source resource");
+        check(y.resource() == nullptr, "move-assignment source is left empty");
+    }
+
+    // Moved arena travels with a request and is released by its destructor.
+    {
+        auto make_arena = [&] { return wavex::memory::RequestArena(conn_pool.resource()); };
+        wavex::memory::RequestArena arena = make_arena();
+        wavex::protos::http::Http1Request req(arena.resource());
+        req.set_param("k", "a%20b");
+        check(req.param("k") == "a b", "request on a returned (moved) arena works");
+    }
+
+    conn_pool.release();
+    check(true, "arena control blocks returned to the connection pool");
+}
+
 int main() {
-    std::cout << "\n=== RequestArena Unit Tests ===\n\n";
+    std::cout << "\n=== RequestArena Unit Tests ===\n" << std::endl;
 
+    std::cout << "[START] test_inline_allocation" << std::endl;
     test_inline_allocation();
+    std::cout << "[START] test_release_and_reuse" << std::endl;
     test_release_and_reuse();
+    std::cout << "[START] test_sequential_cycles" << std::endl;
     test_sequential_cycles();
+    std::cout << "[START] test_large_allocation_overflow" << std::endl;
     test_large_allocation_overflow();
+    std::cout << "[START] test_make_in_arena" << std::endl;
     test_make_in_arena();
+    std::cout << "[START] test_thread_local_pool_accessible" << std::endl;
     test_thread_local_pool_accessible();
+    std::cout << "[START] test_request_and_response_arena_wiring" << std::endl;
     test_request_and_response_arena_wiring();
+    std::cout << "[START] test_http3_request_arena_wiring" << std::endl;
     test_http3_request_arena_wiring();
+    std::cout << "[START] test_connection_memory_pool" << std::endl;
     test_connection_memory_pool();
+    std::cout << "[START] test_multi_worker_thread_safety_f2" << std::endl;
     test_multi_worker_thread_safety_f2();
+    std::cout << "[START] test_decode_to_comprehensive_i03" << std::endl;
     test_decode_to_comprehensive_i03();
+    std::cout << "[START] test_cross_arena_request_move_i02" << std::endl;
     test_cross_arena_request_move_i02();
+    std::cout << "[START] test_lifetime_separation_f3" << std::endl;
     test_lifetime_separation_f3();
+    std::cout << "[START] test_serialize_into_direct_sink" << std::endl;
     test_serialize_into_direct_sink();
+    std::cout << "[START] test_lazy_arena_and_pool_release" << std::endl;
     test_lazy_arena_and_pool_release();
+    std::cout << "[START] test_set_param_percent_decoding" << std::endl;
     test_set_param_percent_decoding();
+    std::cout << "[START] test_move_assignment_pmr_allocator_consistency" << std::endl;
     test_move_assignment_pmr_allocator_consistency();
+    std::cout << "[START] test_set_params_large_route_params" << std::endl;
+    test_set_params_large_route_params();
+    std::cout << "[START] test_request_arena_move_semantics" << std::endl;
+    test_request_arena_move_semantics();
 
-    std::cout << "\n" << tests_passed << "/" << tests_run << " tests passed.\n";
+    std::cout << "\n" << tests_passed << "/" << tests_run << " tests passed." << std::endl;
     return tests_passed == tests_run ? 0 : 1;
 }
 

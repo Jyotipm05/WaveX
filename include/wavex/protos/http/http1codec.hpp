@@ -26,6 +26,7 @@
 #include <optional>
 #include <charconv>
 #include <wavex/protos/http/Methods.hpp>
+#include <wavex/Base/StringSink.hpp>
 
 namespace wavex::protos::http {
     // ─── Internal helpers ────────────────────────────────────────────────────────
@@ -613,10 +614,10 @@ namespace wavex::protos::http {
         /**
          * @brief Serialise an HTTP response directly into any sink implementing append / push_back.
          */
-        template<typename Out>
+        template<base::StringSink Out>
         static void serialize_into(const response &res, Out &out) {
             // Upper-bound reserve estimate to prevent arena fragmentation
-            std::size_t est = 68 + res.body.size();
+            std::size_t est = 64 + res.status_text.size() + res.body.size();
             for (const auto &[name, value]: res.headers) est += name.size() + value.size() + 4;
             if (out.capacity() < out.size() + est) {
                 out.reserve(out.size() + est);
@@ -880,7 +881,7 @@ namespace wavex::protos::http {
         }
 
         /** @brief Serialize an HTTP/1.x response directly into a provided sink. */
-        template<typename Out>
+        template<base::StringSink Out>
         static void serialize_into(const response &res, Out &out) {
             encoder::serialize_into(res, out);
         }

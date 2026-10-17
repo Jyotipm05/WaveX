@@ -26,6 +26,7 @@
 #include <utility>
 #include <wavex/protos/http/Methods.hpp>
 #include <wavex/protos/http/http1codec.hpp> // for header, message_base, detail helpers
+#include <wavex/Base/StringSink.hpp>
 
 namespace wavex::protos::http {
     namespace http2 {
@@ -1322,14 +1323,15 @@ namespace wavex::protos::http {
             /**
              * @brief Serialize an HTTP/2 response directly into a sink (HEADERS [+ DATA]).
              */
-            template<typename Out>
+            template<base::StringSink Out>
             static void serialize_into(const response &res, Out &out) {
                 // 1. HPACK encode headers
                 const std::string header_block = hpack::encoder::encode_response_headers(
                     res.status_code, res.headers);
 
                 // Upper bound reserve: frame header (9) + header block + DATA frames overhead + body
-                const std::size_t est = 9 + header_block.size() + (!res.body.empty() ? 9 + res.body.size() : 0);
+                const std::size_t num_data_frames = (!res.body.empty()) ? ((res.body.size() + 16383) / 16384) : 0;
+                const std::size_t est = 9 + header_block.size() + (num_data_frames * 9) + res.body.size();
                 if (out.capacity() < out.size() + est) {
                     out.reserve(out.size() + est);
                 }
@@ -1713,7 +1715,7 @@ namespace wavex::protos::http {
         }
 
         /** @brief Serialize an HTTP/2 response into wire-format binary frames directly into a sink. */
-        template<typename Out>
+        template<base::StringSink Out>
         static void serialize_into(const response &res, Out &out) {
             encoder::serialize_into(res, out);
         }

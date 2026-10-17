@@ -36,6 +36,7 @@
 #include <wavex/protos/http/Methods.hpp>
 #include <wavex/protos/http/http1codec.hpp>
 #include <wavex/Network/QUIC/VarInt.hpp>
+#include <wavex/Base/StringSink.hpp>
 
 namespace wavex::protos::http {
     namespace http3 {
@@ -679,7 +680,7 @@ namespace wavex::protos::http {
 
             static std::string serialize_request(const request &req, const qpack::dynamic_table *dt = nullptr);
 
-            template<typename Out>
+            template<base::StringSink Out>
             static void serialize_into(const response &res, Out &out, qpack::dynamic_table *dt = nullptr) {
                 const std::string header_block = qpack::encoder::encode_response_headers(
                     res.status_code,
@@ -979,7 +980,7 @@ namespace wavex::protos::http {
             return encoder::format_chunk(data);
         }
 
-        template<typename Out>
+        template<base::StringSink Out>
         static void serialize_into(const response &res, Out &out) {
             encoder::serialize_into(res, out);
         }

@@ -24,6 +24,7 @@
 #include <wavex/Base/Logger.hpp>
 #include <wavex/Base/Memory.hpp>
 #include <wavex/Base/MiddleWare.hpp>
+#include <wavex/Base/StringSink.hpp>
 
 #include <asio/as_tuple.hpp>
 #include <asio/buffer.hpp>
@@ -207,7 +208,54 @@ namespace wavex::server {
                     break;
                 }
 
-                // Request-scoped monotonic arena with per-connection fallback pool (4KB inline bump allocator)
+                // Compact stream_buf if there are consumed bytes from a previous request
+                if (stream_buf_consumed > 0) {
+                    stream_buf.erase(0, stream_buf_consumed);
+                    stream_buf_consumed = 0;
+                }
+
+                // When stream_buf is empty, the connection is in an idle keep-alive wait
+                if (stream_buf.empty()) {
+                    if (state_.load(std::memory_order_acquire) == ServerState::ShuttingDown) [[unlikely]] {
+                        break;
+                    }
+                    conn_tracker_.mark_idle(conn_id);
+                    conn_pool.release();
+                    if (stream_buf.capacity() > 8192) {
+                        stream_buf.shrink_to_fit();
+                    }
+
+                    asio::steady_timer timer(executor, keep_alive_timeout_);
+                    bool timed_out = false;
+                    timer.async_wait([&](const std::error_code ec) {
+                        if (!ec) {
+                            timed_out = true;
+                            std::error_code cancel_ec;
+                            std::ignore = stream.lowest_layer().cancel(cancel_ec);
+                        }
+                    });
+
+                    const std::size_t prev_size = stream_buf.size();
+                    stream_buf.reserve(prev_size + 4096);
+                    auto [read_ec, bytes_read] = co_await stream.async_read_some(
+                        asio::buffer(stream_buf.data() + prev_size, 4096),
+                        asio::as_tuple(asio::use_awaitable));
+                    wavex::base::resize_and_overwrite_compat(stream_buf, prev_size + bytes_read,
+                        [prev_size, bytes_read](char *, std::size_t) noexcept {
+                            return prev_size + bytes_read;
+                        });
+
+                    std::error_code timer_ec;
+                    std::ignore = timer.cancel(timer_ec);
+
+                    conn_tracker_.mark_active(conn_id);
+
+                    if (timed_out || read_ec || bytes_read == 0) [[unlikely]] {
+                        co_return;
+                    }
+                }
+
+                // Request-scoped monotonic arena with per-connection fallback pool
                 wavex::memory::RequestArena arena(conn_pool.resource());
 
                 std::string_view unconsumed(stream_buf.data() + stream_buf_consumed,
@@ -222,16 +270,6 @@ namespace wavex::server {
                         co_return;
                     }
 
-                    // Compact stream_buf before reading if there are consumed bytes
-                    if (stream_buf_consumed > 0) {
-                        stream_buf.erase(0, stream_buf_consumed);
-                        stream_buf_consumed = 0;
-                    }
-
-                    if (stream_buf.empty()) {
-                        conn_tracker_.mark_idle(conn_id);
-                    }
-
                     asio::steady_timer timer(executor, keep_alive_timeout_);
                     bool timed_out = false;
                     timer.async_wait([&](const std::error_code ec) {
@@ -243,16 +281,17 @@ namespace wavex::server {
                     });
 
                     const std::size_t prev_size = stream_buf.size();
-                    stream_buf.resize(prev_size + 4096);
+                    stream_buf.reserve(prev_size + 4096);
                     auto [read_ec, bytes_read] = co_await stream.async_read_some(
                         asio::buffer(stream_buf.data() + prev_size, 4096),
                         asio::as_tuple(asio::use_awaitable));
-                    stream_buf.resize(prev_size + bytes_read);
+                    wavex::base::resize_and_overwrite_compat(stream_buf, prev_size + bytes_read,
+                        [prev_size, bytes_read](char *, std::size_t) noexcept {
+                            return prev_size + bytes_read;
+                        });
 
                     std::error_code timer_ec;
                     std::ignore = timer.cancel(timer_ec);
-
-                    conn_tracker_.mark_active(conn_id);
 
                     if (timed_out || read_ec || bytes_read == 0) [[unlikely]] {
                         co_return;
@@ -304,7 +343,9 @@ namespace wavex::server {
                         stream_buf.erase(0, stream_buf_consumed);
                         stream_buf_consumed = 0;
                     }
-                    arena.release();
+                    // No explicit arena.release(): req, err_res and err_wire still hold arena
+                    // memory here. Leaving the scope destroys them first and then the arena
+                    // (declared before them), which is the only safe order.
                     if (!keep) {
                         co_await drain_and_abort(stream);
                         break;
@@ -434,9 +475,6 @@ namespace wavex::server {
                     co_await asio::async_write(stream, asio::buffer(wire_resp),
                                                asio::use_awaitable);
                 }
-
-                // O(1) bulk release of request-scoped arena allocations
-                arena.release();
 
                 stream_buf_consumed += req.consumed_bytes();
                 if (stream_buf_consumed >= 4096) [[unlikely]] {
