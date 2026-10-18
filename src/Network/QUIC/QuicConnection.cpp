@@ -80,7 +80,7 @@ namespace wavex::network::quic {
 
     extern "C" {
     static int quic_tls_crypto_send(
-        SSL * /*s*/, const unsigned char *buf, size_t buf_len,
+        SSL * /*s*/, const unsigned char *buf, const size_t buf_len,
         size_t *consumed, void *arg) {
         if (!arg || !buf || buf_len == 0) return 0;
         auto *conn = static_cast<QuicConnection *>(arg);
@@ -98,25 +98,25 @@ namespace wavex::network::quic {
     }
 
     static int quic_tls_crypto_release_rcd(
-        SSL * /*s*/, size_t bytes_read, void *arg) {
+        SSL * /*s*/, const size_t bytes_read, void *arg) {
         if (!arg) return 0;
         auto *conn = static_cast<QuicConnection *>(arg);
         return conn->on_tls_crypto_release(bytes_read);
     }
 
     static int quic_tls_yield_secret(
-        SSL * /*s*/, uint32_t prot_level, int direction,
-        const unsigned char *secret, size_t secret_len, void *arg) {
+        SSL * /*s*/, const uint32_t prot_level, const int direction,
+        const unsigned char *secret, const size_t secret_len, void *arg) {
         if (!arg || !secret) return 0;
         auto *conn = static_cast<QuicConnection *>(arg);
         return conn->on_tls_secret(prot_level, direction, secret, secret_len);
     }
 
     static int quic_tls_got_transport_params(
-        SSL * /*s*/, const unsigned char *params, size_t params_len,
+        SSL * /*s*/, const unsigned char *params, const size_t params_len,
         void *arg) {
         if (!arg) return 0;
-        auto *conn = static_cast<QuicConnection *>(arg);
+        const auto *conn = static_cast<QuicConnection *>(arg);
         return conn->on_tls_transport_params(params, params_len);
     }
 
@@ -141,8 +141,7 @@ namespace wavex::network::quic {
         while (!pending.empty()) {
             const auto it = pending.begin();
             if (it->first > next_offset) break;
-            const uint64_t end = it->first + it->second.size();
-            if (end > next_offset) {
+            if (const uint64_t end = it->first + it->second.size(); end > next_offset) {
                 const std::size_t overlap = static_cast<std::size_t>(next_offset - it->first);
                 ready.append(it->second.data() + overlap, it->second.size() - overlap);
                 next_offset = end;
@@ -199,8 +198,7 @@ namespace wavex::network::quic {
             if (pn + 1 == it->first) {
                 it->first = pn;
                 if (it != intervals.begin()) {
-                    auto prev = std::prev(it);
-                    if (prev->second + 1 == it->first) {
+                    if (const auto prev = std::prev(it); prev->second + 1 == it->first) {
                         prev->second = it->second;
                         intervals.erase(it);
                     }
@@ -210,8 +208,7 @@ namespace wavex::network::quic {
         }
 
         if (it != intervals.begin()) {
-            auto prev = std::prev(it);
-            if (prev->second + 1 == pn) {
+            if (const auto prev = std::prev(it); prev->second + 1 == pn) {
                 prev->second = pn;
                 if (it != intervals.end() && prev->second + 1 == it->first) {
                     prev->second = it->second;
@@ -245,10 +242,10 @@ namespace wavex::network::quic {
 
         if (intervals.size() > 1) {
             for (std::size_t i = intervals.size() - 1; i > 0; --i) {
-                const auto &curr = intervals[i - 1];
-                const auto &prev = intervals[i];
-                const uint64_t gap = (prev.first > curr.second + 2) ? (prev.first - curr.second - 2) : 0;
-                const uint64_t range_len = curr.second - curr.first;
+                const auto &[curr1, curr2] = intervals[i - 1];
+                const auto &[prev1, prev2] = intervals[i];
+                const uint64_t gap = (prev1 > curr2 + 2) ? (prev1 - curr2 - 2) : 0;
+                const uint64_t range_len = curr2 - curr1;
                 ack.ranges.push_back(AckRange{gap, range_len});
             }
         }
@@ -371,14 +368,14 @@ namespace wavex::network::quic {
                        const unsigned char **out,
                        unsigned char *outlen,
                        const unsigned char *in,
-                       unsigned int inlen,
+                       const unsigned int inlen,
                        void * /*arg*/) -> int {
                         unsigned int i = 0;
                         while (i < inlen) {
                             const unsigned char proto_len = in[i++];
                             if (i + proto_len > inlen) break;
-                            const std::string_view proto(reinterpret_cast<const char *>(in + i), proto_len);
-                            if (proto == "h3" || proto == "h3-29") {
+                            if (const std::string_view proto(reinterpret_cast<const char *>(in + i), proto_len);
+                                proto == "h3" || proto == "h3-29") {
                                 *out = in + i;
                                 *outlen = proto_len;
                                 return SSL_TLSEXT_ERR_OK;
@@ -465,7 +462,7 @@ namespace wavex::network::quic {
 
     std::string QuicConnection::build_quic_transport_params() const {
         std::string out;
-        auto add_varint_param = [&out](uint64_t id, uint64_t val) {
+        auto add_varint_param = [&out](const uint64_t id, const uint64_t val) {
             VarInt::encode(id, out);
             const std::size_t val_len = VarInt::encoded_size(val);
             VarInt::encode(val_len, out);
@@ -500,7 +497,7 @@ namespace wavex::network::quic {
     int QuicConnection::on_tls_crypto_recv(const unsigned char **buf, size_t *bytes_read) {
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
         static constexpr unsigned char kEmptyBuf[1] = {0};
-        auto &r = reassembler_for_level(current_read_level_);
+        const auto &r = reassembler_for_level(current_read_level_);
         last_read_crypto_level_ = current_read_level_;
 
         if (!r.has_available()) {
@@ -665,12 +662,11 @@ namespace wavex::network::quic {
                            : (!tls_ || !tls_->initialized ? &initial_keys_local_ : nullptr);
             }
 
-            std::string packet;
             if (!keys || !keys->valid) {
                 wavex::log::error(
                     "[QUIC] queue_crypto_frame: No valid keys for write_level={}! Dropping crypto packet.",
                     current_write_level_);
-            } else if (!CryptoSuite::protect_packet(*keys, hdr, payload, packet)) {
+            } else if (std::string packet; !CryptoSuite::protect_packet(*keys, hdr, payload, packet)) {
                 wavex::log::error("[QUIC] queue_crypto_frame: CryptoSuite::protect_packet failed for write_level={}!",
                                   current_write_level_);
             } else {
@@ -695,8 +691,7 @@ namespace wavex::network::quic {
             return;
         }
 
-        const int ret = SSL_do_handshake(tls_->ssl);
-        if (ret != 1) {
+        if (const int ret = SSL_do_handshake(tls_->ssl); ret != 1) {
             const int err = SSL_get_error(tls_->ssl, ret);
             if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
                 wavex::log::debug("[QUIC] SSL_do_handshake: waiting for IO (rc={}, err={})", ret, err);
@@ -777,8 +772,7 @@ namespace wavex::network::quic {
         std::string payload;
         serialize_frame(ack, payload);
 
-        std::string packet;
-        if (CryptoSuite::protect_packet(*keys, hdr, payload, packet)) {
+        if (std::string packet; CryptoSuite::protect_packet(*keys, hdr, payload, packet)) {
             pending_outbound_datagrams_.push_back(std::move(packet));
         }
         if (on_outbound_) on_outbound_();
@@ -811,14 +805,14 @@ namespace wavex::network::quic {
         // Decode all acknowledged ranges
         std::vector<std::pair<uint64_t, uint64_t> > acked_ranges;
         uint64_t largest = ack.largest_acknowledged;
-        uint64_t first_range_len = ack.ranges.empty() ? 0 : ack.ranges[0].ack_range_len;
+        const uint64_t first_range_len = ack.ranges.empty() ? 0 : ack.ranges[0].ack_range_len;
         uint64_t smallest = (largest >= first_range_len) ? (largest - first_range_len) : 0;
         acked_ranges.emplace_back(smallest, largest);
 
         for (std::size_t i = 1; i < ack.ranges.size(); ++i) {
             if (smallest < ack.ranges[i].gap + 2) break;
             largest = smallest - ack.ranges[i].gap - 2;
-            uint64_t len = ack.ranges[i].ack_range_len;
+            const uint64_t len = ack.ranges[i].ack_range_len;
             smallest = (largest >= len) ? (largest - len) : 0;
             acked_ranges.emplace_back(smallest, largest);
         }
@@ -883,9 +877,8 @@ namespace wavex::network::quic {
             }
 
             const bool packet_loss = (largest_acked >= pkt.packet_number + CongestionController::kPacketThreshold);
-            const bool time_loss = (now >= pkt.time_sent + time_threshold);
 
-            if (packet_loss || time_loss) {
+            if (const bool time_loss = (now >= pkt.time_sent + time_threshold); packet_loss || time_loss) {
                 wavex::log::debug(
                     "[QUIC] Declaring packet lost: space={}, pn={}, bytes={}, packet_loss={}, time_loss={}",
                     space, pkt.packet_number, pkt.bytes_sent, packet_loss, time_loss);
@@ -942,8 +935,7 @@ namespace wavex::network::quic {
         const auto pto_duration = pto_base * (1ULL << shift);
 
         auto timeout_point = earliest_sent + pto_duration;
-        const auto now = std::chrono::steady_clock::now();
-        if (timeout_point < now) {
+        if (const auto now = std::chrono::steady_clock::now(); timeout_point < now) {
             timeout_point = now;
         }
 
@@ -952,7 +944,7 @@ namespace wavex::network::quic {
         auto weak_self = weak_from_this();
         loss_detection_timer_->async_wait([weak_self](const asio::error_code &timer_ec) {
             if (timer_ec) return;
-            if (auto self = weak_self.lock()) {
+            if (const auto self = weak_self.lock()) {
                 self->on_loss_detection_timeout();
             }
         });
@@ -1005,7 +997,7 @@ namespace wavex::network::quic {
         auto weak_self = std::weak_ptr<QuicConnection>(shared_from_this());
         idle_timer_->async_wait([weak_self](const asio::error_code &timer_ec) {
             if (timer_ec) return;
-            if (auto self = weak_self.lock()) {
+            if (const auto self = weak_self.lock()) {
                 std::lock_guard lk(self->mtx_);
                 if (self->state_ != ConnectionState::Closed) {
                     wavex::log::debug("[QUIC] Idle timeout expired ({} ms) for DCID={} -> closing connection",
@@ -1057,8 +1049,7 @@ namespace wavex::network::quic {
                 }
 
                 if (keys && keys->valid) {
-                    std::string packet;
-                    if (CryptoSuite::protect_packet(*keys, hdr, payload, packet)) {
+                    if (std::string packet; CryptoSuite::protect_packet(*keys, hdr, payload, packet)) {
                         wavex::log::debug(
                             "[QUIC] retransmit_frame: resending CRYPTO frame (space={}, new_pn={}, bytes={})",
                             space_index(hdr.type), hdr.packet_number, packet.size());
@@ -1068,8 +1059,7 @@ namespace wavex::network::quic {
                 }
             } else if constexpr (std::is_same_v<T, StreamFrame>) {
                 StreamFrame sf = f;
-                auto it = streams_.find(sf.stream_id);
-                if (it == streams_.end() || !it->second->is_open()) {
+                if (auto it = streams_.find(sf.stream_id); it == streams_.end() || !it->second->is_open()) {
                     return;
                 }
 
@@ -1084,8 +1074,7 @@ namespace wavex::network::quic {
                 hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
 
                 std::string packet;
-                const auto &keys = one_rtt_keys_local_.valid ? one_rtt_keys_local_ : initial_keys_local_;
-                if (CryptoSuite::protect_packet(keys, hdr, payload, packet)) {
+                if (const auto &keys = one_rtt_keys_local_.valid ? one_rtt_keys_local_ : initial_keys_local_; CryptoSuite::protect_packet(keys, hdr, payload, packet)) {
                     wavex::log::debug(
                         "[QUIC] retransmit_frame: resending STREAM frame (sid={}, offset={}, size={}, new_pn={})",
                         sf.stream_id, sf.offset, sf.data.size(), hdr.packet_number);
@@ -1105,8 +1094,7 @@ namespace wavex::network::quic {
                 serialize_frame(hdf, payload);
 
                 const auto &keys = one_rtt_keys_local_.valid ? one_rtt_keys_local_ : initial_keys_local_;
-                std::string packet;
-                if (CryptoSuite::protect_packet(keys, hdr, payload, packet)) {
+                if (std::string packet; CryptoSuite::protect_packet(keys, hdr, payload, packet)) {
                     wavex::log::debug("[QUIC] retransmit_frame: resending HANDSHAKE_DONE frame (new_pn={})",
                                       hdr.packet_number);
                     track_sent_packet(PacketType::OneRTT, hdr.packet_number, packet.size(), {hdf});
@@ -1156,8 +1144,8 @@ namespace wavex::network::quic {
             while (!remaining.empty()) {
                 if (state_ == ConnectionState::Closed) break;
                 PacketHeader hdr;
-                std::size_t hdr_len = 0;
-                if (!unpack_packet_header(remaining, hdr, hdr_len, local_cid_.length())) {
+                if (std::size_t hdr_len = 0;
+                    !unpack_packet_header(remaining, hdr, hdr_len, local_cid_.length())) {
                     wavex::log::debug("[QUIC] handle_datagram: failed to unpack packet header from remaining {} bytes",
                                       remaining.size());
                     break;
@@ -1165,8 +1153,8 @@ namespace wavex::network::quic {
 
                 std::size_t packet_size = remaining.size();
                 if (hdr.is_long && hdr.length > 0) {
-                    const std::size_t expected_size = hdr.pn_offset + static_cast<std::size_t>(hdr.length);
-                    if (expected_size <= remaining.size()) {
+                    if (const std::size_t expected_size = hdr.pn_offset + static_cast<std::size_t>(hdr.length);
+                        expected_size <= remaining.size()) {
                         packet_size = expected_size;
                     }
                 }
@@ -1251,8 +1239,7 @@ namespace wavex::network::quic {
                     }
                 }
 
-                std::vector<Frame> frames;
-                if (parse_frames(plaintext, frames)) {
+                if (std::vector<Frame> frames; parse_frames(plaintext, frames)) {
                     bool is_ack_eliciting = false;
                     bool has_crypto_frame = false;
                     for (const auto &f: frames) {
@@ -1265,8 +1252,7 @@ namespace wavex::network::quic {
                         if (const auto *cf = std::get_if<CryptoFrame>(&f)) {
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
                             if (tls_ && tls_->initialized) {
-                                auto &reassembler = reassembler_for_pkt_type(hdr.type);
-                                if (!reassembler.insert(cf->offset, cf->data)) {
+                                if (auto &reassembler = reassembler_for_pkt_type(hdr.type); !reassembler.insert(cf->offset, cf->data)) {
                                     wavex::log::warn("[QUIC] CRYPTO stream buffer limit exceeded (>64KB) at offset {}",
                                                      cf->offset);
                                     close(TransportError::CryptoBufferExceeded, "CRYPTO buffer limit exceeded");
@@ -1357,8 +1343,8 @@ namespace wavex::network::quic {
                             // B8: Enforce advertised stream count limits (RFC 9000 §4.6)
                             const bool is_bidi = (frame.stream_id & 0x02) == 0x00;
                             const uint64_t stream_idx = frame.stream_id >> 2;
-                            const uint64_t max_allowed = is_bidi ? max_peer_bidi_streams_ : max_peer_uni_streams_;
-                            if (stream_idx >= max_allowed) {
+                            if (const uint64_t max_allowed = is_bidi ? max_peer_bidi_streams_ : max_peer_uni_streams_;
+                                stream_idx >= max_allowed) {
                                 wavex::log::warn("[QUIC] Peer exceeded stream limit: sid={} (idx={}) >= max_allowed={}",
                                                  frame.stream_id, stream_idx, max_allowed);
                                 close(TransportError::StreamLimitError, "Stream limit exceeded");
@@ -1376,6 +1362,7 @@ namespace wavex::network::quic {
                                 cb(stream);
                             } else if (!on_stream_created_) {
                                 // Only queue when server uses the accept_stream() pull API and cap at 128
+                                // ReSharper disable once CppTooWideScopeInitStatement
                                 constexpr std::size_t kMaxAcceptQueueSize = 128;
                                 if (accepted_streams_.size() < kMaxAcceptQueueSize) {
                                     accepted_streams_.push_back(stream);
@@ -1459,8 +1446,7 @@ namespace wavex::network::quic {
         serialize_frame(ack, payload);
 
         std::string packet;
-        const auto &keys = initial_keys_local_;
-        if (CryptoSuite::protect_packet(keys, hdr, payload, packet)) {
+        if (const auto &keys = initial_keys_local_; CryptoSuite::protect_packet(keys, hdr, payload, packet)) {
             pending_outbound_datagrams_.push_back(std::move(packet));
         }
 
@@ -1484,8 +1470,7 @@ namespace wavex::network::quic {
         serialize_frame(hdf, one_rtt_payload);
 
         const auto &keys = one_rtt_keys_local_.valid ? one_rtt_keys_local_ : initial_keys_local_;
-        std::string one_rtt_packet;
-        if (CryptoSuite::protect_packet(keys, one_rtt_hdr, one_rtt_payload, one_rtt_packet)) {
+        if (std::string one_rtt_packet; CryptoSuite::protect_packet(keys, one_rtt_hdr, one_rtt_payload, one_rtt_packet)) {
             track_sent_packet(PacketType::OneRTT, one_rtt_hdr.packet_number, one_rtt_packet.size(), {hdf});
             pending_outbound_datagrams_.push_back(std::move(one_rtt_packet));
             wavex::log::info("[QUIC] HANDSHAKE_DONE sent on 1-RTT (keys_valid={})", one_rtt_keys_local_.valid);
@@ -1520,8 +1505,7 @@ namespace wavex::network::quic {
 
     std::shared_ptr<QuicStream> QuicConnection::get_or_create_stream(const uint64_t stream_id) {
         std::lock_guard lock(mtx_);
-        auto it = streams_.find(stream_id);
-        if (it != streams_.end()) return it->second;
+        if (const auto it = streams_.find(stream_id); it != streams_.end()) return it->second;
 
         auto stream = std::make_shared<QuicStream>(shared_from_this(), stream_id, executor_);
         streams_[stream_id] = stream;
@@ -1531,8 +1515,7 @@ namespace wavex::network::quic {
     void QuicConnection::close_stream(const uint64_t stream_id) {
         std::shared_ptr<QuicStream> stream_to_close; {
             std::lock_guard lock(mtx_);
-            auto it = streams_.find(stream_id);
-            if (it != streams_.end()) {
+            if (const auto it = streams_.find(stream_id); it != streams_.end()) {
                 stream_to_close = it->second;
                 streams_.erase(it);
                 stream_send_offsets_.erase(stream_id);
@@ -1597,6 +1580,7 @@ namespace wavex::network::quic {
         if (state_ == ConnectionState::Closed) return;
 
         // MTU packetization: safe stream frame payload fitting inside typical network MTU (RFC 9000 §14.1)
+        // ReSharper disable once CppTooWideScopeInitStatement
         constexpr std::size_t kMaxStreamFramePayload = 1150;
 
         for (auto &[sid, queue]: stream_send_queues_) {
@@ -1614,8 +1598,8 @@ namespace wavex::network::quic {
 
                 // Anti-amplification limit (D1, RFC 9000 §8.1)
                 if (is_server_ && !peer_address_validated_) {
-                    const uint64_t max_allowed_send = 3 * (std::max<uint64_t>)(cumulative_bytes_received_, 1200);
-                    if (cumulative_bytes_sent_ + 100 > max_allowed_send) {
+                    if (const uint64_t max_allowed_send = 3 * (std::max<uint64_t>)(cumulative_bytes_received_, 1200);
+                        cumulative_bytes_sent_ + 100 > max_allowed_send) {
                         wavex::log::debug(
                             "[QUIC] Anti-amplification 3x limit reached (sent={} > 3*recv={}), suppressing outbound",
                             cumulative_bytes_sent_, cumulative_bytes_received_);
@@ -1665,8 +1649,8 @@ namespace wavex::network::quic {
                 hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
 
                 std::string packet;
-                const auto &keys = one_rtt_keys_local_.valid ? one_rtt_keys_local_ : initial_keys_local_;
-                if (CryptoSuite::protect_packet(keys, hdr, payload, packet)) {
+                if (const auto &keys = one_rtt_keys_local_.valid ? one_rtt_keys_local_ : initial_keys_local_;
+                    CryptoSuite::protect_packet(keys, hdr, payload, packet)) {
                     sf.owned_data = std::make_shared<const std::string>(sf.data);
                     sf.data = *sf.owned_data;
                     track_sent_packet(PacketType::OneRTT, hdr.packet_number, packet.size(), {sf});
@@ -1687,7 +1671,7 @@ namespace wavex::network::quic {
     }
 
     uint64_t QuicConnection::open_unidirectional_stream() {
-        auto stream = create_stream(false);
+        const auto stream = create_stream(false);
         return stream->stream_id();
     }
 
@@ -1831,8 +1815,8 @@ namespace wavex::network::quic {
             hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
 
             std::string packet;
-            const auto &keys = one_rtt_keys_local_.valid ? one_rtt_keys_local_ : initial_keys_local_;
-            if (CryptoSuite::protect_packet(keys, hdr, payload, packet)) {
+            if (const auto &keys = one_rtt_keys_local_.valid ? one_rtt_keys_local_ : initial_keys_local_;
+                CryptoSuite::protect_packet(keys, hdr, payload, packet)) {
                 pending_outbound_datagrams_.push_back(std::move(packet));
             }
             open_streams.reserve(streams_.size());

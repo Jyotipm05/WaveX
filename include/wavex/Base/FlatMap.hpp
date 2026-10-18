@@ -66,7 +66,7 @@ namespace wavex::base {
             // ─── 2. Constructors ─────────────────────────────────────────────
             iterator() = default;
 
-            iterator(const FlatMap *m, size_type i) : map(m), idx(i) {
+            iterator(const FlatMap *m, const size_type i) : map(m), idx(i) {
             }
 
             // ─── 3. Member Functions ─────────────────────────────────────────
@@ -135,8 +135,7 @@ namespace wavex::base {
          */
         [[nodiscard]] iterator find_ci(const std::string_view key) const noexcept {
             for (size_type i = 0; i < size_; ++i) {
-                const std::string_view k(pair_at(i).first);
-                if (k.size() == key.size()) {
+                if (const std::string_view k(pair_at(i).first); k.size() == key.size()) {
                     bool match = true;
                     for (size_type c = 0; c < k.size(); ++c) {
                         if (std::tolower(static_cast<unsigned char>(k[c])) !=

@@ -83,8 +83,8 @@ namespace wavex::engine {
                 std::size_t start = 1;
                 while (start < normalized.size()) {
                     const std::size_t end = normalized.find('/', start);
-                    const std::size_t actual_end = (end == std::string_view::npos) ? normalized.size() : end;
-                    if (actual_end != start) {
+                    if (const std::size_t actual_end = (end == std::string_view::npos) ? normalized.size() : end;
+                        actual_end != start) {
                         if (seg_count < seg_buf.size()) [[likely]] {
                             seg_buf[seg_count++] = normalized.substr(start, actual_end - start);
                         } else [[unlikely]] {

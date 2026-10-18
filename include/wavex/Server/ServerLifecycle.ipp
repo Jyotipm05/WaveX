@@ -39,9 +39,8 @@ namespace wavex::server {
 
     template<typename Codec, typename RouterType>
     void Server<Codec, RouterType>::run() {
-        ServerState expected = ServerState::Stopped;
-        if (!state_.compare_exchange_strong(expected, ServerState::Running,
-                                            std::memory_order_acq_rel)) [[unlikely]] {
+        if (auto expected = ServerState::Stopped; !state_.compare_exchange_strong(expected, ServerState::Running,
+                                                                                         std::memory_order_acq_rel)) [[unlikely]] {
             std::cerr << "Critical: Duplicate run() invocation detected!\n";
             return;
         }
@@ -138,13 +137,13 @@ namespace wavex::server {
     }
 
     template<typename Codec, typename RouterType>
-    void Server<Codec, RouterType>::shutdown(std::chrono::milliseconds timeout) {
+    void Server<Codec, RouterType>::shutdown(const std::chrono::milliseconds timeout) {
         exit(timeout);
     }
 
     template<typename Codec, typename RouterType>
     void Server<Codec, RouterType>::attach_shutdown_event(base::ShutdownEvent &event) {
-        event.subscribe([this](std::chrono::milliseconds timeout) {
+        event.subscribe([this](const std::chrono::milliseconds timeout) {
             exit(timeout);
         }).detach();
     }

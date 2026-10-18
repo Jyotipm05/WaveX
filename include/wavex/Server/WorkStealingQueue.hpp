@@ -100,15 +100,16 @@ namespace wavex::server {
             requires (!std::is_same_v<std::decay_t<F>, InlineTask> &&
                       !std::is_same_v<std::decay_t<F>, std::nullptr_t> &&
                       std::is_invocable_v<std::decay_t<F>&>)
+        // ReSharper disable once CppNonExplicitConvertingConstructor
         InlineTask(F &&f) {
             using DecayF = std::decay_t<F>;
             if constexpr (sizeof(DecayF) <= Capacity && alignof(DecayF) <= alignof(std::max_align_t)) {
                 ::new (static_cast<void*>(storage_)) DecayF(std::forward<F>(f));
                 invoker_ = [](void *ptr) {
-                    (*reinterpret_cast<DecayF *>(ptr))();
+                    (*static_cast<DecayF *>(ptr))();
                 };
                 manager_ = [](Op op, void *src, void *dst) noexcept {
-                    auto *src_fn = reinterpret_cast<DecayF *>(src);
+                    auto *src_fn = static_cast<DecayF *>(src);
                     if (op == Op::Destroy) {
                         src_fn->~DecayF();
                     } else if (op == Op::Move) {
@@ -120,16 +121,16 @@ namespace wavex::server {
                 auto *heap_ptr = new DecayF(std::forward<F>(f));
                 *reinterpret_cast<DecayF **>(storage_) = heap_ptr;
                 invoker_ = [](void *ptr) {
-                    auto *heap_ptr = *reinterpret_cast<DecayF **>(ptr);
+                    auto *heap_ptr = *static_cast<DecayF **>(ptr);
                     (*heap_ptr)();
                 };
                 manager_ = [](Op op, void *src, void *dst) noexcept {
-                    auto **src_ptr = reinterpret_cast<DecayF **>(src);
+                    auto **src_ptr = static_cast<DecayF **>(src);
                     if (op == Op::Destroy) {
                         delete *src_ptr;
                         *src_ptr = nullptr;
                     } else if (op == Op::Move) {
-                        auto **dst_ptr = reinterpret_cast<DecayF **>(dst);
+                        auto **dst_ptr = static_cast<DecayF **>(dst);
                         *dst_ptr = *src_ptr;
                         *src_ptr = nullptr;
                     }

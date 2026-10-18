@@ -50,9 +50,9 @@ namespace wavex::base {
 
     public:
         // ─── 2. Constructors & Destructor ────────────────────────────────────
-        Subscription() noexcept = default;
+        explicit Subscription() noexcept = default;
 
-        Subscription(std::function<void()> unbind) noexcept
+        explicit Subscription(std::function<void()> unbind) noexcept
             : unbind_(std::move(unbind)), active_(true) {
         }
 
@@ -129,7 +129,7 @@ namespace wavex::base {
 
             ListenerEntry() = default;
 
-            ListenerEntry(SubscriptionId sid, Handler h)
+            ListenerEntry(const SubscriptionId sid, Handler h)
                 : handler(std::move(h)), id(sid) {
             }
         };
@@ -339,7 +339,7 @@ namespace wavex::base {
         void publish(const EventType &event) {
             std::shared_ptr<Event<const EventType &> > holder_copy; {
                 std::lock_guard<std::mutex> lock(mutex_);
-                auto it = channels_.find(typeid(EventType));
+                const auto it = channels_.find(typeid(EventType));
                 if (it == channels_.end()) [[unlikely]] return;
                 holder_copy = std::static_pointer_cast<Event<const EventType &> >(it->second);
             }
@@ -357,7 +357,7 @@ namespace wavex::base {
         template<typename EventType>
         bool unsubscribe(SubscriptionId id) {
             std::lock_guard<std::mutex> lock(mutex_);
-            auto it = channels_.find(typeid(EventType));
+            const auto it = channels_.find(typeid(EventType));
             if (it == channels_.end()) return false;
             auto holder = std::static_pointer_cast<Event<const EventType &> >(it->second);
             return holder->unsubscribe(id);
@@ -369,7 +369,7 @@ namespace wavex::base {
         template<typename EventType>
         [[nodiscard]] std::size_t subscriber_count() const {
             std::lock_guard<std::mutex> lock(mutex_);
-            auto it = channels_.find(std::type_index(typeid(EventType)));
+            const auto it = channels_.find(std::type_index(typeid(EventType)));
             if (it == channels_.end()) return 0;
             auto holder = std::static_pointer_cast<Event<const EventType &> >(it->second);
             return holder->subscriber_count();
@@ -395,7 +395,7 @@ namespace wavex::base {
         template<typename EventType>
         Event<const EventType &> &get_or_create_holder() {
             const auto key = std::type_index(typeid(EventType));
-            auto it = channels_.find(key);
+            const auto it = channels_.find(key);
             if (it == channels_.end()) {
                 auto holder = std::make_shared<Event<const EventType &> >();
                 channels_[key] = holder;
@@ -421,7 +421,7 @@ namespace wavex::base {
         // ─── 2. Constructors & Destructor ────────────────────────────────────
         ServerShutdownEvent() = default;
 
-        explicit ServerShutdownEvent(std::chrono::milliseconds t) : timeout(t) {
+        explicit ServerShutdownEvent(const std::chrono::milliseconds t) : timeout(t) {
         }
 
         ~ServerShutdownEvent() = default;

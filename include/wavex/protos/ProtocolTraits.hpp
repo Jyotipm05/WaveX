@@ -72,7 +72,7 @@ namespace wavex::protos {
          * @return true to continue, false to drop the connection.
          */
         template<typename Stream>
-        static asio::awaitable<bool> on_connection_start(Stream &stream, std::string &stream_buf) {
+        static asio::awaitable<bool> on_connection_start([[maybe_unused]] Stream &stream, [[maybe_unused]] std::string &stream_buf) {
             co_return true;
         }
 
@@ -80,7 +80,7 @@ namespace wavex::protos {
          * @brief Decide whether the connection stays open after this request.
          */
         template<typename Request>
-        static bool keep_alive(const Request &req, unsigned request_count, unsigned max_requests) {
+        static bool keep_alive(const Request &req, const unsigned request_count, const unsigned max_requests) {
             return req.should_keep_alive() && (request_count < max_requests);
         }
 
@@ -123,13 +123,13 @@ struct wavex::protos::protocol_traits<wavex::protos::http::http1codec> {
     }
 
     template<typename Request>
-    static bool keep_alive(const Request &req, unsigned request_count, unsigned max_requests) {
+    static bool keep_alive(const Request &req, const unsigned request_count, const unsigned max_requests) {
         return req.should_keep_alive() && (request_count < max_requests);
     }
 
     template<typename Request, typename Response>
-    static void prepare_response(const Request &, Response &res, bool keep,
-                                 const unsigned timeout_sec, unsigned remaining,
+    static void prepare_response(const Request &, Response &res, const bool keep,
+                                 const unsigned timeout_sec, const unsigned remaining,
                                  const unsigned short alt_svc_port = 0) {
         if (keep) {
             res.set("Connection", "keep-alive");
@@ -149,7 +149,7 @@ struct wavex::protos::protocol_traits<wavex::protos::http::http1codec> {
         SSL_CTX_set_alpn_select_cb(
             ctx,
             [](SSL *, const unsigned char **out, unsigned char *outLen,
-               const unsigned char *in, unsigned int inLen, void *) -> int {
+               const unsigned char *in, const unsigned int inLen, void *) -> int {
                 const unsigned char *p = in;
                 while (p < in + inLen) {
                     const unsigned char len = *p++;
@@ -226,7 +226,7 @@ struct wavex::protos::protocol_traits<wavex::protos::http::http2codec> {
     /// RFC 7540 §8.1.2.2 forbids Connection/Keep-Alive headers in HTTP/2.
     template<typename Request, typename Response>
     static void prepare_response(const Request &, Response &res, bool, unsigned, unsigned,
-                                 unsigned short alt_svc_port = 0) {
+                                 const unsigned short alt_svc_port = 0) {
         if (alt_svc_port > 0 && !res.header("alt-svc")) {
             const auto port_str = std::to_string(alt_svc_port);
             res.set("alt-svc", "h3=\":" + port_str + "\"; ma=2592000,h3-29=\":" + port_str + "\"; ma=2592000");
@@ -238,7 +238,7 @@ struct wavex::protos::protocol_traits<wavex::protos::http::http2codec> {
         SSL_CTX_set_alpn_select_cb(
             ctx,
             [](SSL *, const unsigned char **out, unsigned char *outLen,
-               const unsigned char *in, unsigned int inLen, void *) -> int {
+               const unsigned char *in, const unsigned int inLen, void *) -> int {
                 const unsigned char *p = in;
                 const unsigned char *http11_start = nullptr;
                 while (p < in + inLen) {
@@ -342,7 +342,7 @@ struct wavex::protos::protocol_traits<wavex::protos::http::http3codec> {
         SSL_CTX_set_alpn_select_cb(
             ctx,
             [](SSL *, const unsigned char **out, unsigned char *outLen,
-               const unsigned char *in, unsigned int inLen, void *) -> int {
+               const unsigned char *in, const unsigned int inLen, void *) -> int {
                 const unsigned char *p = in;
                 const unsigned char *h2_start = nullptr;
                 const unsigned char *http11_start = nullptr;

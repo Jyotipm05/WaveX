@@ -25,7 +25,7 @@ namespace wavex::url {
         while (!qs.empty()) {
             // Split off the next key=value pair at '&'
             const size_t amp = qs.find('&');
-            const std::string_view pair = (amp != std::string_view::npos)
+            const std::string_view pair = amp != std::string_view::npos
                                               ? qs.substr(0, amp)
                                               : qs;
 
@@ -112,8 +112,8 @@ namespace wavex::url {
         // 3. Path
         if (pos < raw.size() && raw[pos] == '/') {
             const size_t path_end = [&] {
-                size_t e = raw.find_first_of("?#", pos);
-                return (e == std::string_view::npos) ? raw.size() : e;
+                const size_t e = raw.find_first_of("?#", pos);
+                return e == std::string_view::npos ? raw.size() : e;
             }();
             url.path = std::string(raw.substr(pos, path_end - pos));
             pos = path_end;
@@ -123,8 +123,8 @@ namespace wavex::url {
         if (pos < raw.size() && raw[pos] == '?') {
             ++pos;
             const size_t query_end = [&] {
-                size_t e = raw.find('#', pos);
-                return (e == std::string_view::npos) ? raw.size() : e;
+                const size_t e = raw.find('#', pos);
+                return e == std::string_view::npos ? raw.size() : e;
             }();
             url.query = std::string(raw.substr(pos, query_end - pos));
             pos = query_end;

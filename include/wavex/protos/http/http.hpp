@@ -133,16 +133,16 @@ namespace wavex::protos::http {
     }
 
     // ─── HTTP/2 Type Aliases ──────────────────────────────────────────────────────
-    using Http2Request = HttpRequest<wavex::protos::http::http2codec>;
+    using Http2Request = HttpRequest<http2codec>;
     using http2request = Http2Request;
-    using Http2Response = HttpResponse<wavex::protos::http::http2codec>;
+    using Http2Response = HttpResponse<http2codec>;
     using http2response = Http2Response;
 
     // ─── HTTP/3 Type Aliases ──────────────────────────────────────────────────────
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
-    using Http3Request = HttpRequest<wavex::protos::http::http3codec>;
+    using Http3Request = HttpRequest<http3codec>;
     using http3request = Http3Request;
-    using Http3Response = HttpResponse<wavex::protos::http::http3codec>;
+    using Http3Response = HttpResponse<http3codec>;
     using http3response = Http3Response;
 #endif
 } // namespace wavex::protos::http

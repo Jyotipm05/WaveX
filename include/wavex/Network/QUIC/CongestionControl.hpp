@@ -40,8 +40,8 @@ namespace wavex::network::quic {
         constexpr RttStats() = default;
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
-        void update_rtt(std::chrono::microseconds latest,
-                        std::chrono::microseconds ack_delay = std::chrono::microseconds{0}) noexcept {
+        void update_rtt(const std::chrono::microseconds latest,
+                        const std::chrono::microseconds ack_delay = std::chrono::microseconds{0}) noexcept {
             latest_rtt = latest;
             if (min_rtt > latest) {
                 min_rtt = latest;
@@ -85,15 +85,15 @@ namespace wavex::network::quic {
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         SentPacket() = default;
 
-        SentPacket(uint64_t pn, std::size_t bytes, PacketType pt,
-                   std::chrono::steady_clock::time_point ts = std::chrono::steady_clock::now())
+        SentPacket(const uint64_t pn, const std::size_t bytes, const PacketType pt,
+                   const std::chrono::steady_clock::time_point ts = std::chrono::steady_clock::now())
             : time_sent(ts), packet_number(pn), bytes_sent(bytes),
               packet_type(pt), ack_eliciting(true), in_flight(true) {
         }
 
-        SentPacket(uint64_t pn, std::size_t bytes, PacketType pt,
+        SentPacket(const uint64_t pn, const std::size_t bytes, const PacketType pt,
                    std::vector<Frame> frames,
-                   std::chrono::steady_clock::time_point ts = std::chrono::steady_clock::now())
+                   const std::chrono::steady_clock::time_point ts = std::chrono::steady_clock::now())
             : time_sent(ts), packet_number(pn), bytes_sent(bytes),
               retransmittable_frames(std::move(frames)),
               packet_type(pt),
@@ -141,13 +141,13 @@ namespace wavex::network::quic {
             return bytes_in_flight_ < congestion_window_;
         }
 
-        void on_packet_sent(uint64_t bytes, bool in_flight = true) noexcept {
+        void on_packet_sent(const uint64_t bytes, const bool in_flight = true) noexcept {
             if (in_flight) {
                 bytes_in_flight_ += bytes;
             }
         }
 
-        void on_packet_acked(uint64_t bytes) noexcept {
+        void on_packet_acked(const uint64_t bytes) noexcept {
             if (bytes_in_flight_ >= bytes) {
                 bytes_in_flight_ -= bytes;
             } else {
@@ -165,8 +165,8 @@ namespace wavex::network::quic {
             }
         }
 
-        void on_congestion_event(std::chrono::steady_clock::time_point sent_time,
-                                 std::chrono::steady_clock::time_point event_time = std::chrono::steady_clock::now())
+        void on_congestion_event(const std::chrono::steady_clock::time_point sent_time,
+                                 const std::chrono::steady_clock::time_point event_time = std::chrono::steady_clock::now())
             noexcept {
             if (sent_time <= recovery_start_time_) {
                 return; // Already accounted for in current recovery period
@@ -183,8 +183,8 @@ namespace wavex::network::quic {
             in_recovery_ = false;
         }
 
-        void update_rtt(std::chrono::microseconds rtt_sample,
-                        std::chrono::microseconds ack_delay = std::chrono::microseconds{0}) noexcept {
+        void update_rtt(const std::chrono::microseconds rtt_sample,
+                        const std::chrono::microseconds ack_delay = std::chrono::microseconds{0}) noexcept {
             rtt_stats_.update_rtt(rtt_sample, ack_delay);
         }
     };

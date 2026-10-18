@@ -86,7 +86,7 @@ namespace wavex::server {
             return std::max<std::size_t>(1, default_max_workers() / 4);
         }
 
-        void set_limits(std::size_t min_w, std::size_t max_w) {
+        void set_limits(const std::size_t min_w, const std::size_t max_w) {
             min_workers = min_w;
             max_workers = max_w;
             if (upper_thresholds.size() < max_workers - 1)
@@ -120,12 +120,8 @@ namespace wavex::server {
         explicit WorkerNode(const std::size_t worker_id)
             : io_ctx(std::make_shared<asio::io_context>()),
               queue(std::make_unique<LocalQueue>()),
-              thread(),
               work_guard(asio::make_work_guard(*io_ctx)),
-              id(worker_id),
-              is_retiring(false),
-              is_busy(false),
-              stop_requested(false) {
+              id(worker_id) {
         }
 
         ~WorkerNode() = default;
@@ -143,7 +139,6 @@ namespace wavex::server {
      * shared InjectorQueue for overflow and external task submission.
      */
     class ThreadPool {
-    private:
         // ─── 1. Nested Types & Constants ─────────────────────────────────────
         static constexpr std::size_t kMaxWorkerSlots = 128;
 
@@ -199,7 +194,7 @@ namespace wavex::server {
                 return;
             }
             const std::size_t idx = next_worker_idx_.fetch_add(1, std::memory_order_relaxed) % count;
-            WorkerNode *w = nullptr;
+            const WorkerNode *w = nullptr;
             if (idx < kMaxWorkerSlots) [[likely]] {
                 w = worker_table_[idx].load(std::memory_order_acquire);
             }
@@ -240,7 +235,7 @@ namespace wavex::server {
          */
         template<typename F>
         void post_all(F fn) {
-            std::lock_guard<std::mutex> lock(workers_mutex_);
+            std::lock_guard lock(workers_mutex_);
             for (const auto &w: workers_) {
                 if (w && w->io_ctx) {
                     asio::post(*w->io_ctx, fn);
@@ -260,14 +255,14 @@ namespace wavex::server {
 
         /// Get current scale-down cooldown counter (for diagnostics/testing).
         [[nodiscard]] std::size_t cooldown_counter() const {
-            std::lock_guard<std::mutex> lock(workers_mutex_);
+            std::lock_guard lock(workers_mutex_);
             return scale_down_cooldown_counter_;
         }
 
         // ── Lifecycle ──────────────────────────────────────────────────────
 
         void start_pool() {
-            std::lock_guard<std::mutex> lock(workers_mutex_);
+            std::lock_guard lock(workers_mutex_);
             for (std::size_t i = 0; i < config_.min_workers; ++i)
                 add_worker_unlocked();
             pool_stopping_ = false;
@@ -275,7 +270,7 @@ namespace wavex::server {
         }
 
         void stop_pool() { {
-                std::lock_guard<std::mutex> lock(monitor_mutex_);
+                std::lock_guard lock(monitor_mutex_);
                 pool_stopping_ = true;
             }
             cv_monitor_.notify_all();
@@ -283,7 +278,7 @@ namespace wavex::server {
                 monitor_thread_.join();
 
             std::vector<std::shared_ptr<WorkerNode> > to_join; {
-                std::lock_guard<std::mutex> lock(workers_mutex_);
+                std::lock_guard lock(workers_mutex_);
                 worker_count_.store(0, std::memory_order_release);
                 for (std::size_t i = 0; i < kMaxWorkerSlots; ++i) {
                     worker_table_[i].store(nullptr, std::memory_order_relaxed);
@@ -296,7 +291,7 @@ namespace wavex::server {
                 to_join = std::move(workers_);
             }
 
-            for (auto &w: to_join) {
+            for (const auto &w: to_join) {
                 if (w->thread.joinable())
                     w->thread.join();
             }
@@ -311,7 +306,7 @@ namespace wavex::server {
         }
 
         void notify_monitor() { {
-                std::lock_guard<std::mutex> lock(monitor_mutex_);
+                std::lock_guard lock(monitor_mutex_);
                 monitor_signal_ = true;
             }
             cv_monitor_.notify_one();
@@ -320,8 +315,7 @@ namespace wavex::server {
         void add_worker_unlocked() {
             const std::size_t new_id = workers_.size() + 1;
             auto worker = std::make_shared<WorkerNode>(new_id);
-            const std::size_t slot = workers_.size();
-            if (slot < kMaxWorkerSlots) {
+            if (const std::size_t slot = workers_.size(); slot < kMaxWorkerSlots) {
                 worker_table_[slot].store(worker.get(), std::memory_order_release);
                 worker_count_.store(slot + 1, std::memory_order_release);
             }
@@ -346,13 +340,11 @@ namespace wavex::server {
 
                 // ── 2. Steal from a random peer's LocalQueue (FIFO, lock-free)
                 {
-                    const std::size_t n = worker_count_.load(std::memory_order_acquire);
-                    if (n > 1) {
+                    if (const std::size_t n = worker_count_.load(std::memory_order_acquire); n > 1) {
                         // Pick a random start to avoid thundering-herd on worker 0.
                         const std::size_t start = rng() % n;
                         for (std::size_t i = 0; i < n; ++i) {
-                            auto *other = worker_table_[(start + i) % n].load(std::memory_order_acquire);
-                            if (other && other->id != w->id && !other->is_retiring.load(std::memory_order_relaxed)) {
+                            if (const auto *other = worker_table_[(start + i) % n].load(std::memory_order_acquire); other && other->id != w->id && !other->is_retiring.load(std::memory_order_relaxed)) {
                                 if (auto stolen = other->queue->steal_half(*w->queue)) {
                                     w->is_busy = true;
                                     (*stolen)();
@@ -396,7 +388,7 @@ namespace wavex::server {
 
         void monitor_loop() {
             while (true) {
-                std::unique_lock<std::mutex> lock(monitor_mutex_);
+                std::unique_lock lock(monitor_mutex_);
                 cv_monitor_.wait_for(lock, config_.check_interval, [this] {
                     return pool_stopping_ || monitor_signal_;
                 });
@@ -412,7 +404,7 @@ namespace wavex::server {
 
         void check_and_scale() {
             std::shared_ptr<WorkerNode> retiring_worker = nullptr; {
-                std::lock_guard<std::mutex> lock(workers_mutex_);
+                std::lock_guard lock(workers_mutex_);
                 if (workers_.empty()) return;
 
                 std::size_t total_queue_depth = injector_.size();

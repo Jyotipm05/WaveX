@@ -73,6 +73,7 @@ namespace wavex::network::quic {
         [[nodiscard]] static auto protocol() noexcept -> int { return IPPROTO_UDP; }
         [[nodiscard]] auto family() const noexcept -> int { return family_; }
 
+        // ReSharper disable once CppNonExplicitConversionOperator
         [[nodiscard]] operator asio::ip::udp() const noexcept {
             return family_ == PF_INET6 ? asio::ip::udp::v6() : asio::ip::udp::v4();
         }
@@ -168,7 +169,7 @@ namespace wavex::network::quic {
 
         void close(std::error_code &ec) noexcept;
 
-        void cancel();
+        void cancel() const;
 
         void cancel(std::error_code &ec) const noexcept;
 
@@ -264,8 +265,8 @@ namespace wavex::network::quic {
             std::shared_ptr<QuicStream> stream,
             std::shared_ptr<QuicConnection> conn,
             std::shared_ptr<OutboundDriver> driver,
-            endpoint_type remote_ep,
-            endpoint_type local_ep);
+            const endpoint_type &remote_ep,
+            const endpoint_type &local_ep);
 
         [[nodiscard]] std::shared_ptr<QuicStream> stream() const noexcept { return stream_; }
         [[nodiscard]] std::shared_ptr<QuicConnection> connection() const noexcept { return conn_; }
@@ -429,7 +430,7 @@ namespace wavex::network::quic {
         void flush_outbound(const std::shared_ptr<QuicConnection> &conn);
 
         void on_stream_ready(std::shared_ptr<QuicStream> stream, std::shared_ptr<QuicConnection> conn,
-                             endpoint_type peer_ep);
+                             const endpoint_type &peer_ep);
     };
 
     // ─── 12. Type Aliases (Asio TCP/UDP Convention) ─────────────────────────────

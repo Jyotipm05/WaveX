@@ -54,6 +54,7 @@ namespace wavex::server {
 
         template<typename F>
             requires (!std::is_same_v<std::decay_t<F>, BlockingTask> && std::is_invocable_v<F>)
+        // ReSharper disable once CppNonExplicitConvertingConstructor
         BlockingTask(F &&f) : self_(std::make_unique<Model<std::decay_t<F> > >(std::forward<F>(f))) {
         }
 
@@ -91,7 +92,7 @@ namespace wavex::server {
 
     public:
         // ─── 2. Constructors & Destructor ────────────────────────────────────
-        explicit RingQueue(std::size_t initial_capacity = 256)
+        explicit RingQueue(const std::size_t initial_capacity = 256)
             : buffer_(),
               capacity_(std::max<std::size_t>(16, round_up_pow2(initial_capacity))),
               mask_(capacity_ - 1),
@@ -201,9 +202,9 @@ namespace wavex::server {
     public:
         // ─── 3. Constructors & Destructor ────────────────────────────────────
         explicit BlockingThreadPool(
-            std::size_t min_threads = 2,
-            std::size_t max_threads = 128,
-            std::chrono::milliseconds idle_timeout = std::chrono::milliseconds(10000))
+            const std::size_t min_threads = 2,
+            const std::size_t max_threads = 128,
+            const std::chrono::milliseconds idle_timeout = std::chrono::milliseconds(10000))
             : min_threads_(std::max<std::size_t>(1, min_threads)),
               max_threads_(std::max<std::size_t>(min_threads_, max_threads)),
               idle_timeout_(idle_timeout),

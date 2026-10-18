@@ -15,18 +15,18 @@
 
 namespace wavex::server {
     template<typename Codec, typename RouterType>
-    void Server<Codec, RouterType>::enable_signal_handling(bool enable) noexcept {
+    void Server<Codec, RouterType>::enable_signal_handling(const bool enable) noexcept {
         enable_signals_ = enable;
     }
 
     template<typename Codec, typename RouterType>
-    void Server<Codec, RouterType>::set_exit_on_signal(bool exit_proc) noexcept {
+    void Server<Codec, RouterType>::set_exit_on_signal(const bool exit_proc) noexcept {
         exit_on_signal_ = exit_proc;
     }
 
     template<typename Codec, typename RouterType>
     void Server<Codec, RouterType>::set_shutdown_timeout(
-        std::chrono::milliseconds timeout) noexcept {
+        const std::chrono::milliseconds timeout) noexcept {
         shutdown_timeout_ = timeout;
     }
 
@@ -62,7 +62,7 @@ namespace wavex::server {
 
     template<typename Codec, typename RouterType>
     void Server<Codec, RouterType>::set_keep_alive_timeout(
-        std::chrono::seconds timeout) noexcept {
+        const std::chrono::seconds timeout) noexcept {
         keep_alive_timeout_ = timeout;
     }
 
@@ -73,7 +73,7 @@ namespace wavex::server {
 
     template<typename Codec, typename RouterType>
     void Server<Codec, RouterType>::set_max_keep_alive_requests(
-        unsigned max_requests) noexcept {
+        const unsigned max_requests) noexcept {
         max_keep_alive_requests_ = max_requests;
     }
 
@@ -83,7 +83,7 @@ namespace wavex::server {
     }
 
     template<typename Codec, typename RouterType>
-    void Server<Codec, RouterType>::set_max_request_size(size_t size) noexcept {
+    void Server<Codec, RouterType>::set_max_request_size(const size_t size) noexcept {
         max_request_size_ = size;
     }
 
@@ -93,7 +93,7 @@ namespace wavex::server {
     }
 
     template<typename Codec, typename RouterType>
-    void Server<Codec, RouterType>::set_max_memory_buffer(size_t size) noexcept {
+    void Server<Codec, RouterType>::set_max_memory_buffer(const size_t size) noexcept {
         max_memory_buffer_ = size;
     }
 
@@ -103,7 +103,7 @@ namespace wavex::server {
     }
 
     template<typename Codec, typename RouterType>
-    void Server<Codec, RouterType>::set_max_query_params(std::size_t max) noexcept {
+    void Server<Codec, RouterType>::set_max_query_params(const std::size_t max) noexcept {
         max_query_params_ = max;
     }
 
@@ -113,7 +113,7 @@ namespace wavex::server {
     }
 
     template<typename Codec, typename RouterType>
-    void Server<Codec, RouterType>::set_max_headers(std::size_t max) noexcept {
+    void Server<Codec, RouterType>::set_max_headers(const std::size_t max) noexcept {
         max_headers_ = max;
     }
 
@@ -123,7 +123,7 @@ namespace wavex::server {
     }
 
     template<typename Codec, typename RouterType>
-    void Server<Codec, RouterType>::set_alt_svc_port(unsigned short port) noexcept {
+    void Server<Codec, RouterType>::set_alt_svc_port(const unsigned short port) noexcept {
         alt_svc_port_ = port;
     }
 
@@ -169,8 +169,7 @@ namespace wavex::server {
 
     template<typename Codec, typename RouterType>
     void Server<Codec, RouterType>::set_not_found_page(const std::string &file_path) {
-        std::string body, mime;
-        if (detail::load_not_found_page_file(file_path, body, mime)) {
+        if (std::string body, mime; detail::load_not_found_page_file(file_path, body, mime)) {
             set_not_found(std::move(body), std::move(mime));
             return;
         }

@@ -35,8 +35,7 @@ namespace wavex::server::detail {
         if (!base_dir.empty() && p.is_relative()) {
             p = std::filesystem::path(base_dir) / p;
         }
-        std::error_code ec;
-        if (!wavex::utils::fs_utils::exists(p.string(), ec)) {
+        if (std::error_code ec; !utils::fs_utils::exists(p.string(), ec)) {
             throw std::runtime_error("Server::enable_tls: Certificate file not found: '" + p.string() + "'");
         }
         return p.string();
@@ -50,8 +49,7 @@ namespace wavex::server::detail {
         if (!base_dir.empty() && p.is_relative()) {
             p = std::filesystem::path(base_dir) / p;
         }
-        std::error_code ec;
-        if (!wavex::utils::fs_utils::exists(p.string(), ec)) {
+        if (std::error_code ec; !utils::fs_utils::exists(p.string(), ec)) {
             throw std::runtime_error("Server::enable_tls: Private key file not found: '" + p.string() + "'");
         }
         return p.string();

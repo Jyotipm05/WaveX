@@ -155,7 +155,7 @@ namespace wavex::protos::http {
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         header() = default;
 
-        constexpr header(std::string_view n, std::string_view v) noexcept : name(n), value(v) {
+        constexpr header(const std::string_view n, const std::string_view v) noexcept : name(n), value(v) {
         }
 
         ~header() = default;
@@ -208,10 +208,10 @@ namespace wavex::protos::http {
     };
 
     /** @brief HTTP request message. */
-    struct request : public message_base {
+    struct request : message_base {
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
         std::string_view target{};
-        http::method method_type{method::UNKNOWN};
+        method method_type{method::UNKNOWN};
 
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         request() = default;
@@ -228,7 +228,7 @@ namespace wavex::protos::http {
     };
 
     /** @brief HTTP response message. */
-    struct response : public message_base {
+    struct response : message_base {
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
         std::string_view status_text{"OK"};
         unsigned int status_code{200};
@@ -862,15 +862,15 @@ namespace wavex::protos::http {
      * @brief HTTP/1.x Protocol Codec combining zero-copy parser, encoder, decoder, and developer-friendly facade.
      */
     struct http1codec {
-        using parser = wavex::protos::http::http1::parser;
-        using encoder = wavex::protos::http::http1::encoder;
-        using decoder = wavex::protos::http::http1::decoder;
-        using request = wavex::protos::http::http1::request;
-        using response = wavex::protos::http::http1::response;
+        using parser = parser;
+        using encoder = encoder;
+        using decoder = decoder;
+        using request = request;
+        using response = response;
         using result = parser::result;
 
         static std::string_view status_text_for(const unsigned int code) noexcept {
-            return wavex::protos::http::status_text_for(code);
+            return http::status_text_for(code);
         }
 
         // ─── Developer-Friendly Codec Facade (Symmetrical with http2codec) ───

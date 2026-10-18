@@ -346,11 +346,11 @@ namespace wavex::protos::http {
 
             const size_t num_params = route_params.size();
             std::array<ParamSlice, 32> inline_slices{};
-            std::vector<ParamSlice> heap_slices;
             ParamSlice *slices = nullptr;
             if (num_params <= inline_slices.size()) {
                 slices = inline_slices.data();
             } else {
+                std::vector<ParamSlice> heap_slices;
                 heap_slices.resize(num_params);
                 slices = heap_slices.data();
             }
@@ -623,7 +623,7 @@ namespace wavex::protos::http {
                 path_ = std::string(path_and_query.substr(0, q));
 
                 // Query: parse key=value pairs into FlatMap via contiguous linear buffer
-                std::string_view qs = path_and_query.substr(q + 1);
+                const std::string_view qs = path_and_query.substr(q + 1);
                 query.clear();
                 query_decoded_buf_.clear();
 

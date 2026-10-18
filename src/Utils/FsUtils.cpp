@@ -19,8 +19,7 @@ namespace wavex::utils::fs_utils {
         if (u8_path.empty()) return {};
 #if defined(_WIN32)
         try {
-            const int wlen = ::MultiByteToWideChar(CP_UTF8, 0, u8_path.data(), static_cast<int>(u8_path.size()), nullptr, 0);
-            if (wlen > 0) {
+            if (const int wlen = ::MultiByteToWideChar(CP_UTF8, 0, u8_path.data(), static_cast<int>(u8_path.size()), nullptr, 0); wlen > 0) {
                 std::wstring wpath(static_cast<std::size_t>(wlen), L'\0');
                 ::MultiByteToWideChar(CP_UTF8, 0, u8_path.data(), static_cast<int>(u8_path.size()), wpath.data(), wlen);
                 return std::filesystem::path(wpath);
@@ -46,13 +45,12 @@ namespace wavex::utils::fs_utils {
         try {
             const std::wstring &wpath = p.native();
             if (wpath.empty()) return {};
-            const int u8len = ::WideCharToMultiByte(CP_UTF8, 0, wpath.data(), static_cast<int>(wpath.size()), nullptr, 0, nullptr, nullptr);
-            if (u8len > 0) {
+            if (const int u8len = ::WideCharToMultiByte(CP_UTF8, 0, wpath.data(), static_cast<int>(wpath.size()), nullptr, 0, nullptr, nullptr); u8len > 0) {
                 std::string u8path(static_cast<std::size_t>(u8len), '\0');
                 ::WideCharToMultiByte(CP_UTF8, 0, wpath.data(), static_cast<int>(wpath.size()), u8path.data(), u8len, nullptr, nullptr);
                 return u8path;
             }
-            auto u8 = p.u8string();
+            const auto u8 = p.u8string();
             return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
         } catch (...) {
             return {};
@@ -96,12 +94,12 @@ namespace wavex::utils::fs_utils {
     }
 
     std::string temp_directory_path(std::error_code &ec) noexcept {
-        auto p = std::filesystem::temp_directory_path(ec);
+        const auto p = std::filesystem::temp_directory_path(ec);
         return ec ? "" : to_u8_string(p);
     }
 
     std::string current_path(std::error_code &ec) noexcept {
-        auto p = std::filesystem::current_path(ec);
+        const auto p = std::filesystem::current_path(ec);
         return ec ? "" : to_u8_string(p);
     }
 

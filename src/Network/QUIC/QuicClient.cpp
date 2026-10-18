@@ -39,7 +39,7 @@ namespace wavex::network::quic {
     asio::awaitable<bool> QuicClient::connect(const std::string_view host, const uint16_t port) {
         wavex::log::info("[QuicClient] connect() called to {}:{}", host, port);
         asio::error_code ec;
-        auto addr = asio::ip::make_address(host, ec);
+        const auto addr = asio::ip::make_address(host, ec);
         if (ec) co_return false;
 
         server_endpoint_ = asio::ip::udp::endpoint(addr, port);
@@ -56,9 +56,8 @@ namespace wavex::network::quic {
 
         connection_->set_stream_created_callback([this](std::shared_ptr<QuicStream> stream) {
             if (!stream) return;
-            const uint64_t sid = stream->stream_id();
             // Server-initiated unidirectional stream (sid & 0x03 == 3) per RFC 9000 / RFC 9114
-            if ((sid & 0x03) == 0x03) {
+            if (const uint64_t sid = stream->stream_id(); (sid & 0x03) == 0x03) {
                 asio::co_spawn(io_, [stream]() -> asio::awaitable<void> {
                     char buf[1024];
                     while (stream->is_open()) {
@@ -152,13 +151,12 @@ namespace wavex::network::quic {
     void QuicClient::flush_outbound() {
         if (io_.get_executor().running_in_this_thread()) {
             if (!connection_ || !socket_.is_open()) return;
-            auto datagrams = connection_->poll_outgoing_datagrams();
-            for (auto &dgram: datagrams) {
+            for (auto datagrams = connection_->poll_outgoing_datagrams(); auto &dgram: datagrams) {
                 if (dgram.empty()) continue;
                 auto buf = std::make_shared<std::string>(std::move(dgram));
                 socket_.async_send_to(
                     asio::buffer(*buf), server_endpoint_,
-                    [buf](std::error_code ec, std::size_t bytes_sent) {
+                    [buf](const std::error_code ec, std::size_t bytes_sent) {
                         if (ec && ec != asio::error::operation_aborted) {
                             wavex::log::warn("[QuicClient] send error: {}", ec.message());
                         } else {

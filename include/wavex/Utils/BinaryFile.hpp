@@ -101,7 +101,7 @@ namespace wavex::utils {
         template<typename PathLike>
             requires (!std::is_convertible_v<PathLike, std::string_view>)
         bool open(const PathLike &path, const FileMode mode = FileMode::Read) noexcept {
-            std::string s = fs_utils::to_u8_path_string(path);
+            const std::string s = fs_utils::to_u8_path_string(path);
             return open(std::string_view(s), mode);
         }
 

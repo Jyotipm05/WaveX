@@ -15,7 +15,6 @@
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
 
 #include <cstdint>
-#include <cstddef>
 
 namespace wavex::network::quic {
     // ─── Version Constants ────────────────────────────────────────────────

@@ -28,7 +28,7 @@ namespace wavex::network::quic {
 
     asio::any_io_executor QuicStream::get_executor() const noexcept {
         if (executor_) return executor_;
-        if (auto c = conn_.lock()) {
+        if (const auto c = conn_.lock()) {
             if (auto conn_ex = c->get_executor()) return conn_ex;
         }
         return asio::any_io_executor(asio::system_executor{});
@@ -39,7 +39,7 @@ namespace wavex::network::quic {
     }
 
     std::shared_ptr<void> QuicStream::user_context() const noexcept {
-        if (auto c = conn_.lock()) {
+        if (const auto c = conn_.lock()) {
             return c->user_context();
         }
         return nullptr;
@@ -65,9 +65,9 @@ namespace wavex::network::quic {
         return (fin_sent_ || !is_open_) && (fin_received_ || !is_open_);
     }
 
-    void QuicStream::notify_finished_if_needed() {
+    void QuicStream::notify_finished_if_needed() const {
         if (is_finished()) {
-            if (auto c = conn_.lock()) {
+            if (const auto c = conn_.lock()) {
                 c->close_stream(stream_id_);
             }
         }
@@ -77,7 +77,7 @@ namespace wavex::network::quic {
         ec.clear();
         std::lock_guard lock(mtx_);
         if (pending_read_) {
-            auto cb = std::move(*pending_read_);
+            const auto cb = std::move(*pending_read_);
             pending_read_.reset();
             cb(asio::error::operation_aborted, 0);
         }
@@ -100,7 +100,7 @@ namespace wavex::network::quic {
             }
         }
         if (need_fin) {
-            if (auto conn = conn_.lock()) {
+            if (const auto conn = conn_.lock()) {
                 conn->queue_stream_data(stream_id_, "", true);
             }
         }
@@ -130,7 +130,7 @@ namespace wavex::network::quic {
             }
         }
         if (need_fin) {
-            if (auto conn = conn_.lock()) {
+            if (const auto conn = conn_.lock()) {
                 conn->queue_stream_data(stream_id_, "", true);
             }
         }
@@ -213,7 +213,7 @@ namespace wavex::network::quic {
                     offset = recv_offset_;
                 }
 
-                auto append_bytes = [&](std::string_view chunk) {
+                auto append_bytes = [&](const std::string_view chunk) {
                     if (chunk.empty()) return;
                     in_buffer_.append(chunk);
                     recv_offset_ += chunk.size();
@@ -230,7 +230,7 @@ namespace wavex::network::quic {
                         }
                         if (front.offset + front.data.size() > recv_offset_) {
                             const std::size_t trim = static_cast<std::size_t>(recv_offset_ - front.offset);
-                            std::string_view remaining = std::string_view(front.data).substr(trim);
+                            const std::string_view remaining = std::string_view(front.data).substr(trim);
                             append_bytes(remaining);
                         }
                         pending_inbound_.erase(pending_inbound_.begin());
@@ -253,9 +253,9 @@ namespace wavex::network::quic {
                     std::size_t current_pending = 0;
                     for (const auto &c : pending_inbound_) current_pending += c.data.size();
                     if (current_pending + data.size() <= 16 * 1024 * 1024) {
-                        auto it = std::lower_bound(
+                        const auto it = std::lower_bound(
                             pending_inbound_.begin(), pending_inbound_.end(), offset,
-                            [](const StreamChunk &c, uint64_t off) {
+                            [](const StreamChunk &c, const uint64_t off) {
                                 return c.offset < off;
                             }
                         );
@@ -283,7 +283,7 @@ namespace wavex::network::quic {
     }
 
     std::error_code QuicStream::write_outbound(const std::string_view data, const bool fin) {
-        if (auto conn = conn_.lock()) {
+        if (const auto conn = conn_.lock()) {
             if (fin) {
                 std::lock_guard lock(mtx_);
                 fin_sent_ = true;

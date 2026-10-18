@@ -85,7 +85,6 @@ namespace wavex {
      */
     template<typename... Handlers>
     class StaticChain {
-    private:
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
         std::tuple<Handlers...> handlers_;
 
@@ -173,7 +172,6 @@ namespace wavex {
      */
     template<typename Handler>
     class ConditionalChainable : public Chainable {
-    private:
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
         Handler handler_;
         bool enabled_{true};
@@ -195,7 +193,7 @@ namespace wavex {
         ConditionalChainable &operator=(ConditionalChainable &&) noexcept = default;
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
-        void set_enabled(bool enabled) { enabled_ = enabled; }
+        void set_enabled(const bool enabled) { enabled_ = enabled; }
 
         [[nodiscard]] bool is_enabled() const { return enabled_; }
 
@@ -225,7 +223,7 @@ namespace wavex {
      * @struct KeepAlivePolicy
      */
     template<unsigned TimeoutSec = 5, unsigned MaxRequests = 1000>
-    struct KeepAlivePolicy : public Chainable {
+    struct KeepAlivePolicy : Chainable {
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         KeepAlivePolicy() = default;
 

@@ -31,23 +31,27 @@
 
 namespace wavex::utils {
     namespace detail {
-        struct SpoolTask {
-            std::shared_ptr<TempFileGuard> guard{};
-            std::string_view data{};
+        namespace {
+            struct SpoolTask {
+                std::shared_ptr<TempFileGuard> guard{};
+                std::string_view data{};
 
-            SpoolTask() = default;
+                SpoolTask() = default;
 
-            SpoolTask(std::shared_ptr<TempFileGuard> g, const std::string_view d)
-                : guard(std::move(g)), data(d) {
-            }
-        };
+                SpoolTask(std::shared_ptr<TempFileGuard> g, const std::string_view d)
+                    : guard(std::move(g)), data(d) {
+                }
+            };
+        }
 
-        struct BatchSpoolState {
-            std::atomic<std::size_t> remaining{0};
-            std::atomic<bool> success{true};
+        namespace {
+            struct BatchSpoolState {
+                std::atomic<std::size_t> remaining{0};
+                std::atomic<bool> success{true};
 
-            BatchSpoolState() = default;
-        };
+                BatchSpoolState() = default;
+            };
+        }
 
         static bool case_equals(const std::string_view a, const std::string_view b) noexcept {
             if (a.size() != b.size()) return false;
@@ -62,19 +66,17 @@ namespace wavex::utils {
 
         static std::string extract_boundary(const std::string_view ct) {
             constexpr std::string_view key = "boundary=";
-            auto pos = ct.find(key);
+            const auto pos = ct.find(key);
             if (pos == std::string_view::npos) return "";
 
             std::string_view val = ct.substr(pos + key.size());
             if (val.starts_with('"')) {
                 val.remove_prefix(1);
-                auto end_quote = val.find('"');
-                if (end_quote != std::string_view::npos) {
+                if (const auto end_quote = val.find('"'); end_quote != std::string_view::npos) {
                     val = val.substr(0, end_quote);
                 }
             } else {
-                auto semicolon = val.find(';');
-                if (semicolon != std::string_view::npos) {
+                if (const auto semicolon = val.find(';'); semicolon != std::string_view::npos) {
                     val = val.substr(0, semicolon);
                 }
             }
@@ -93,8 +95,7 @@ namespace wavex::utils {
                 std::string_view line = headers.substr(pos, line_end - pos);
                 if (line.ends_with('\r')) line.remove_suffix(1);
 
-                auto colon = line.find(':');
-                if (colon != std::string_view::npos) {
+                if (const auto colon = line.find(':'); colon != std::string_view::npos) {
                     std::string_view header_name = line.substr(0, colon);
                     while (!header_name.empty() && header_name.back() == ' ') header_name.remove_suffix(1);
 
@@ -112,20 +113,18 @@ namespace wavex::utils {
         }
 
         static std::string_view extract_parameter(const std::string_view header, const std::string_view param_name) {
-            std::string needle = std::string(param_name) + "=";
-            auto pos = header.find(needle);
+            const std::string needle = std::string(param_name) + "=";
+            const auto pos = header.find(needle);
             if (pos == std::string_view::npos) return "";
 
             std::string_view val = header.substr(pos + needle.size());
             if (val.starts_with('"')) {
                 val.remove_prefix(1);
-                auto end_quote = val.find('"');
-                if (end_quote != std::string_view::npos) {
+                if (const auto end_quote = val.find('"'); end_quote != std::string_view::npos) {
                     return val.substr(0, end_quote);
                 }
             } else {
-                auto end_pos = val.find(';');
-                if (end_pos != std::string_view::npos) {
+                if (const auto end_pos = val.find(';'); end_pos != std::string_view::npos) {
                     val = val.substr(0, end_pos);
                 }
             }
@@ -282,8 +281,7 @@ namespace wavex::utils {
                     if (part_body.size() > limits.max_memory_buffer) {
                         auto guard = std::make_shared<TempFileGuard>(TempFileGuard::create(limits.temp_dir));
                         if (!guard->empty()) {
-                            BinaryFile ofs(guard->path(), FileMode::Write);
-                            if (ofs.is_open()) {
+                            if (BinaryFile ofs(guard->path(), FileMode::Write); ofs.is_open()) {
                                 std::ignore = ofs.write(part_body);
                             }
                         }
@@ -427,8 +425,7 @@ namespace wavex::utils {
                         pool.dispatch([state, guard = task.guard, data = task.data, executor, shared_handler, work]() {
                             {
                                 BinaryFile ofs(guard->path(), FileMode::Write);
-                                const bool ok = ofs.is_open() && ofs.write(data);
-                                if (!ok) {
+                                if (const bool ok = ofs.is_open() && ofs.write(data); !ok) {
                                     state->success.store(false, std::memory_order_relaxed);
                                 }
                                 ofs.close();

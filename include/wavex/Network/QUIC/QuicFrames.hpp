@@ -114,8 +114,9 @@ namespace wavex::network::quic {
         bool is_application{false};
 
         // ─── 3. Constructors ────
-        ConnectionCloseFrame() = default;
-        ConnectionCloseFrame(std::string_view reason, uint64_t err = 0, uint64_t ft = 0, bool is_app = false)
+        explicit ConnectionCloseFrame() = default;
+
+        explicit ConnectionCloseFrame(const std::string_view reason, const uint64_t err = 0, const uint64_t ft = 0, const bool is_app = false)
             : reason_phrase(reason), owned_reason(nullptr), error_code(err), frame_type(ft), is_application(is_app) {}
     };
 

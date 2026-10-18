@@ -81,7 +81,7 @@ namespace wavex::uri {
     std::size_t decode_to(const std::string_view encoded, char *dst) {
         if (encoded.empty() || !dst) return 0;
 
-        char *start = dst;
+        const char *start = dst;
         const char *src = encoded.data();
         const char *src_end = src + encoded.size();
 

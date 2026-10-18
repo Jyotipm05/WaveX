@@ -65,7 +65,7 @@ namespace wavex::network::quic {
         for (std::size_t i = 0; i < hex.size() / 2; ++i) {
             const char c1 = hex[i * 2];
             const char c2 = hex[i * 2 + 1];
-            auto hex_val = [](char c) noexcept -> int {
+            auto hex_val = [](const char c) noexcept -> int {
                 if (c >= '0' && c <= '9') return c - '0';
                 if (c >= 'a' && c <= 'f') return c - 'a' + 10;
                 if (c >= 'A' && c <= 'F') return c - 'A' + 10;
@@ -87,7 +87,7 @@ namespace wavex::network::quic {
         cid.length_ = static_cast<uint8_t>((std::min)(len, MAX_CONNECTION_ID_LEN));
         std::random_device rd;
         std::mt19937 gen(rd());
-        std::uniform_int_distribution<int> dist(0, 255);
+        std::uniform_int_distribution dist(0, 255);
         for (std::size_t i = 0; i < cid.length_; ++i) {
             cid.data_[i] = static_cast<uint8_t>(dist(gen));
         }
@@ -181,8 +181,8 @@ namespace wavex::network::quic {
                 uint64_t seed1 = 0;
                 bool ok = false;
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
-                if (RAND_bytes(reinterpret_cast<unsigned char *>(&seed0), static_cast<int>(sizeof(seed0))) == 1 &&
-                    RAND_bytes(reinterpret_cast<unsigned char *>(&seed1), static_cast<int>(sizeof(seed1))) == 1) {
+                if (RAND_bytes(reinterpret_cast<unsigned char *>(&seed0), sizeof(seed0)) == 1 &&
+                    RAND_bytes(reinterpret_cast<unsigned char *>(&seed1), sizeof(seed1)) == 1) {
                     ok = true;
                 }
 #endif
@@ -212,14 +212,14 @@ namespace wavex::network::quic {
     } // namespace
 
     void set_process_siphash_seed(const uint64_t k0, const uint64_t k1) noexcept {
-        auto &seed = global_siphash_seed();
-        seed.k0.store(k0, std::memory_order_release);
-        seed.k1.store(k1, std::memory_order_release);
-        seed.initialized.store(true, std::memory_order_release);
+        auto &[seed0, seed1, init] = global_siphash_seed();
+        seed0.store(k0, std::memory_order_release);
+        seed1.store(k1, std::memory_order_release);
+        init.store(true, std::memory_order_release);
     }
 
     std::pair<uint64_t, uint64_t> get_process_siphash_seed() noexcept {
-        auto &seed = global_siphash_seed();
+        const auto &seed = global_siphash_seed();
         return {seed.k0.load(std::memory_order_acquire), seed.k1.load(std::memory_order_acquire)};
     }
 
@@ -233,8 +233,7 @@ namespace wavex::network::quic {
 namespace std {
     std::size_t hash<wavex::network::quic::ConnectionId>::operator()(
         const wavex::network::quic::ConnectionId &cid) const noexcept {
-        return static_cast<std::size_t>(
-            wavex::network::quic::siphash24(cid.data(), cid.length()));
+        return wavex::network::quic::siphash24(cid.data(), cid.length());
     }
 } // namespace std
 

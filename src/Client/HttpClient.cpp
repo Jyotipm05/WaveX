@@ -327,8 +327,8 @@ namespace wavex::client {
                         if (payload.size() >= header_cursor + pad_len) {
                             const std::string_view h_block = payload.substr(
                                 header_cursor, payload.size() - header_cursor - pad_len);
-                            std::vector<std::pair<std::string, std::string> > decoded_headers;
-                            if (dec.decode_header_block(h_block, decoded_headers)) {
+                            if (std::vector<std::pair<std::string, std::string> > decoded_headers; dec.
+                                decode_header_block(h_block, decoded_headers)) {
                                 headers_received = true;
                                 for (const auto &[n, v]: decoded_headers) {
                                     if (n == ":status") {
@@ -661,9 +661,9 @@ namespace wavex::client {
     ClientRequest &ClientRequest::add_file_from_path(const std::string_view name,
                                                      const std::string &filepath,
                                                      const std::string_view content_type) {
-        if (auto res = wavex::utils::BinaryFile::read_all(filepath)) {
-            std::string &content = *res;
-            std::string filename = wavex::utils::fs_utils::filename(filepath);
+        if (const auto res = wavex::utils::BinaryFile::read_all(filepath)) {
+            const std::string &content = *res;
+            const std::string filename = wavex::utils::fs_utils::filename(filepath);
             std::string ct(content_type);
             if (ct.empty()) {
                 ct = std::string(base::mime_type_from_path(filepath));

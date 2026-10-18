@@ -103,7 +103,7 @@ namespace wavex::fs {
     template<typename PathLike1, typename PathLike2>
         requires (!std::is_convertible_v<PathLike1, std::string> || !std::is_convertible_v<PathLike2, std::string>)
     asio::awaitable<std::expected<void, std::error_code> > copy_file(
-        const PathLike1 &from, const PathLike2 &to, bool overwrite = true) {
+        const PathLike1 &from, const PathLike2 &to, const bool overwrite = true) {
         return copy_file(detail::to_string_path(from), detail::to_string_path(to), overwrite);
     }
 

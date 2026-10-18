@@ -74,7 +74,7 @@ namespace wavex::utils {
 
         template<typename PathLike>
             requires (!std::is_convertible_v<PathLike, const std::string &>)
-        bool move_to(const PathLike &destination, bool overwrite = true) {
+        bool move_to(const PathLike &destination, const bool overwrite = true) {
             return move_to(fs_utils::to_u8_path_string(destination), overwrite);
         }
 

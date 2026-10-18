@@ -103,7 +103,7 @@ namespace wavex::protos::http {
             // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
             frame_header() = default;
 
-            constexpr frame_header(uint32_t l, uint32_t sid, frame_type t, uint8_t f) noexcept
+            constexpr frame_header(const uint32_t l, const uint32_t sid, const frame_type t, const uint8_t f) noexcept
                 : length(l), stream_id(sid), type(t), flags(f) {
             }
 
@@ -395,12 +395,11 @@ namespace wavex::protos::http {
                             bool matched = false;
                             // Search symbol in TABLE
                             for (uint32_t sym = 0; sym < 256; ++sym) {
-                                const auto &e = TABLE[sym];
-                                if (e.bits <= bits) {
-                                    const uint32_t code_part = (current >> (bits - e.bits)) & ((1U << e.bits) - 1U);
-                                    if (code_part == e.code) {
+                                if (const auto &[e_code, e_bits] = TABLE[sym]; e_bits <= bits) {
+                                    if (const uint32_t code_part = (current >> (bits - e_bits)) & ((1U << e_bits) - 1U);
+                                        code_part == e_code) {
                                         out.push_back(static_cast<char>(sym));
-                                        bits -= e.bits;
+                                        bits -= e_bits;
                                         if (bits == 0) {
                                             current = 0;
                                         } else {
@@ -418,8 +417,7 @@ namespace wavex::protos::http {
                     // Padding check: must be less than 8 bits and all 1s
                     if (bits > 0) {
                         if (bits > 7) return false;
-                        const uint32_t mask = (1U << bits) - 1U;
-                        if ((current & mask) != mask) return false;
+                        if (const uint32_t mask = (1U << bits) - 1U; (current & mask) != mask) return false;
                     }
                     return true;
                 }
@@ -546,7 +544,7 @@ namespace wavex::protos::http {
                  * @brief Encode request pseudo-headers and headers list into a header block fragment.
                  */
                 static std::string encode_request_headers(
-                    const http::method m,
+                    const method m,
                     const std::string_view target,
                     const std::string_view scheme,
                     const std::string_view authority,
@@ -556,8 +554,7 @@ namespace wavex::protos::http {
 
                     // 1. :method
                     const std::string_view method_str = to_string(m);
-                    const auto [m_idx, m_exact] = find_static(":method", method_str);
-                    if (m_exact) {
+                    if (const auto [m_idx, m_exact] = find_static(":method", method_str); m_exact) {
                         encode_integer(out, m_idx, 7, 0x80); // Indexed Header Field (1xxxxxxx)
                     } else if (m_idx > 0) {
                         encode_integer(out, m_idx, 4, 0x00); // Literal without indexing, indexed name (0000xxxx)
@@ -569,8 +566,7 @@ namespace wavex::protos::http {
                     }
 
                     // 2. :scheme
-                    const auto [s_idx, s_exact] = find_static(":scheme", scheme.empty() ? "https" : scheme);
-                    if (s_exact) {
+                    if (const auto [s_idx, s_exact] = find_static(":scheme", scheme.empty() ? "https" : scheme); s_exact) {
                         encode_integer(out, s_idx, 7, 0x80);
                     } else {
                         encode_integer(out, 6, 4, 0x00); // static 6 = :scheme: http
@@ -578,8 +574,7 @@ namespace wavex::protos::http {
                     }
 
                     // 3. :path
-                    const std::string_view path = target.empty() ? "/" : target;
-                    if (path == "/") {
+                    if (const std::string_view path = target.empty() ? "/" : target; path == "/") {
                         encode_integer(out, 4, 7, 0x80); // static 4 = :path: /
                     } else if (path == "/index.html") {
                         encode_integer(out, 5, 7, 0x80); // static 5 = :path: /index.html
@@ -602,8 +597,7 @@ namespace wavex::protos::http {
                         for (const char c: raw_name) {
                             name.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
                         }
-                        const auto [idx, exact] = find_static(name, value);
-                        if (exact) {
+                        if (const auto [idx, exact] = find_static(name, value); exact) {
                             encode_integer(out, idx, 7, 0x80);
                         } else if (idx > 0) {
                             encode_integer(out, idx, 4, 0x00);
@@ -632,8 +626,7 @@ namespace wavex::protos::http {
                     const auto [ptr, ec] = std::to_chars(status_buf, status_buf + sizeof(status_buf), status_code);
                     const std::string_view status_str(status_buf, ptr);
 
-                    const auto [s_idx, s_exact] = find_static(":status", status_str);
-                    if (s_exact) {
+                    if (const auto [s_idx, s_exact] = find_static(":status", status_str); s_exact) {
                         encode_integer(out, s_idx, 7, 0x80);
                     } else {
                         encode_integer(out, 8, 4, 0x00); // static 8 = :status: 200
@@ -648,8 +641,7 @@ namespace wavex::protos::http {
                         for (const char c: raw_name) {
                             name.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
                         }
-                        const auto [idx, exact] = find_static(name, value);
-                        if (exact) {
+                        if (const auto [idx, exact] = find_static(name, value); exact) {
                             encode_integer(out, idx, 7, 0x80);
                         } else if (idx > 0) {
                             encode_integer(out, idx, 4, 0x00);
@@ -678,10 +670,8 @@ namespace wavex::protos::http {
                     std::vector<std::pair<std::string, std::string> > &out_headers) const {
                     std::size_t cursor = 0;
                     while (cursor < block.size()) {
-                        const auto b = static_cast<uint8_t>(block[cursor]);
-
                         // Case 1: Indexed Header Field (starts with 1xxxxxxx)
-                        if ((b & 0x80) != 0) {
+                        if (const auto b = static_cast<uint8_t>(block[cursor]); (b & 0x80) != 0) {
                             uint64_t index = 0;
                             if (!decode_integer(block, cursor, 7, index)) return false;
                             auto [n, v] = lookup_index(index);
@@ -772,7 +762,7 @@ namespace wavex::protos::http {
         /**
          * @brief HTTP/2 Request Message (inherits protocol-agnostic message_base).
          */
-        struct request : public message_base {
+        struct request : message_base {
             // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
             std::string_view target{}; ///< Extracted from :path
             std::string_view scheme{"https"}; ///< :scheme
@@ -784,7 +774,7 @@ namespace wavex::protos::http {
             std::string body_storage{};
             std::vector<std::pair<std::string, std::string> > headers_storage{};
             uint32_t stream_id{1}; ///< HTTP/2 Stream Identifier
-            http::method method_type{method::UNKNOWN};
+            method method_type{method::UNKNOWN};
 
             // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
             request() {
@@ -880,7 +870,7 @@ namespace wavex::protos::http {
         /**
          * @brief HTTP/2 Response Message (inherits protocol-agnostic message_base).
          */
-        struct response : public message_base {
+        struct response : message_base {
             // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
             std::string_view status_text{"OK"};
             // Internal backing storage for decoded strings
@@ -1024,7 +1014,7 @@ namespace wavex::protos::http {
                 }
 
                 hpack::dynamic_table working_dt = dt;
-                hpack::decoder dec(working_dt);
+                const hpack::decoder dec(working_dt);
 
                 std::vector<std::pair<std::string, std::string> > decoded_headers;
                 bool headers_received = false;
@@ -1036,8 +1026,7 @@ namespace wavex::protos::http {
                     std::string_view payload;
                     std::size_t frame_bytes = 0;
 
-                    const auto r = parse_frame(remaining, hdr, payload, frame_bytes);
-                    if (r != result::success) {
+                    if (const auto r = parse_frame(remaining, hdr, payload, frame_bytes); r != result::success) {
                         if (r == result::incomplete && headers_received) {
                             // If headers already parsed and we're waiting for DATA
                             return result::incomplete;
@@ -1189,7 +1178,7 @@ namespace wavex::protos::http {
                 res.body = {};
 
                 hpack::dynamic_table working_dt = dt;
-                hpack::decoder dec(working_dt);
+                const hpack::decoder dec(working_dt);
 
                 std::vector<std::pair<std::string, std::string> > decoded_headers;
                 bool headers_received = false;
@@ -1201,8 +1190,7 @@ namespace wavex::protos::http {
                     std::string_view payload;
                     std::size_t frame_bytes = 0;
 
-                    const auto r = parse_frame(remaining, hdr, payload, frame_bytes);
-                    if (r != result::success) {
+                    if (const auto r = parse_frame(remaining, hdr, payload, frame_bytes); r != result::success) {
                         return headers_received ? result::incomplete : r;
                     }
 
@@ -1391,7 +1379,7 @@ namespace wavex::protos::http {
                 std::string wire;
 
                 // 1. HPACK encode request headers
-                std::string header_block = hpack::encoder::encode_request_headers(
+                const std::string header_block = hpack::encoder::encode_request_headers(
                     req.method_type, req.target, req.scheme, req.authority, req.headers);
 
                 // 2. Build HEADERS frame
@@ -1694,17 +1682,17 @@ namespace wavex::protos::http {
      * @brief HTTP/2 Protocol Codec combining binary frame parser, encoder, decoder, and developer-friendly facade.
      */
     struct http2codec {
-        using parser = wavex::protos::http::http2::parser;
-        using encoder = wavex::protos::http::http2::encoder;
-        using decoder = wavex::protos::http::http2::decoder;
-        using request = wavex::protos::http::http2::request;
-        using response = wavex::protos::http::http2::response;
-        using connection_context = wavex::protos::http::http2::connection_context;
-        using dynamic_table = wavex::protos::http::http2::hpack::dynamic_table;
+        using parser = http2::parser;
+        using encoder = http2::encoder;
+        using decoder = http2::decoder;
+        using request = http2::request;
+        using response = http2::response;
+        using connection_context = http2::connection_context;
+        using dynamic_table = http2::hpack::dynamic_table;
         using result = parser::result;
 
         static std::string_view status_text_for(const unsigned int code) noexcept {
-            return wavex::protos::http::status_text_for(code);
+            return http::status_text_for(code);
         }
 
         // ─── Developer-Friendly Codec Facade (Symmetrical with http1codec) ───

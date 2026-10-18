@@ -86,7 +86,7 @@ namespace wavex::utils {
 
         template<typename PathLike>
             requires (!std::is_convertible_v<PathLike, const std::string &>)
-        [[nodiscard]] bool save_to(const PathLike &destination, bool overwrite = true) const {
+        [[nodiscard]] bool save_to(const PathLike &destination, const bool overwrite = true) const {
             return save_to(fs_utils::to_u8_path_string(destination), overwrite);
         }
 
@@ -102,7 +102,7 @@ namespace wavex::utils {
         template<typename PathLike>
             requires (!std::is_convertible_v<PathLike, std::string>)
         [[nodiscard]] asio::awaitable<bool> save_to_async(
-            const PathLike &destination, bool overwrite = true) const {
+            const PathLike &destination, const bool overwrite = true) const {
             return save_to_async(fs_utils::to_u8_path_string(destination), overwrite);
         }
 
@@ -281,11 +281,11 @@ namespace wavex::utils {
         template<typename PathLike>
             requires (!std::is_convertible_v<PathLike, const std::string &>)
         MultipartFormData &add_file_from_path(
-            std::string_view field_name,
+            const std::string_view field_name,
             const PathLike &filepath,
-            std::string_view custom_filename = "",
-            std::string_view custom_mime = "",
-            bool compress = false) {
+            const std::string_view custom_filename = "",
+            const std::string_view custom_mime = "",
+            const bool compress = false) {
             return add_file_from_path(field_name, fs_utils::to_u8_path_string(filepath), custom_filename, custom_mime, compress);
         }
 

@@ -163,7 +163,7 @@ namespace wavex::server {
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
         // HTTP/3 & QUIC (ServerQuic.ipp)
-        [[nodiscard]] bool is_http3_enabled() const noexcept;
+        [[nodiscard]] static bool is_http3_enabled() noexcept;
         void allow_insecure(bool allow = true) noexcept;
 #endif
 

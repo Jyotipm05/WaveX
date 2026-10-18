@@ -63,7 +63,7 @@ namespace wavex::base {
     /**
      * @brief Returns a short string tag for a log level.
      */
-    constexpr std::string_view log_level_tag(LogLevel lvl) {
+    constexpr std::string_view log_level_tag(const LogLevel lvl) {
         switch (lvl) {
             case LogLevel::TRACE: return "TRACE";
             case LogLevel::DEBUG: return "DEBUG";
@@ -78,7 +78,7 @@ namespace wavex::base {
     /**
      * @brief Returns ANSI color code for a log level.
      */
-    constexpr std::string_view log_level_color(LogLevel lvl) {
+    constexpr std::string_view log_level_color(const LogLevel lvl) {
         switch (lvl) {
             case LogLevel::TRACE: return "\033[36m"; // Cyan
             case LogLevel::DEBUG: return "\033[34m"; // Blue
@@ -97,7 +97,6 @@ namespace wavex::base {
      * @brief Thread-safe, singleton logger with leveled output and source location support.
      */
     class Logger {
-    private:
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
         std::optional<utils::BinaryFile> file_sink_{};
         std::mutex mutex_{};
@@ -105,7 +104,6 @@ namespace wavex::base {
         LogLevel min_level_{LogLevel::INFO};
         bool colored_{true};
 
-    private:
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         Logger() = default;
 
@@ -134,7 +132,7 @@ namespace wavex::base {
         [[nodiscard]] LogLevel level() const { return min_level_; }
 
         /// Enable or disable ANSI terminal colors
-        void set_colored(bool enable) { colored_ = enable; }
+        void set_colored(const bool enable) { colored_ = enable; }
 
         /// Check if ANSI colors are enabled
         [[nodiscard]] bool colored() const { return colored_; }
@@ -234,6 +232,7 @@ namespace wavex::log {
 
         template<typename T>
             requires std::constructible_from<std::format_string<Args...>, const T &>
+        // ReSharper disable once CppNonExplicitConvertingConstructor
         consteval format_with_loc(const T &s, const std::source_location l = std::source_location::current())
             : fmt(s), loc(l) {
         }
@@ -245,7 +244,8 @@ namespace wavex::log {
 
         template<typename T>
             requires std::convertible_to<T, std::string_view>
-        constexpr msg_with_loc(const T &s, std::source_location l = std::source_location::current())
+        // ReSharper disable once CppNonExplicitConvertingConstructor
+        constexpr msg_with_loc(const T &s, const std::source_location l = std::source_location::current())
             : msg(s), loc(l) {
         }
     };

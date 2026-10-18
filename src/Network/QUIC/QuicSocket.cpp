@@ -1,5 +1,6 @@
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
 
+#include <ranges>
 #include <wavex/Network/QUIC/QuicSocket.hpp>
 #include <wavex/Network/QUIC/QuicCrypto.hpp>
 #include <wavex/Base/Logger.hpp>
@@ -27,76 +28,77 @@
 #include <vector>
 
 namespace wavex::network::quic {
-
     // ─── 10. Client Outbound Driver ────────────────────────────────────────────
 
-    class ClientOutboundDriver : public basic_quic_socket::OutboundDriver,
-                                 public std::enable_shared_from_this<ClientOutboundDriver> {
-    public:
-        asio::any_io_executor executor_{};
-        asio::ip::udp::socket udp_socket_;
-        std::weak_ptr<QuicConnection> conn_{};
-        basic_quic_socket::endpoint_type server_endpoint_{};
-        basic_quic_socket::endpoint_type sender_endpoint_{};
-        std::array<uint8_t, 65536> recv_buf_{};
-        bool running_{true};
+    namespace {
+        class ClientOutboundDriver : public basic_quic_socket::OutboundDriver,
+                                     public std::enable_shared_from_this<ClientOutboundDriver> {
+        public:
+            asio::any_io_executor executor_{};
+            asio::ip::udp::socket udp_socket_;
+            std::weak_ptr<QuicConnection> conn_{};
+            basic_quic_socket::endpoint_type server_endpoint_{};
+            basic_quic_socket::endpoint_type sender_endpoint_{};
+            std::array<uint8_t, 65536> recv_buf_{};
+            bool running_{true};
 
-        explicit ClientOutboundDriver(const asio::any_io_executor &ex)
-            : executor_(ex), udp_socket_(ex) {
-        }
-
-        ~ClientOutboundDriver() override {
-            ClientOutboundDriver::close_driver();
-        }
-
-        void send_datagram(std::string dgram, const basic_quic_socket::endpoint_type &dest) override {
-            if (!udp_socket_.is_open() || !running_) return;
-            auto buf = std::make_shared<std::string>(std::move(dgram));
-            udp_socket_.async_send_to(
-                asio::buffer(*buf), dest,
-                [buf](std::error_code, std::size_t) {
-                }
-            );
-        }
-
-        void close_driver() override {
-            if (!running_) return;
-            running_ = false;
-            asio::error_code ec;
-            if (udp_socket_.is_open()) {
-                udp_socket_.close(ec);
+            explicit ClientOutboundDriver(const asio::any_io_executor &ex)
+                : executor_(ex), udp_socket_(ex) {
             }
-        }
 
-        void start_receive() {
-            if (!running_ || !udp_socket_.is_open()) return;
-            auto weak_self = std::weak_ptr<ClientOutboundDriver>(shared_from_this());
-            udp_socket_.async_receive_from(
-                asio::buffer(recv_buf_), sender_endpoint_,
-                [this, weak_self](const std::error_code ec, const std::size_t bytes_recvd) {
-                    auto self = weak_self.lock();
-                    if (!self || ec == asio::error::operation_aborted || !running_) return;
-                    if (!ec && bytes_recvd > 0) {
-                        if (auto c = conn_.lock()) {
-                            const std::string_view dgram(reinterpret_cast<const char *>(recv_buf_.data()), bytes_recvd);
-                            c->handle_datagram(dgram);
-                            flush_outbound();
-                        }
+            ~ClientOutboundDriver() override {
+                ClientOutboundDriver::close_driver();
+            }
+
+            void send_datagram(std::string dgram, const basic_quic_socket::endpoint_type &dest) override {
+                if (!udp_socket_.is_open() || !running_) return;
+                auto buf = std::make_shared<std::string>(std::move(dgram));
+                udp_socket_.async_send_to(
+                    asio::buffer(*buf), dest,
+                    [buf](std::error_code, std::size_t) {
                     }
-                    self->start_receive();
-                }
-            );
-        }
+                );
+            }
 
-        void flush_outbound() {
-            if (auto c = conn_.lock()) {
-                auto dgrams = c->poll_outgoing_datagrams();
-                for (auto &d: dgrams) {
-                    send_datagram(std::move(d), server_endpoint_);
+            void close_driver() override {
+                if (!running_) return;
+                running_ = false;
+                if (udp_socket_.is_open()) {
+                    asio::error_code ec;
+                    udp_socket_.close(ec);
                 }
             }
-        }
-    };
+
+            void start_receive() {
+                if (!running_ || !udp_socket_.is_open()) return;
+                auto weak_self = std::weak_ptr<ClientOutboundDriver>(shared_from_this());
+                udp_socket_.async_receive_from(
+                    asio::buffer(recv_buf_), sender_endpoint_,
+                    [this, weak_self](const std::error_code ec, const std::size_t bytes_recvd) {
+                        const auto self = weak_self.lock();
+                        if (!self || ec == asio::error::operation_aborted || !running_) return;
+                        if (!ec && bytes_recvd > 0) {
+                            if (const auto c = conn_.lock()) {
+                                const std::string_view dgram(reinterpret_cast<const char *>(recv_buf_.data()),
+                                                             bytes_recvd);
+                                c->handle_datagram(dgram);
+                                flush_outbound();
+                            }
+                        }
+                        self->start_receive();
+                    }
+                );
+            }
+
+            void flush_outbound() {
+                if (const auto c = conn_.lock()) {
+                    for (auto dgrams = c->poll_outgoing_datagrams(); auto &d: dgrams) {
+                        send_datagram(std::move(d), server_endpoint_);
+                    }
+                }
+            }
+        };
+    }
 
     // ─── 11. basic_quic_socket Implementation ──────────────────────────────────
 
@@ -206,8 +208,7 @@ namespace wavex::network::quic {
             stream_.reset();
         }
         if (outbound_driver_ && conn_) {
-            auto pkts = conn_->poll_outgoing_datagrams();
-            for (auto &pkt: pkts) {
+            for (auto pkts = conn_->poll_outgoing_datagrams(); auto &pkt: pkts) {
                 outbound_driver_->send_datagram(std::move(pkt), remote_endpoint_);
             }
         }
@@ -217,7 +218,7 @@ namespace wavex::network::quic {
         is_connected_ = false;
     }
 
-    void basic_quic_socket::cancel() {
+    void basic_quic_socket::cancel() const {
         std::error_code ec;
         cancel(ec);
         if (ec) throw std::system_error(ec);
@@ -230,7 +231,8 @@ namespace wavex::network::quic {
         }
     }
 
-    void basic_quic_socket::shutdown(asio::ip::tcp::socket::shutdown_type what, std::error_code &ec) const noexcept {
+    void basic_quic_socket::shutdown(const asio::ip::tcp::socket::shutdown_type what,
+                                     std::error_code &ec) const noexcept {
         if (stream_) {
             stream_->shutdown(what, ec);
         } else {
@@ -245,7 +247,7 @@ namespace wavex::network::quic {
     }
 
     void basic_quic_socket::connect(const endpoint_type &peer_ep, std::error_code &ec) noexcept {
-        auto driver = std::make_shared<ClientOutboundDriver>(executor_);
+        const auto driver = std::make_shared<ClientOutboundDriver>(executor_);
         driver->udp_socket_.open(peer_ep.protocol(), ec);
         if (ec) return;
         driver->udp_socket_.bind(endpoint_type(peer_ep.protocol(), 0), ec);
@@ -265,7 +267,7 @@ namespace wavex::network::quic {
         driver->conn_ = conn_;
 
         conn_->set_outbound_callback([w = std::weak_ptr<ClientOutboundDriver>(driver)] {
-            if (auto d = w.lock()) {
+            if (const auto d = w.lock()) {
                 d->flush_outbound();
             }
         });
@@ -325,7 +327,7 @@ namespace wavex::network::quic {
         driver->conn_ = conn_;
 
         conn_->set_outbound_callback([w = std::weak_ptr<ClientOutboundDriver>(driver)] {
-            if (auto d = w.lock()) {
+            if (const auto d = w.lock()) {
                 d->flush_outbound();
             }
         });
@@ -350,7 +352,7 @@ namespace wavex::network::quic {
         auto pkt_buf = std::make_shared<std::string>(std::move(packet));
         driver->udp_socket_.async_send_to(
             asio::buffer(*pkt_buf), peer_ep,
-            [this, driver, pkt_buf, h = std::move(handler)](std::error_code send_ec, std::size_t) mutable {
+            [this, driver, pkt_buf, h = std::move(handler)](const std::error_code send_ec, std::size_t) mutable {
                 if (send_ec) {
                     h(send_ec);
                     return;
@@ -370,7 +372,7 @@ namespace wavex::network::quic {
             throw std::system_error(asio::error::not_connected);
         }
         basic_quic_socket new_sock(executor_);
-        auto new_stream = conn_->create_stream(bidirectional);
+        const auto new_stream = conn_->create_stream(bidirectional);
         new_sock.assign_stream(new_stream, conn_, outbound_driver_, remote_endpoint_, local_endpoint_);
         conn_->queue_stream_data(new_stream->stream_id(), "", false);
         return new_sock;
@@ -380,8 +382,8 @@ namespace wavex::network::quic {
         std::shared_ptr<QuicStream> stream,
         std::shared_ptr<QuicConnection> conn,
         std::shared_ptr<OutboundDriver> driver,
-        endpoint_type remote_ep,
-        endpoint_type local_ep) {
+        const endpoint_type &remote_ep,
+        const endpoint_type &local_ep) {
         stream_ = std::move(stream);
         conn_ = std::move(conn);
         outbound_driver_ = std::move(driver);
@@ -552,14 +554,13 @@ namespace wavex::network::quic {
         if (udp_socket_.is_open()) {
             udp_socket_.close(ec);
         }
-        std::unordered_map<ConnectionId, std::shared_ptr<QuicConnection>> conns;
-        {
+        std::unordered_map<ConnectionId, std::shared_ptr<QuicConnection> > conns; {
             std::lock_guard lock(mtx_);
             conns = std::move(connections_);
             connections_.clear();
             accept_queue_.clear();
         }
-        for (auto &[cid, c] : conns) {
+        for (auto &c: conns | std::views::values) {
             if (c) c->close();
         }
     }
@@ -604,11 +605,13 @@ namespace wavex::network::quic {
         std::error_code ec;
         if (!std::filesystem::exists(cert_file, ec)) {
             wavex::log::error("[basic_quic_acceptor] TLS certificate file not found: '{}'", cert_file);
-            throw std::runtime_error("basic_quic_acceptor::set_tls_credentials: Certificate file not found: '" + cert_file + "'");
+            throw std::runtime_error(
+                "basic_quic_acceptor::set_tls_credentials: Certificate file not found: '" + cert_file + "'");
         }
         if (!std::filesystem::exists(key_file, ec)) {
             wavex::log::error("[basic_quic_acceptor] TLS private key file not found: '{}'", key_file);
-            throw std::runtime_error("basic_quic_acceptor::set_tls_credentials: Private key file not found: '" + key_file + "'");
+            throw std::runtime_error(
+                "basic_quic_acceptor::set_tls_credentials: Private key file not found: '" + key_file + "'");
         }
         std::lock_guard lock(mtx_);
         tls_cert_file_ = std::move(cert_file);
@@ -629,24 +632,24 @@ namespace wavex::network::quic {
         ec.clear();
         std::unique_lock lock(mtx_);
         if (!accept_queue_.empty()) {
-            auto info = std::move(accept_queue_.front());
+            auto [stream, conn, peer_ep] = std::move(accept_queue_.front());
             accept_queue_.pop_front();
             lock.unlock();
-            peer_socket.assign_stream(info.stream, info.conn, driver(), info.peer_ep, local_endpoint());
+            peer_socket.assign_stream(stream, conn, driver(), peer_ep, local_endpoint());
             return;
         }
 
         std::promise<AcceptedStreamInfo> prom;
         auto fut = prom.get_future();
-        pending_accepts_.push_back([&prom, &ec](std::error_code err, const AcceptedStreamInfo &info) {
+        pending_accepts_.push_back([&prom, &ec](const std::error_code err, const AcceptedStreamInfo &info) {
             if (err) ec = err;
             prom.set_value(info);
         });
         lock.unlock();
 
-        auto info = fut.get();
+        auto [stream, conn, peer_ep] = fut.get();
         if (!ec) {
-            peer_socket.assign_stream(info.stream, info.conn, driver(), info.peer_ep, local_endpoint());
+            peer_socket.assign_stream(stream, conn, driver(), peer_ep, local_endpoint());
         }
     }
 
@@ -685,13 +688,12 @@ namespace wavex::network::quic {
                     unpacked = unpack_packet_header(datagram, hdr, hdr_len, 8);
                     if (unpacked) {
                         std::lock_guard lock(mtx_);
-                        if (connections_.find(hdr.dcid) == connections_.end()) {
-                            for (const auto &[known_cid, _] : connections_) {
+                        if (!connections_.contains(hdr.dcid)) {
+                            for (const auto &known_cid: connections_ | std::views::keys) {
                                 if (known_cid.length() != 8 && datagram.size() > known_cid.length()) {
-                                    PacketHeader alt_hdr;
                                     std::size_t alt_len = 0;
-                                    if (unpack_packet_header(datagram, alt_hdr, alt_len, known_cid.length()) &&
-                                        alt_hdr.dcid == known_cid) {
+                                    if (PacketHeader alt_hdr; unpack_packet_header(datagram, alt_hdr, alt_len,
+                                                                  known_cid.length()) && alt_hdr.dcid == known_cid) {
                                         hdr = alt_hdr;
                                         hdr_len = alt_len;
                                         break;
@@ -703,9 +705,9 @@ namespace wavex::network::quic {
                 }
 
                 if (!unpacked) {
-                    wavex::log::warn("[QUIC] [acceptor] Failed to unpack packet header from {} bytes UDP datagram", bytes_recvd);
+                    wavex::log::warn("[QUIC] [acceptor] Failed to unpack packet header from {} bytes UDP datagram",
+                                     bytes_recvd);
                 } else {
-
                     if (hdr.is_long && hdr.version != QUIC_VERSION_1 && hdr.version != 0) {
                         std::string vn_packet;
                         vn_packet.push_back(static_cast<char>(0x80 | 0x40));
@@ -729,13 +731,12 @@ namespace wavex::network::quic {
                         return;
                     }
 
-                    std::shared_ptr<QuicConnection> conn;
-                    bool is_new = false; {
+                    std::shared_ptr<QuicConnection> conn; {
                         std::lock_guard lock(mtx_);
-                        auto it = connections_.find(hdr.dcid);
-                        if (it != connections_.end()) {
+                        if (auto it = connections_.find(hdr.dcid); it != connections_.end()) {
                             conn = it->second;
                         } else if (hdr.is_long && hdr.type == PacketType::Initial) {
+                            bool is_new = false;
                             is_new = true;
                             const ConnectionId server_cid = ConnectionId::random(8);
                             conn = std::make_shared<QuicConnection>(
@@ -747,33 +748,39 @@ namespace wavex::network::quic {
                                     wavex::log::error("[QUIC] [acceptor] Failed to init_tls_handshake_engine!");
                                 }
                             } else {
-                                wavex::log::warn("[QUIC] [acceptor] New incoming connection without TLS credentials: cert='{}' key='{}'", tls_cert_file_, tls_key_file_);
+                                wavex::log::warn(
+                                    "[QUIC] [acceptor] New incoming connection without TLS credentials: cert='{}' key='{}'",
+                                    tls_cert_file_, tls_key_file_);
                             }
                             connections_[server_cid] = conn;
                             connections_[hdr.dcid] = conn;
 
-                            conn->set_closed_callback([this](const ConnectionId &scid, const ConnectionId &peer_cid, const ConnectionId &orig_dcid) {
-                                asio::post(executor_, [this, scid, peer_cid, orig_dcid] {
-                                    std::lock_guard lock(mtx_);
-                                    connections_.erase(scid);
-                                    if (!orig_dcid.empty()) connections_.erase(orig_dcid);
-                                    if (!peer_cid.empty()) connections_.erase(peer_cid);
-                                    std::erase_if(accept_queue_, [&](const AcceptedStreamInfo &info) {
-                                        return !info.conn || info.conn->local_cid() == scid || info.conn->state() == ConnectionState::Closed;
+                            conn->set_closed_callback(
+                                [this](const ConnectionId &scid, const ConnectionId &peer_cid,
+                                       const ConnectionId &orig_dcid) {
+                                    asio::post(executor_, [this, scid, peer_cid, orig_dcid] {
+                                        std::lock_guard lock(mtx_);
+                                        connections_.erase(scid);
+                                        if (!orig_dcid.empty()) connections_.erase(orig_dcid);
+                                        if (!peer_cid.empty()) connections_.erase(peer_cid);
+                                        std::erase_if(accept_queue_, [&](const AcceptedStreamInfo &info) {
+                                            return !info.conn || info.conn->local_cid() == scid || info.conn->state() ==
+                                                   ConnectionState::Closed;
+                                        });
                                     });
                                 });
-                            });
 
                             conn->set_outbound_callback([this, weak_conn = std::weak_ptr<QuicConnection>(conn)] {
                                 asio::post(executor_, [this, weak_conn] {
-                                    if (auto c = weak_conn.lock()) {
+                                    if (const auto c = weak_conn.lock()) {
                                         flush_outbound(c);
                                     }
                                 });
                             });
 
                             conn->set_stream_created_callback(
-                                [this, weak_conn = std::weak_ptr<QuicConnection>(conn), sender_ep = sender_endpoint_](std::shared_ptr<QuicStream> stream) {
+                                [this, weak_conn = std::weak_ptr<QuicConnection>(conn), sender_ep = sender_endpoint_](
+                            std::shared_ptr<QuicStream> stream) {
                                     if (!stream) return;
                                     const uint64_t sid = stream->stream_id();
                                     // Client-initiated unidirectional stream (sid & 0x03 == 2)
@@ -791,7 +798,7 @@ namespace wavex::network::quic {
                                     }
                                     // Client-initiated bidirectional stream (sid & 0x03 == 0)
                                     if ((sid & 0x03) == 0x00) {
-                                        if (auto c = weak_conn.lock()) {
+                                        if (const auto c = weak_conn.lock()) {
                                             on_stream_ready(std::move(stream), c, sender_ep);
                                         }
                                     }
@@ -814,8 +821,7 @@ namespace wavex::network::quic {
     }
 
     void basic_quic_acceptor::flush_outbound(const std::shared_ptr<QuicConnection> &conn) {
-        auto datagrams = conn->poll_outgoing_datagrams();
-        for (auto &dgram: datagrams) {
+        for (auto datagrams = conn->poll_outgoing_datagrams(); auto &dgram: datagrams) {
             if (dgram.empty()) continue;
             auto buf = std::make_shared<std::string>(std::move(dgram));
             udp_socket_.async_send_to(
@@ -829,18 +835,18 @@ namespace wavex::network::quic {
     void basic_quic_acceptor::on_stream_ready(
         std::shared_ptr<QuicStream> stream,
         std::shared_ptr<QuicConnection> conn,
-        endpoint_type peer_ep) {
+        const endpoint_type &peer_ep) {
         AcceptHandlerFn handler; {
             std::lock_guard lock(mtx_);
             if (!pending_accepts_.empty()) {
                 handler = std::move(pending_accepts_.front());
                 pending_accepts_.pop_front();
             } else {
-                constexpr std::size_t kMaxAcceptQueueSize = 256;
-                if (accept_queue_.size() < kMaxAcceptQueueSize) {
+                if (constexpr std::size_t kMaxAcceptQueueSize = 256; accept_queue_.size() < kMaxAcceptQueueSize) {
                     accept_queue_.push_back(AcceptedStreamInfo{std::move(stream), std::move(conn), peer_ep});
                 } else {
-                    wavex::log::warn("[QUIC] [acceptor] accept_queue_ limit reached ({}), dropping unaccepted stream", kMaxAcceptQueueSize);
+                    wavex::log::warn("[QUIC] [acceptor] accept_queue_ limit reached ({}), dropping unaccepted stream",
+                                     kMaxAcceptQueueSize);
                 }
                 return;
             }
@@ -852,4 +858,3 @@ namespace wavex::network::quic {
 } // namespace wavex::network::quic
 
 #endif // WAVEX_HAS_SSL
-

@@ -75,14 +75,13 @@ namespace wavex::client {
      * @brief Fluent, protocol-agnostic HTTP request builder.
      */
     class ClientRequest {
-    private:
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
         std::string target_{};
         QueryParams queries_{};
         std::vector<std::pair<std::string, std::string> > headers_{};
         std::string body_{};
         utils::MultipartFormData multipart_builder_{};
-        protos::http::method method_{protos::http::method::GET};
+        method method_{method::GET};
 
     public:
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
@@ -93,7 +92,7 @@ namespace wavex::client {
         }
 
         explicit ClientRequest(const std::string_view target_url)
-            : target_(target_url), method_(method::GET) {
+            : target_(target_url) {
         }
 
         /// Construct from concrete Http1Request
@@ -128,7 +127,7 @@ namespace wavex::client {
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
 
-        ClientRequest &method(const protos::http::method m) noexcept {
+        ClientRequest &method(const method m) noexcept {
             method_ = m;
             return *this;
         }
@@ -207,9 +206,9 @@ namespace wavex::client {
 
         template<typename PathLike>
             requires (!std::is_convertible_v<PathLike, const std::string &>)
-        ClientRequest &add_file_from_path(std::string_view name,
+        ClientRequest &add_file_from_path(const std::string_view name,
                                           const PathLike &filepath,
-                                          std::string_view content_type = "") {
+                                          const std::string_view content_type = "") {
             return add_file_from_path(name, utils::fs_utils::to_u8_path_string(filepath), content_type);
         }
 
@@ -220,7 +219,7 @@ namespace wavex::client {
         template<typename PathLike>
             requires (!std::is_convertible_v<PathLike, const std::string &>)
         ClientRequest &file_body(const PathLike &filepath,
-                                 std::string_view content_type = "") {
+                                 const std::string_view content_type = "") {
             return file_body(utils::fs_utils::to_u8_path_string(filepath), content_type);
         }
 
@@ -236,7 +235,6 @@ namespace wavex::client {
      * to Http1Response and Http2Response for 100% backward compatibility.
      */
     class ClientResponse final : public base::Response {
-    private:
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
         std::string status_text_{};
         std::string body_{};
@@ -360,7 +358,7 @@ namespace wavex::client {
         }
 
         // Implicit conversions for backward compatibility
-        operator wavex::protos::http::Http1Response() const {
+        explicit operator wavex::protos::http::Http1Response() const {
             Http1Response res;
             res.status(status_code_);
             for (const auto &[k, v]: headers_storage_) {
@@ -370,7 +368,7 @@ namespace wavex::client {
             return res;
         }
 
-        operator wavex::protos::http::Http2Response() const {
+        explicit operator wavex::protos::http::Http2Response() const {
             Http2Response res;
             res.status(status_code_);
             for (const auto &[k, v]: headers_storage_) {
@@ -401,29 +399,29 @@ namespace wavex::client {
         /**
          * @brief Backward-compatible send overload for Http1Request.
          */
-        static asio::awaitable<Http1Response> send(Http1Request req, const ClientOptions &options = {}) {
-            ClientRequest c_req(req);
-            ClientResponse c_res = co_await send(c_req, options);
+        static asio::awaitable<Http1Response> send(const Http1Request req, const ClientOptions &options = {}) {
+            const ClientRequest c_req(req);
+            const ClientResponse c_res = co_await send(c_req, options);
             co_return static_cast<Http1Response>(c_res);
         }
 
         /**
          * @brief Send overload for Http2Request.
          */
-        static asio::awaitable<Http2Response> send(Http2Request req, const ClientOptions &options = {}) {
-            ClientRequest c_req(req);
+        static asio::awaitable<Http2Response> send(const Http2Request req, const ClientOptions &options = {}) {
+            const ClientRequest c_req(req);
             ClientOptions opts = options;
             if (opts.version == HttpVersion::Auto) {
                 opts.version = HttpVersion::Http2;
             }
-            ClientResponse c_res = co_await send(c_req, opts);
+            const ClientResponse c_res = co_await send(c_req, opts);
             co_return static_cast<Http2Response>(c_res);
         }
 
         // ─── GET ─────────────────────────────────────────────────────────────
         template<typename ResponseType = ClientResponse>
         static asio::awaitable<ResponseType> get(const std::string_view url, const ClientOptions &options = {}) {
-            ClientRequest req(method::GET, url);
+            const ClientRequest req(method::GET, url);
             ClientResponse c_res = co_await send(req, options);
             if constexpr (std::is_same_v<ResponseType, ClientResponse>) {
                 co_return c_res;
@@ -508,7 +506,7 @@ namespace wavex::client {
         // ─── DELETE ──────────────────────────────────────────────────────────
         template<typename ResponseType = ClientResponse>
         static asio::awaitable<ResponseType> del(const std::string_view url, const ClientOptions &options = {}) {
-            ClientRequest req(method::DELETE, url);
+            const ClientRequest req(method::DELETE, url);
             ClientResponse c_res = co_await send(req, options);
             if constexpr (std::is_same_v<ResponseType, ClientResponse>) {
                 co_return c_res;

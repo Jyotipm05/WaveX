@@ -12,7 +12,6 @@
 #pragma once
 
 #include <algorithm>
-#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -72,7 +71,7 @@ namespace wavex::utils {
         [[nodiscard]] std::string_view peek(const std::size_t max_bytes = static_cast<std::size_t>(-1)) const noexcept {
             if (empty()) return {};
             const std::size_t to_view = (std::min)(max_bytes, size());
-            return std::string_view(buffer_.data() + read_offset_, to_view);
+            return {buffer_.data() + read_offset_, to_view};
         }
 
         void consume(const std::size_t bytes) noexcept {

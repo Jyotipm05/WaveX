@@ -354,8 +354,7 @@ namespace wavex::protos::http {
             parsed_ = {};
             headers_views_.clear();
 
-            std::size_t consumed = 0;
-            if (parser_type::parse_response(buffer_owner_, parsed_, consumed) != parser_type::result::success) {
+            if (std::size_t consumed = 0; parser_type::parse_response(buffer_owner_, parsed_, consumed) != parser_type::result::success) {
                 headers_views_.clear();
                 return false;
             }
@@ -408,9 +407,9 @@ namespace wavex::protos::http {
                 if (detail::is_equal(k, name)) {
                     v = std::string(value);
                     headers_.insert_or_assign_ci(std::string_view(k), std::string_view(v));
-                    for (auto &hv: headers_views_) {
-                        if (detail::is_equal(hv.first, name)) {
-                            hv.second = std::string_view(v);
+                    for (auto &[fst, snd]: headers_views_) {
+                        if (detail::is_equal(fst, name)) {
+                            snd = std::string_view(v);
                             return *this;
                         }
                     }
@@ -517,8 +516,7 @@ namespace wavex::protos::http {
 
         /// Retrieve a header value by name (zero-copy std::string_view)
         [[nodiscard]] std::optional<std::string_view> header(const std::string_view name) const {
-            const auto it = headers_.find_ci(name);
-            if (it != headers_.end()) {
+            if (const auto it = headers_.find_ci(name); it != headers_.end()) {
                 return it->second;
             }
             for (const auto &[k, v]: headers_views_) {
@@ -541,7 +539,7 @@ namespace wavex::protos::http {
          * @param timeout_sec Idle timeout in seconds (default: 5).
          * @param max_requests Remaining maximum requests on this connection (default: 1000).
          */
-        HttpResponse &set_keep_alive(bool enable, unsigned timeout_sec = 5, unsigned max_requests = 1000) {
+        HttpResponse &set_keep_alive(const bool enable, const unsigned timeout_sec = 5, const unsigned max_requests = 1000) {
             if (enable) {
                 this->set("Connection", "keep-alive");
                 this->set("Keep-Alive",
@@ -555,8 +553,7 @@ namespace wavex::protos::http {
 
         /// Checks if this HTTP response allows the connection to stay active
         [[nodiscard]] bool should_keep_alive() const noexcept {
-            const auto conn = header("Connection");
-            if (conn && detail::is_equal(*conn, "close")) {
+            if (const auto conn = header("Connection"); conn && detail::is_equal(*conn, "close")) {
                 return false;
             }
             return true;
@@ -573,7 +570,7 @@ namespace wavex::protos::http {
             this->set("Transfer-Encoding", "chunked");
             this->set("Connection", "keep-alive");
 
-            std::string head = serialize_headers_only();
+            const std::string head = serialize_headers_only();
             is_headers_sent_ = true;
 
             co_return co_await async_write_with_timeout(head, timeout);
@@ -593,7 +590,7 @@ namespace wavex::protos::http {
 
             if (data.empty()) co_return std::expected<void, std::error_code>{};
 
-            std::string chunk_bytes = encoder_type::format_chunk(data);
+            const std::string chunk_bytes = encoder_type::format_chunk(data);
             co_return co_await async_write_with_timeout(chunk_bytes, timeout);
         }
 
@@ -610,7 +607,7 @@ namespace wavex::protos::http {
                 }
             }
 
-            std::string_view term = encoder_type::format_terminal_chunk();
+            const std::string_view term = encoder_type::format_terminal_chunk();
             auto res = co_await async_write_with_timeout(term, timeout);
             is_sent_ = true;
             co_return res;
@@ -651,7 +648,7 @@ namespace wavex::protos::http {
             if (file_size < 100 * 1024 * 1024) {
                 // < 100 MB: use Content-Length
                 this->set("Content-Length", std::to_string(file_size));
-                std::string headers = serialize_headers_only();
+                const std::string headers = serialize_headers_only();
                 is_headers_sent_ = true;
                 if (auto res = co_await async_write_with_timeout(headers, timeout); !res) {
                     co_return res;

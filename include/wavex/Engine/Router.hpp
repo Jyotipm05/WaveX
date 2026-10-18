@@ -393,7 +393,7 @@ namespace wavex::engine {
         template<typename... Handlers>
         void use(StaticChain<Handlers...> chain) {
             use([c = std::move(chain)](RequestType &req, ResponseType &res,
-                                       base::Next next) mutable -> asio::awaitable<void> {
+                                       const base::Next next) mutable -> asio::awaitable<void> {
                 if (const bool ok = co_await c.process_all_async(req, res); ok) {
                     co_await next();
                 }
@@ -406,7 +406,7 @@ namespace wavex::engine {
         template<typename... Handlers>
         void use(const std::string_view prefix, StaticChain<Handlers...> chain) {
             use(prefix, [c = std::move(chain)](RequestType &req, ResponseType &res,
-                                               base::Next next) mutable -> asio::awaitable<void> {
+                                               const base::Next next) mutable -> asio::awaitable<void> {
                 if (const bool ok = co_await c.process_all_async(req, res); ok) {
                     co_await next();
                 }
@@ -451,8 +451,7 @@ namespace wavex::engine {
          * @param file_path Path to the error page file.
          */
         void not_found_page(const std::string &file_path) {
-            std::string body, mime;
-            if (detail::load_not_found_file(file_path, body, mime)) {
+            if (std::string body, mime; detail::load_not_found_file(file_path, body, mime)) {
                 not_found(std::move(body), std::move(mime));
                 return;
             }
@@ -601,8 +600,7 @@ namespace wavex::engine {
          * @return The existing or newly created child node for `segment`.
          */
         auto insert_segment(Node *parent, const std::string_view segment) -> Node * {
-            const auto parsed = detail::parse_segment(segment);
-            switch (parsed.type) {
+            switch (const auto parsed = detail::parse_segment(segment); parsed.type) {
                 case detail::SegmentType::Param: {
                     for (const auto &child: parent->param_children) {
                         if (child->is_param && !child->constraint && child->param_name == parsed.param_name) {
@@ -688,8 +686,7 @@ namespace wavex::engine {
 
             // 2. Dynamic / Regex param children
             for (const auto &child: node->param_children) {
-                const bool match = !child->constraint || detail::match_regex(segment, *child->constraint);
-                if (match) {
+                if ([[maybe_unused]] const bool match = !child->constraint || detail::match_regex(segment, *child->constraint)) {
                     params.insert_or_assign(std::string_view(child->param_name), segment);
                     if (auto result = resolve_node(child.get(), segments, depth + 1, params)) return result;
                     detail::backtrack_param(params, child->param_name);

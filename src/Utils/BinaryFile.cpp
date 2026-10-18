@@ -138,8 +138,7 @@ namespace wavex::utils {
         std::string content;
         content.resize(sz);
         if (sz > 0) {
-            const auto read_bytes = file.read(content.data(), sz);
-            if (read_bytes != sz) {
+            if (const auto read_bytes = file.read(content.data(), sz); read_bytes != sz) {
                 content.resize(read_bytes);
             }
         }
@@ -149,8 +148,7 @@ namespace wavex::utils {
     bool BinaryFile::write_all(const std::string_view path, const std::string_view content, const bool append) {
         BinaryFile file(path, append ? FileMode::Append : FileMode::Write);
         if (!file.is_open()) {
-            const auto last_slash = path.find_last_of("/\\");
-            if (last_slash != std::string_view::npos && last_slash > 0) {
+            if (const auto last_slash = path.find_last_of("/\\"); last_slash != std::string_view::npos && last_slash > 0) {
                 std::error_code ec;
                 fs_utils::create_directories(std::string(path.substr(0, last_slash)), ec);
                 if (!file.open(path, append ? FileMode::Append : FileMode::Write)) {

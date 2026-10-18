@@ -28,8 +28,7 @@ namespace wavex::fs {
     asio::awaitable<std::expected<std::string, std::error_code> > read_file(std::string path) {
         auto res = co_await spawn_blocking(
             [p = std::move(path)]() -> std::expected<std::string, std::error_code> {
-                std::error_code ec;
-                if (!utils::fs_utils::exists(p, ec) || ec) {
+                if (std::error_code ec; !utils::fs_utils::exists(p, ec) || ec) {
                     return std::unexpected(ec ? ec : std::make_error_code(std::errc::no_such_file_or_directory));
                 }
 
@@ -45,8 +44,7 @@ namespace wavex::fs {
     asio::awaitable<std::expected<std::vector<char>, std::error_code> > read_bytes(std::string path) {
         auto res = co_await spawn_blocking(
             [p = std::move(path)]() -> std::expected<std::vector<char>, std::error_code> {
-                std::error_code ec;
-                if (!utils::fs_utils::exists(p, ec) || ec) {
+                if (std::error_code ec; !utils::fs_utils::exists(p, ec) || ec) {
                     return std::unexpected(ec ? ec : std::make_error_code(std::errc::no_such_file_or_directory));
                 }
 

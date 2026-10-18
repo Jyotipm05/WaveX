@@ -18,12 +18,12 @@
 namespace wavex::server {
 
     template<typename Codec, typename RouterType>
-    bool Server<Codec, RouterType>::is_http3_enabled() const noexcept {
+    bool Server<Codec, RouterType>::is_http3_enabled() noexcept {
         return has_quic_transport;
     }
 
     template<typename Codec, typename RouterType>
-    void Server<Codec, RouterType>::allow_insecure(bool allow) noexcept {
+    void Server<Codec, RouterType>::allow_insecure(const bool allow) noexcept {
         allow_insecure_quic_ = allow;
     }
 

@@ -51,7 +51,7 @@ namespace wavex::network::quic {
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         StreamChunk() = default;
 
-        StreamChunk(uint64_t off, std::string d)
+        StreamChunk(const uint64_t off, std::string d)
             : offset(off), data(std::move(d)) {
         }
     };
@@ -125,7 +125,7 @@ namespace wavex::network::quic {
 
         [[nodiscard]] auto is_finished() const noexcept -> bool;
 
-        void notify_finished_if_needed();
+        void notify_finished_if_needed() const;
 
         // Stream concept methods
         [[nodiscard]] auto lowest_layer() noexcept -> QuicStream & { return *this; }
@@ -160,7 +160,7 @@ namespace wavex::network::quic {
                     // attributable log instead of a silent segfault.
                     auto fire_count = std::make_shared<std::atomic<int> >(0);
                     auto fire = [shared_h, fire_count](const char *site, std::error_code ec, std::size_t bytes) {
-                        if (int prev = fire_count->fetch_add(1); prev != 0) {
+                        if (const int prev = fire_count->fetch_add(1); prev != 0) {
                             log::error(
                                 "[QUIC][DIAG] async_read_some: shared_h invoked {} time(s) already! site={} ec={} bytes={} - SUPPRESSING to avoid resuming a dead coroutine",
                                 prev + 1, site, ec.message(), bytes);
@@ -193,7 +193,7 @@ namespace wavex::network::quic {
                         for (auto b = asio::buffer_sequence_begin(buffers);
                              b != asio::buffer_sequence_end(buffers) && copied < to_copy; ++b) {
                             asio::mutable_buffer mb(*b);
-                            std::size_t chunk = (std::min)(mb.size(), to_copy - copied);
+                            const std::size_t chunk = (std::min)(mb.size(), to_copy - copied);
                             auto *dest = static_cast<uint8_t *>(mb.data());
                             self->in_buffer_.read(dest, chunk);
                             copied += chunk;
@@ -236,12 +236,12 @@ namespace wavex::network::quic {
                                     site = "pending-empty";
                                     result_ec = s->fin_received_ ? asio::error::eof : std::error_code{};
                                 } else {
-                                    std::size_t dest_len = asio::buffer_size(buffers);
-                                    std::size_t to_copy = (std::min)(dest_len, s->in_buffer_.size());
+                                    const std::size_t dest_len = asio::buffer_size(buffers);
+                                    const std::size_t to_copy = (std::min)(dest_len, s->in_buffer_.size());
                                     for (auto b = asio::buffer_sequence_begin(buffers);
                                          b != asio::buffer_sequence_end(buffers) && copied < to_copy; ++b) {
                                         asio::mutable_buffer mb(*b);
-                                        std::size_t chunk = (std::min)(mb.size(), to_copy - copied);
+                                        const std::size_t chunk = (std::min)(mb.size(), to_copy - copied);
                                         auto *dest = static_cast<uint8_t *>(mb.data());
                                         s->in_buffer_.read(dest, chunk);
                                         copied += chunk;
@@ -264,7 +264,7 @@ namespace wavex::network::quic {
                 [weak_self, buffers]<typename T0>(T0 handler) {
                     using HandlerType = std::decay_t<T0>;
                     auto shared_h = std::make_shared<HandlerType>(std::move(handler));
-                    auto self = weak_self.lock();
+                    const auto self = weak_self.lock();
                     if (!self) {
                         auto executor = asio::get_associated_executor(*shared_h);
                         asio::post(executor, [shared_h] {

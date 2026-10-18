@@ -16,6 +16,6 @@ module;
 export module wavex:utils_compression;
 
 export namespace wavex::utils {
-    using wavex::utils::CompressionFormat;
-    using wavex::utils::Compressor;
+    using utils::CompressionFormat;
+    using utils::Compressor;
 }

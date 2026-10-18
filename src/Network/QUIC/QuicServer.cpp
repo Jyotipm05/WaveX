@@ -1,5 +1,6 @@
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
 
+#include <ranges>
 #include <wavex/Network/QUIC/QuicServer.hpp>
 #include <wavex/Base/Logger.hpp>
 
@@ -31,7 +32,7 @@ namespace wavex::network::quic {
     QuicServer::QuicServer(asio::io_context &io, const std::string_view host, const uint16_t port)
         : io_(io), socket_(io) {
         asio::error_code ec;
-        auto addr = asio::ip::make_address(host, ec);
+        const auto addr = asio::ip::make_address(host, ec);
         if (!ec) {
             socket_.open(addr.is_v6() ? asio::ip::udp::v6() : asio::ip::udp::v4(), ec);
             socket_.set_option(asio::socket_base::reuse_address(true), ec);
@@ -72,7 +73,7 @@ namespace wavex::network::quic {
             conns.swap(connections_);
         }
         if (conns.empty() || io_.get_executor().running_in_this_thread() || io_.stopped()) {
-            for (auto &[cid, conn] : conns) {
+            for (auto &conn: conns | std::views::values) {
                 if (conn) conn->close();
             }
             return;
@@ -88,9 +89,9 @@ namespace wavex::network::quic {
         auto conns_ptr = std::make_shared<std::unordered_map<ConnectionId, std::shared_ptr<QuicConnection>>>(
             std::move(conns));
         auto drained = std::make_shared<std::promise<void>>();
-        auto fut = drained->get_future();
+        const auto fut = drained->get_future();
         asio::post(io_, [conns_ptr, drained] {
-            for (auto &[cid, conn] : *conns_ptr) {
+            for (auto &conn: *conns_ptr | std::views::values) {
                 if (conn) conn->close();
             }
             drained->set_value();
@@ -127,13 +128,12 @@ namespace wavex::network::quic {
                     unpacked = unpack_packet_header(datagram, hdr, hdr_len, server_cid_len_);
                     if (unpacked) {
                         std::lock_guard lock(mtx_);
-                        if (connections_.find(hdr.dcid) == connections_.end()) {
-                            for (const auto &[known_cid, _] : connections_) {
+                        if (!connections_.contains(hdr.dcid)) {
+                            for (const auto &known_cid: connections_ | std::views::keys) {
                                 if (known_cid.length() != server_cid_len_ && datagram.size() > known_cid.length()) {
-                                    PacketHeader alt_hdr;
                                     std::size_t alt_len = 0;
-                                    if (unpack_packet_header(datagram, alt_hdr, alt_len, known_cid.length()) &&
-                                        alt_hdr.dcid == known_cid) {
+                                    if (PacketHeader alt_hdr; unpack_packet_header(datagram, alt_hdr, alt_len, known_cid.length()) &&
+                                                              alt_hdr.dcid == known_cid) {
                                         hdr = alt_hdr;
                                         hdr_len = alt_len;
                                         break;
@@ -191,13 +191,13 @@ namespace wavex::network::quic {
                             conn->set_outbound_callback([this, weak_conn = std::weak_ptr<QuicConnection>(conn)] {
                                 if (stopped_.load() || !running_.load()) return;
                                 if (io_.get_executor().running_in_this_thread()) {
-                                    if (auto c = weak_conn.lock()) {
+                                    if (const auto c = weak_conn.lock()) {
                                         flush_outbound(c);
                                     }
                                 } else {
                                     asio::post(io_, [this, weak_conn] {
                                         if (stopped_.load() || !running_.load()) return;
-                                        if (auto c = weak_conn.lock()) {
+                                        if (const auto c = weak_conn.lock()) {
                                             flush_outbound(c);
                                         }
                                     });
@@ -303,13 +303,12 @@ namespace wavex::network::quic {
 
     void QuicServer::flush_outbound(const std::shared_ptr<QuicConnection> &conn) {
         if (stopped_.load() || !socket_.is_open()) return;
-        auto datagrams = conn->poll_outgoing_datagrams();
-        for (auto &dgram: datagrams) {
+        for (auto datagrams = conn->poll_outgoing_datagrams(); auto &dgram: datagrams) {
             if (dgram.empty()) continue;
             auto buf = std::make_shared<std::string>(std::move(dgram));
             socket_.async_send_to(
                 asio::buffer(*buf), conn->peer_endpoint(),
-                [buf](std::error_code ec, std::size_t) {
+                [buf](const std::error_code ec, std::size_t) {
                     if (ec && ec != asio::error::operation_aborted) {
                         wavex::log::error("[QUIC] async_send_to failed: {}", ec.message());
                     }
@@ -379,13 +378,12 @@ namespace wavex::network::quic {
         SSL_CTX_set_alpn_select_cb(
             shared_ssl_ctx_,
             [](SSL *, const unsigned char **out, unsigned char *outlen,
-               const unsigned char *in, unsigned int inlen, void *) -> int {
+               const unsigned char *in, const unsigned int inlen, void *) -> int {
                 unsigned int i = 0;
                 while (i < inlen) {
                     const unsigned char proto_len = in[i++];
                     if (i + proto_len > inlen) break;
-                    const std::string_view proto(reinterpret_cast<const char *>(in + i), proto_len);
-                    if (proto == "h3" || proto == "h3-29") {
+                    if (const std::string_view proto(reinterpret_cast<const char *>(in + i), proto_len); proto == "h3" || proto == "h3-29") {
                         *out = in + i;
                         *outlen = proto_len;
                         return SSL_TLSEXT_ERR_OK;

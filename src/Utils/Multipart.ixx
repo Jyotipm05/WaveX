@@ -16,8 +16,8 @@ module;
 export module wavex:utils_multipart;
 
 export namespace wavex::utils {
-    using wavex::utils::UploadedFile;
-    using wavex::utils::FormField;
-    using wavex::utils::MultipartLimits;
-    using wavex::utils::MultipartFormData;
+    using utils::UploadedFile;
+    using utils::FormField;
+    using utils::MultipartLimits;
+    using utils::MultipartFormData;
 }

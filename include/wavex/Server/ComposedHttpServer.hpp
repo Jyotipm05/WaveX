@@ -128,7 +128,7 @@ namespace wavex::server {
         [[nodiscard]] bool is_acceptor_open() const noexcept { return server_.is_acceptor_open(); }
         [[nodiscard]] static bool is_http3_enabled() noexcept { return true; }
 
-        void allow_insecure(bool allow = true) noexcept {
+        void allow_insecure(const bool allow = true) noexcept {
             allow_insecure_ = allow;
             server_.allow_insecure(allow);
         }
@@ -167,7 +167,7 @@ namespace wavex::server {
                 [](std::shared_ptr<network::quic::QuicStream> stream)
             -> asio::awaitable<void> {
                     if (!stream) co_return;
-                    auto conn = stream->connection();
+                    const auto conn = stream->connection();
                     if (!conn) co_return;
                     auto session_ctx = std::static_pointer_cast<protos::http::http3::connection_context>(conn->user_context());
                     if (!session_ctx) {
@@ -212,7 +212,7 @@ namespace wavex::server {
             server_.stop();
         }
 
-        void exit(std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+        void exit(const std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
             if (quic_server_) {
                 quic_server_->stop();
                 quic_server_.reset();
@@ -220,7 +220,7 @@ namespace wavex::server {
             server_.exit(timeout);
         }
 
-        void shutdown(std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+        void shutdown(const std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
             exit(timeout);
         }
 

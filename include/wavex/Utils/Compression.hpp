@@ -15,7 +15,6 @@
 #include <string_view>
 #include <expected>
 #include <system_error>
-#include <vector>
 
 #if defined(WAVEX_HAS_ZLIB) && WAVEX_HAS_ZLIB
 #define WAVEX_ZLIB_AVAILABLE 1

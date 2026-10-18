@@ -264,10 +264,9 @@ namespace wavex::network::quic {
                 out_frames.emplace_back(std::move(ccf));
             } else if (raw_type == 0x18) {
                 // NEW_CONNECTION_ID (RFC 9000 §19.15)
-                uint64_t seq_num = 0, retire_prior_to = 0;
-                if (!VarInt::decode(payload, cursor, seq_num))
+                if (uint64_t seq_num = 0; !VarInt::decode(payload, cursor, seq_num))
                     PARSE_FAIL("NEW_CONNECTION_ID decode seq_num");
-                if (!VarInt::decode(payload, cursor, retire_prior_to))
+                if (uint64_t retire_prior_to = 0; !VarInt::decode(payload, cursor, retire_prior_to))
                     PARSE_FAIL("NEW_CONNECTION_ID decode retire_prior_to");
                 if (cursor >= payload.size())
                     PARSE_FAIL("NEW_CONNECTION_ID missing cid_len");
@@ -278,8 +277,7 @@ namespace wavex::network::quic {
                 cursor += cid_len + 16; // Skip Connection ID + 16-byte Stateless Reset Token
             } else if (raw_type == 0x19) {
                 // RETIRE_CONNECTION_ID (RFC 9000 §19.16)
-                uint64_t seq_num = 0;
-                if (!VarInt::decode(payload, cursor, seq_num))
+                if (uint64_t seq_num = 0; !VarInt::decode(payload, cursor, seq_num))
                     PARSE_FAIL("RETIRE_CONNECTION_ID decode seq_num");
             } else if (raw_type == 0x1a || raw_type == 0x1b) {
                 // PATH_CHALLENGE (0x1a) / PATH_RESPONSE (0x1b) (RFC 9000 §19.17-18)
@@ -300,7 +298,7 @@ namespace wavex::network::quic {
                     PARSE_FAIL("DATAGRAM dlen exceeds payload bounds");
                 cursor += dlen;
             } else {
-                wavex::log::warn(
+                log::warn(
                     "[QUIC] parse_frames: unrecognized frame type 0x{:02x} at offset {} in {} bytes payload, stopping packet frame parsing",
                     raw_type, cursor, payload.size());
                 break;

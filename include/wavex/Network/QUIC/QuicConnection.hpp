@@ -290,7 +290,7 @@ namespace wavex::network::quic {
             sni_hostname_ = std::move(sni);
         }
 
-        void set_idle_timeout(std::chrono::milliseconds timeout) noexcept {
+        void set_idle_timeout(const std::chrono::milliseconds timeout) noexcept {
             std::scoped_lock lock(mtx_);
             idle_timeout_ = timeout;
         }
@@ -372,7 +372,7 @@ namespace wavex::network::quic {
             return data_sent_;
         }
 
-        void set_max_peer_streams(uint64_t max_bidi, uint64_t max_uni) noexcept {
+        void set_max_peer_streams(const uint64_t max_bidi, const uint64_t max_uni) noexcept {
             std::scoped_lock lock(mtx_);
             max_peer_bidi_streams_ = max_bidi;
             max_peer_uni_streams_ = max_uni;
@@ -464,7 +464,7 @@ namespace wavex::network::quic {
             return next_packet_number_[space_index(type)]++;
         }
 
-        [[nodiscard]] auto sent_packets(std::size_t space) const noexcept -> const std::vector<SentPacket> & {
+        [[nodiscard]] auto sent_packets(const std::size_t space) const noexcept -> const std::vector<SentPacket> & {
             return sent_packets_[space];
         }
 

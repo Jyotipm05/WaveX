@@ -83,8 +83,7 @@ namespace wavex::utils {
             auto candidate = target_dir + sep + prefix + std::to_string(dist(rng)) + ".tmp";
             if (!fs_utils::exists(candidate, ec)) {
                 // Create empty file
-                BinaryFile ofs(candidate, FileMode::Write);
-                if (ofs.is_open()) {
+                if (BinaryFile ofs(candidate, FileMode::Write); ofs.is_open()) {
                     temp_path = std::move(candidate);
                     break;
                 }

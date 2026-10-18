@@ -36,7 +36,6 @@
 #pragma once
 
 #include <array>
-#include <cstddef>
 #include <memory>
 #include <memory_resource>
 #include <new>
@@ -217,7 +216,7 @@ namespace wavex::memory {
          * Pass this pointer to any PMR-aware container or allocator.
          * Returns nullptr for a moved-from arena.
          */
-        [[nodiscard]] std::pmr::memory_resource *resource() noexcept {
+        [[nodiscard]] std::pmr::memory_resource *resource() const noexcept {
             return mr_.get();
         }
 
@@ -228,7 +227,7 @@ namespace wavex::memory {
          * last release()) is reclaimed instantly. Every object allocated from the
          * arena must already be destroyed (see the lifetime rule above).
          */
-        void release() noexcept {
+        void release() const noexcept {
             if (mr_) mr_->release();
         }
     };
