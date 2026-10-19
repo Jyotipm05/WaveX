@@ -11,7 +11,7 @@ This document captures the engineering challenges, bugs encountered, and definit
 During MTU splitting and address validation tests, a client sent a `Handshake` packet to validate its IP address under RFC 9000 §8.1.
 Inside `QuicConnection::handle_datagram`:
 
-```c++
+```cpp
 // INCORRECT (OLD):
 if (is_server_ && state_ == ConnectionState::Initial) {
     if (!tls_ || !tls_->initialized) {

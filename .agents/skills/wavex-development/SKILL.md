@@ -24,10 +24,12 @@ This skill provides essential domain context for developing, extending, and debu
       mirrors `std::map` (`.at()`, `operator[]`, `.contains()`, `.find()`, `begin()`/`end()`). Case-insensitive header
       search via `.find_ci()`. Hard-capped at **64 query params** and **100 headers** — exceeding these limits causes
       `431 Request Header Fields Too Large`.
-    - `Memory.hpp`: Per-request arena allocator (`wavex::memory::RequestArena`). Wraps
-      `std::pmr::monotonic_buffer_resource` with a **4KB inline buffer** scoped to a single request (not the connection
-      lifetime). Chains to a thread-local `std::pmr::unsynchronized_pool_resource` on overflow. `arena.release()`
-      reclaims all memory in O(1). Thread-local pool trims via `get_thread_local_pool().release()` on idle.
+    - `Memory.hpp`: `wavex::memory::RequestArena` is a movable RAII handle owning a heap-stable
+      `std::pmr::monotonic_buffer_resource` (4KB first block) scoped to a single request. Blocks come from the
+      per-connection `ConnectionMemoryPool` (`synchronized_pool_resource`, upstream `new_delete_resource`). Every object
+      allocated from the arena must be destroyed **before** `arena.release()` or the arena's destruction; declare the
+      arena before `Request`/`Response` so scope exit does this automatically. A moved-from arena has a null
+      `resource()`. See `docs/guides/memory-and-lifetimes.md`.
     - `Event.hpp`: Generic C++23 pub-sub event architecture (`Event<Args...>`, `EventBus`, `Subscription`, `ShutdownEvent`).
       Multicast signal dispatch with snapshot isolation, RAII subscriptions (`sub.unsubscribe()`, `sub.detach()`), and
       `mutable std::mutex` in `EventBus` allowing `subscriber_count() const`.
@@ -156,12 +158,12 @@ This skill provides essential domain context for developing, extending, and debu
 
 8. **Future Protocols (GraphQL, WebSockets)**:
     - Refer to `.agents/rules/future-protocols-architecture.md` for architectural blueprints.
-    - Native HTTP/3 (RFC 9114, RFC 9204) over QUIC (RFC 9000, RFC 9001) is fully implemented and verified.
+    - Native HTTP/3 (RFC 9114, RFC 9204) over QUIC (RFC 9000, RFC 9001) is implemented (Beta; see `docs/components.md`).
     - Maintain the 3-seam architecture so remaining future protocols (GraphQL, WebSockets) integrate seamlessly when scheduled.
 
 9. **`string_view` Lifetime Safety Contract**:
     - `req.param(name)`, `req.query[key]`, and `res.get_body()` return `std::string_view` that is valid only within the
-      **current request coroutine turn** — until the next `co_await` that can reach `arena.release()`.
+      **current request coroutine turn** — until the request scope ends (the arena is destroyed or released).
     - **Safe (ephemeral use)**: Passing `string_view` to a filter, validator, format conversion (`std::from_chars`), or
       a direct DB query within the same coroutine turn — no copy needed.
     - **Unsafe (escaping use)**: Capturing `string_view` into a `spawn_blocking` lambda, a global/static cache, or any
@@ -291,7 +293,7 @@ This skill provides essential domain context for developing, extending, and debu
       - Never leave connection instances active across test boundaries without calling `conn->close()`, which must proactively cancel `loss_detection_timer_->cancel(ec)`.
       - When chaining sequential coroutines on the same `io_context`, call `io.restart()` prior to the next `co_spawn` and `run()`.
 
-37. **QUIC Server Initial Handshake Response Gating (`has_received_initial_`)**:
+36. **QUIC Server Initial Handshake Response Gating (`has_received_initial_`)**:
     - `send_initial_handshake_response()` builds an Initial ACK packet and a 1-RTT `HANDSHAKE_DONE` packet.
     - In mock or non-TLS fallbacks, this response must **only** be triggered if `has_received_initial_` is true:
       ```cpp
@@ -302,45 +304,45 @@ This skill provides essential domain context for developing, extending, and debu
       ```
     - Never invoke Initial handshake responses on non-Initial datagrams (e.g. client `Handshake` packets sent to validate address under RFC 9000 §8.1). Doing so injects spurious packets into `pending_outbound_datagrams_`, corrupting outbound queues and breaking packet count assertions.
 
-38. **Zero Protocol Leakage & Clean 3-Seam Decoupling**:
+37. **Zero Protocol Leakage & Clean 3-Seam Decoupling**:
     - The core server (`Server<Codec, Router>`) and connection loop (`ServerConnection.ipp`) must remain completely protocol-agnostic.
     - Never place codec-specific conditional logic (`if constexpr (is_http3_codec_v)`) or protocol-specific state (`h3_router_`, `http3_enabled_`) inside generic server components.
     - Multi-protocol serving (e.g. HTTP/1.1 & HTTP/2 over TCP + HTTP/3 over QUIC) must be encapsulated in `ComposedHttpServer`.
 
-39. **Peer Address Validation & Anti-Amplification (RFC 9000 §8.1)**:
+38. **Peer Address Validation & Anti-Amplification (RFC 9000 §8.1)**:
     - Prior to address validation, server sends are hard-capped at 3× cumulative bytes received.
     - Receiving any client `Handshake` packet validates the client address (`peer_address_validated_ = true`).
     - If handshake keys are not yet available, incoming `Handshake` packets must be safely buffered in `buffered_handshake_packets_` without advancing connection state or triggering fallback responses.
 
-40. **Mock Stream Coroutine Lifecycle & Test Teardown Invariant**:
+39. **Mock Stream Coroutine Lifecycle & Test Teardown Invariant**:
     - When testing coroutines that process streams in loops (`while (stream->is_open())`), pushing partial wire bytes without FIN leaves the coroutine suspended on `stream->async_read_some()`.
     - Test functions must explicitly close all streams (`stream->close()`) and connections (`conn->close()`), and invoke `io.stop()` and `io.poll()` prior to exiting. Failing to close leaves suspended coroutines and pending timers that prevent `io_context` destruction, causing automated test runners to time out.
 
-41. **Automated Test Runner Output Flushing (`std::endl`)**:
+40. **Automated Test Runner Output Flushing (`std::endl`)**:
     - CTest and CI runners block-buffer standard output (4096 bytes) when redirecting stdout to pipes. Terminating test milestone logs and `[PASS]` messages with `\n` instead of `std::endl` delays log delivery.
     - If a subsequent test deadlocks or times out, preceding un-flushed logs remain hidden in the OS buffer, masking the true failure site. All test runner output must be flushed immediately using `std::endl`.
 
-42. **HTTP/3 Session Demultiplexing & Connection Context (`user_context()`)**:
+41. **HTTP/3 Session Demultiplexing & Connection Context (`user_context()`)**:
     - QUIC unidirectional streams (RFC 9114 Control, QPACK Encoder/Decoder) mutate connection-wide state (SETTINGS, dynamic tables, GOAWAY).
     - `QuicConnection` provides a type-erased `user_context()` (downcast to `http3::connection_context`).
     - Bidirectional request streams must retrieve this context via `protocol_traits<Codec>::get_connection_context(stream, fallback)` so dynamic table entries inserted by encoder streams are visible during request header decompression.
 
-43. **QPACK Relative vs Absolute Indexing Invariant (RFC 9204 §4.3.2)**:
+42. **QPACK Relative vs Absolute Indexing Invariant (RFC 9204 §4.3.2)**:
     - Instructions from encoder sub-streams (Insert with Name Reference, Duplicate) supply relative indices referencing the dynamic table at that point in time.
     - Treating relative indices directly as absolute indices corrupts dynamic table lookups.
     - Always convert: $\text{Absolute Index} = \text{Insert Count} - 1 - \text{Relative Index}$.
 
-44. **HTTP/3 Resumable Request Parsing & Stream FIN Lifecycle (RFC 9114 §4.1)**:
+43. **HTTP/3 Resumable Request Parsing & Stream FIN Lifecycle (RFC 9114 §4.1)**:
     - Returning `success` on `HEADERS` frame arrival while the request payload is only partially received causes downstream handlers to read truncated bodies.
     - The parser must maintain state (`parser_state`) across asynchronous socket reads, consuming subsequent `DATA` chunks up to `remaining_data_frame_bytes`.
     - Only finalize a request once the stream FIN flag is reached or the specified `Content-Length` is completely satisfied.
 
-45. **QPACK Dynamic Table Connection Scope & Post-Base Addressing**:
+44. **QPACK Dynamic Table Connection Scope & Post-Base Addressing**:
     - Never instantiate dynamic tables per-stream or copy them per-request turn. QPACK dynamic state must be connection-scoped within `connection_context::decode_table`.
     - Table capacity must strictly respect the peer's advertised limit (`peer_qpack_max_table_capacity`).
     - Field lines referencing dynamic entries inserted after the Base of a header block must use Post-Base indexing ($\text{Post-Base Index} = \text{Absolute Index} - \text{Base}$, RFC 9204 §4.5.3).
 
-46. **Cryptographic Key Erasure (`OPENSSL_cleanse`) & Key Updates (RFC 9001 §6)**:
+45. **Cryptographic Key Erasure (`OPENSSL_cleanse`) & Key Updates (RFC 9001 §6)**:
     - Sensitive key material (AEAD keys, IVs, header protection keys) must never linger in deallocated heap memory.
     - Always invoke `OPENSSL_cleanse` on key buffers upon destruction or retirement during key phase transitions.
     - Short header packets must evaluate the Key Phase bit (`0x04`) and trigger HKDF key updates without dropping packets.
@@ -349,10 +351,7 @@ This skill provides essential domain context for developing, extending, and debu
 
 ## Detailed Reference Guides
 
-- [QUIC Transport & Reliability Architecture](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/skills/wavex-development/references/quic-transport-and-reliability.md): Loss detection (RFC 9002), PTO timers, stream reassembly by offset, and handshake state machine gating.
-- [HTTP/3 & QPACK Architecture](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/skills/wavex-development/references/http3-and-qpack-architecture.md): Binary framing, resumable request parsing, strict RFC 9114 validation, QPACK table indexing, and out-of-line compilation.
-- [3-Seam Architecture & Protocol Composition](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/skills/wavex-development/references/three-seam-architecture.md): Transport, Codec, and Policy seams, protocol leakage prevention, and `ComposedHttpServer`.
-- [Testing & Concurrency Gotchas](file:///d:/programming/Cpp-files/Projects/WaveX/.agents/skills/wavex-development/references/testing-and-debugging-gotchas.md): Asio timers in unit tests, mutex unlocking before `co_await`, and `weak_ptr` callback lifetime rules.
-
-
-
+- [QUIC Transport & Reliability Architecture](references/quic-transport-and-reliability.md): Loss detection (RFC 9002), PTO timers, stream reassembly by offset, and handshake state machine gating.
+- [HTTP/3 & QPACK Architecture](references/http3-and-qpack-architecture.md): Binary framing, resumable request parsing, strict RFC 9114 validation, QPACK table indexing, and out-of-line compilation.
+- [3-Seam Architecture & Protocol Composition](references/three-seam-architecture.md): Transport, Codec, and Policy seams, protocol leakage prevention, and `ComposedHttpServer`.
+- [Testing & Concurrency Gotchas](references/testing-and-debugging-gotchas.md): Asio timers in unit tests, mutex unlocking before `co_await`, and `weak_ptr` callback lifetime rules.

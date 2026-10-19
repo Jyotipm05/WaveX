@@ -11,6 +11,7 @@ This document provides guidelines, architectural principles, and instructions fo
 - [Code of Conduct](#-code-of-conduct)
 - [Architectural Principles](#-architectural-principles)
 - [Getting Started](#-getting-started)
+- [Documentation](#-documentation)
 - [Build Presets & Sanitizers](#-build-presets--sanitizers)
 - [Testing Guidelines](#-testing-guidelines)
 - [Coding & Design Standards](#-coding--design-standards)
@@ -51,9 +52,9 @@ When contributing code to WaveX, please strictly adhere to the framework's core 
 
 ### Prerequisites
 
-- **C++ Compiler**: C++23 compliant compiler (GCC 13+, Clang 16+, or MSVC 19.36+).
-- **Build System**: CMake 3.20 or newer.
-- **Package Manager / Dependencies**: Asio (standalone), Google RE2, nlohmann/json, OpenSSL (optional for TLS).
+- **C++ Compiler**: GCC 16+, Clang 18.1+, or MSVC 19.44+ (needs C++23 explicit object parameters and `<print>`).
+- **Build System**: CMake 4.0+ with Ninja.
+- **Dependencies**: Asio (standalone), Google RE2, nlohmann/json, OpenSSL (3.5+ for QUIC/HTTP3); zlib is optional. Install through [vcpkg](https://vcpkg.io/) or let CMake fetch what is missing. See [docs/building.md](docs/building.md).
 
 ### Cloning & Building
 
@@ -65,17 +66,23 @@ cd WaveX
 # Switch to the dev branch (all active development MUST happen on dev)
 git checkout dev
 
-# Configure with default build profile
-cmake -B build -DWAVEX_TEST=ON
+# Configure a Debug build with tests enabled
+cmake --preset test-profile
 
-# Build the project and test binaries
-cmake --build build
+# Build the library, tests and dev servers
+cmake --build --preset fast-dev
+
+# Run the test suite
+ctest --preset run-tests --output-on-failure
 ```
 
-#### Sample TLS cert - key pair generation
+#### Sample TLS certificate and key
 
-```powershell
-openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 365  -subj "/C=IN/ST=WB/L=Kharagpur/O=IIT_Kharagpur/CN=localhost"  -keyout test.key -out test.crt
+TLS and HTTP/3 tests expect `ssl/test.crt` and `ssl/test.key` (git-ignored). Generate them once:
+
+```bash
+mkdir -p ssl
+openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 365 -subj "/CN=localhost" -keyout ssl/test.key -out ssl/test.crt
 ```
 
 ---
@@ -86,11 +93,13 @@ WaveX provides pre-configured [`CMakePresets.json`](CMakePresets.json) targets f
 
 ### Recommended CMake Presets
 
-| Preset Name | Purpose | Command |
-| :--- | :--- | :--- |
-| `test-profile` | Standard build preset for unit & integration tests | `cmake --preset test-profile`<br/>`cmake --build --preset test-profile` |
-| `asan` | AddressSanitizer (ASan) build profile | `cmake --preset asan`<br/>`cmake --build --preset asan` |
-| `tsan` | ThreadSanitizer (TSan) build profile (GCC/Clang only) | `cmake --preset tsan`<br/>`cmake --build --preset tsan` |
+| Preset Name    | Purpose                                     | Command                                                             |
+|:---------------|:--------------------------------------------|:--------------------------------------------------------------------|
+| `test-profile` | Debug build with unit and integration tests | `cmake --preset test-profile`<br/>`cmake --build --preset fast-dev` |
+| `asan`         | AddressSanitizer + UBSan + LSan             | `cmake --preset asan`<br/>`cmake --build build/asan`                |
+| `tsan`         | ThreadSanitizer (GCC/Clang only)            | `cmake --preset tsan`<br/>`cmake --build build/tsan`                |
+
+MinGW GCC on Windows: use the `-mingw` variants (`test-profile-mingw`, `fast-dev-mingw`, `run-tests-mingw`).
 
 ### Running Sanitizer Presets
 
@@ -102,15 +111,15 @@ WaveX provides pre-configured [`CMakePresets.json`](CMakePresets.json) targets f
 > - On MSVC, MSVC ASan flags are auto-injected (`/fsanitize=address /Zi`). Ensure `ASAN_OPTIONS` does not include unsupported platform flags like `detect_leaks=1` or `detect_stack_use_after_return=1` on MSVC.
 
 ```bash
-# AddressSanitizer Run
+# AddressSanitizer run
 cmake --preset asan
-cmake --build --preset asan
-ctest --preset run-tests
+cmake --build build/asan
+ctest --preset asan
 
-# ThreadSanitizer Run (GCC/Clang)
+# ThreadSanitizer run (GCC/Clang)
 cmake --preset tsan
-cmake --build --preset tsan
-ctest --preset run-tests
+cmake --build build/tsan
+ctest --preset tsan
 ```
 
 ---
@@ -138,12 +147,27 @@ ctest --preset run-tests
 For HTTP protocol testing or Postman verification, launch the interactive demo server:
 
 ```bash
-./build/test-profile/wavex_postman_http1_server.exe
+./build/test-profile/wavex_postman_http1_server        # add .exe on Windows
 # Or with TLS:
-./build/test-profile/wavex_postman_http1_server.exe --tls
+./build/test-profile/wavex_postman_http1_server --tls
 ```
 
-Test endpoints against `http://127.0.0.1:8080`.
+Test endpoints against `http://127.0.0.1:8080`. All four dev servers and their flags are described in [docs/dev-servers.md](docs/dev-servers.md).
+
+---
+
+## 📚 Documentation
+
+User-facing documentation lives in [`docs/`](docs/README.md); the root `README.md` is a short landing page and should stay that way.
+
+- New or changed public API: update the matching guide in `docs/guides/` and, if maturity changes, [`docs/components.md`](docs/components.md).
+- New file or directory: update [`docs/project-structure.md`](docs/project-structure.md).
+- User-visible change: add a line under **Unreleased** in [`CHANGELOG.md`](CHANGELOG.md).
+- Code samples in docs must compile against the current headers; prefer copying from a passing test or dev server.
+
+### AI-assisted contributions
+
+[`.agents/rules/`](.agents/rules) and [`.agents/skills/wavex-development/`](.agents/skills/wavex-development/SKILL.md) hold the project's conventions, QUIC and test invariants, and architecture references. Read them (or point your coding agent at them) before changing the transport, codecs or memory model. The rules there are authoritative for coding conventions; this file is authoritative for process.
 
 ---
 
@@ -175,7 +199,7 @@ Test endpoints against `http://127.0.0.1:8080`.
    - [ ] Automated tests pass (`ctest --preset run-tests`).
    - [ ] Sanitizers (ASan/TSan) run clean without leaks or race conditions.
    - [ ] Code adheres to C++23 deducing this zero-vtable and base-class layer independence rules.
-   - [ ] Documentation (`README.md`, docstrings) updated where appropriate.
+   - [ ] Documentation updated: docstrings, the relevant page in `docs/`, and `CHANGELOG.md` (see [Documentation](#-documentation)).
 4. **Submit PR**: Open a Pull Request targeting the **`dev`** branch with a summary of changes and testing performed.
 
 ---

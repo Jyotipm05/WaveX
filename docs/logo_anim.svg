@@ -1,0 +1,105 @@
+<svg id="eE3jHRNUDkM1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500" width="500" height="500">
+  <defs>
+    <style>
+      /***************************************************
+      * Pure-CSS GitHub-Compatible Infinite Loop (6.5s cycle)
+      * - Entry: 0.00s to 1.82s (staggered draw-in)
+      * - Hold:  1.82s to 5.02s (3.2s pause after entry completes)
+      * - Exit:  5.02s to 6.50s (staggered un-draw in the SAME forward
+      *          direction using negative stroke-dashoffset, no rewind)
+      * - Wait after exit: 0s (immediately starts next entry)
+      **************************************************/
+
+      /* Element 1: Static black background */
+      svg .svg-elem-1 {
+      fill: rgb(0, 0, 0);
+      }
+
+      /* Element 2: White diagonal line (L = 567.5322875976562px) */
+      svg .svg-elem-2 {
+      stroke-dasharray: 567.5322875976562px;
+      stroke-dashoffset: 567.5322875976562px;
+      fill: transparent;
+      animation:
+      dash-2 6.5s cubic-bezier(0.47, 0, 0.745, 0.715) infinite,
+      fill-2 6.5s cubic-bezier(0.47, 0, 0.745, 0.715) infinite;
+      }
+
+      /* Element 3: Blue wave (L = 1508.4791259765625px) */
+      svg .svg-elem-3 {
+      stroke-dasharray: 1508.4791259765625px;
+      stroke-dashoffset: 1508.4791259765625px;
+      animation: dash-3 6.5s cubic-bezier(0.47, 0, 0.745, 0.715) infinite;
+      }
+
+      /* Element 4: ClipPath rect (L = 2002px) */
+      svg .svg-elem-4 {
+      stroke-dasharray: 2002px;
+      stroke-dashoffset: 2002px;
+      fill: transparent;
+      animation:
+      dash-4 6.5s cubic-bezier(0.47, 0, 0.745, 0.715) infinite,
+      fill-4 6.5s cubic-bezier(0.47, 0, 0.745, 0.715) infinite;
+      }
+
+      /* Element 5: Outer black border frame (L = 2003.23486328125px) */
+      svg .svg-elem-5 {
+      stroke-dasharray: 2003.23486328125px;
+      stroke-dashoffset: 2003.23486328125px;
+      animation: dash-5 6.5s cubic-bezier(0.47, 0, 0.745, 0.715) infinite;
+      }
+
+      /* ---------- Stroke Keyframes (Entry: +L -> 0 | Hold | Forward Exit: 0 -> -L) ---------- */
+
+      /* Elem 2: Enter 0.12s–1.12s | Hold until 5.14s | Exit 5.14s–6.14s */
+      @keyframes dash-2 {
+      0%, 1.85% { stroke-dashoffset: 567.5322875976562px; }
+      17.23%, 79.08% { stroke-dashoffset: 0; }
+      94.46%, 100% { stroke-dashoffset: -567.5322875976562px; }
+      }
+      @keyframes fill-2 {
+      0%, 13.85% { fill: transparent; }
+      24.62%, 79.08% { fill: rgb(0, 0, 0); }
+      89.85%, 100% { fill: transparent; }
+      }
+
+      /* Elem 3: Enter 0.24s–1.24s | Hold until 5.26s | Exit 5.26s–6.26s */
+      @keyframes dash-3 {
+      0%, 3.69% { stroke-dashoffset: 1508.4791259765625px; }
+      19.08%, 80.92% { stroke-dashoffset: 0; }
+      96.31%, 100% { stroke-dashoffset: -1508.4791259765625px; }
+      }
+
+      /* Elem 4: Enter 0.36s–1.36s | Hold until 5.38s | Exit 5.38s–6.38s */
+      @keyframes dash-4 {
+      0%, 5.54% { stroke-dashoffset: 2002px; }
+      20.92%, 82.77% { stroke-dashoffset: 0; }
+      98.15%, 100% { stroke-dashoffset: -2002px; }
+      }
+      @keyframes fill-4 {
+      0%, 16.92% { fill: transparent; }
+      27.69%, 82.77% { fill: rgb(0, 0, 0); }
+      93.54%, 100% { fill: transparent; }
+      }
+
+      /* Elem 5: Enter 0.48s–1.48s | Hold until 5.50s | Exit 5.50s–6.50s */
+      @keyframes dash-5 {
+      0%, 7.38% { stroke-dashoffset: 2003.23486328125px; }
+      22.77%, 84.62% { stroke-dashoffset: 0; }
+      100% { stroke-dashoffset: -2003.23486328125px; }
+      }
+    </style>
+    <clipPath id="eE3jHRNUDkM7">
+      <path d="M0,0h500v500h-500L0,0Z" class="svg-elem-4" />
+    </clipPath>
+  </defs>
+
+  <path d="M0,0h500v500h-500L0,0Z" fill="#000" class="svg-elem-1" />
+  <g clip-path="url(#eE3jHRNUDkM7)">
+    <g>
+      <path d="M313.159928,-20.362048L480,520" stroke="#fff" stroke-width="40" stroke-linecap="square" class="svg-elem-2" />
+      <path d="M-5,12c75.547607,0,44.531886,431.485457,109.899424,431.485457c74.000987,0,44.337323-347.636185,109.704862-347.636185c58.12514.578236,29.080086,309.168247,106.855384,309.168247c56.989539,0,107.801334-252.178709,175.882242-252.178709" transform="translate(2.658088 0)" fill="none" stroke="#00b4ff" stroke-width="36" stroke-linecap="round" stroke-linejoin="round" class="svg-elem-3" />
+    </g>
+  </g>
+  <path d="M0,0h500l1.23335,500L0,500L0,0Z" fill="none" stroke="#000" stroke-width="12" class="svg-elem-5" />
+</svg>

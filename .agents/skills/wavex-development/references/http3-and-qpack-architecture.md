@@ -8,8 +8,8 @@ This reference guide documents the design, state management, and critical invari
 
 ### Architecture
 To avoid internal compiler error crashes (`fatal error C1001: Internal compiler error in ParseTree`) on complex C++23 translation units:
-- Non-template implementations, static tables, and complex parsers are placed in [`src/protos/http/http3codec.cpp`](file:///d:/programming/Cpp-files/Projects/WaveX/src/protos/http/http3codec.cpp).
-- [`include/wavex/protos/http/http3codec.hpp`](file:///d:/programming/Cpp-files/Projects/WaveX/include/wavex/protos/http/http3codec.hpp) serves as a lightweight interface declaring:
+- Non-template implementations, static tables, and complex parsers are placed in [`src/protos/http/http3codec.cpp`](../../../../src/protos/http/http3codec.cpp).
+- [`include/wavex/protos/http/http3codec.hpp`](../../../../include/wavex/protos/http/http3codec.hpp) serves as a lightweight interface declaring:
   - `qpack::STATIC_TABLE` (`extern const std::array<static_entry, 99>`)
   - `qpack::dynamic_table` declarations
   - `qpack::encoder` and `qpack::decoder` declarations
