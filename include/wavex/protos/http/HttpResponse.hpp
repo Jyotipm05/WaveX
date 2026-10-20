@@ -645,7 +645,7 @@ namespace wavex::protos::http {
 
             this->set("Content-Type", custom_mime);
 
-            if (file_size < 100 * 1024 * 1024) {
+            if (file_size < 100ULL * 1024 * 1024) {
                 // < 100 MB: use Content-Length
                 this->set("Content-Length", std::to_string(file_size));
                 const std::string headers = serialize_headers_only();

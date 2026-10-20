@@ -93,66 +93,169 @@ namespace wavex::base {
     inline constexpr std::string_view ansi_reset = "\033[0m";
 
     /**
-     * @class Logger
-     * @brief Thread-safe, singleton logger with leveled output and source location support.
+     * @enum OverflowPolicy
+     * @brief Queue overflow handling strategies when the log buffer pool or queue is full.
      */
-    class Logger {
+    enum class OverflowPolicy : uint8_t {
+        Drop = 0,  ///< Non-blocking: increment dropped_count_ and return immediately (default)
+        Block = 1, ///< Blocking: caller waits until queue space becomes available
+        Grow = 2   ///< Dynamic growth: expand buffer pool up to max_pool_capacity
+    };
+
+    /**
+     * @struct LoggerConfig
+     * @brief Runtime configuration for the WaveX logger buffer pool and worker thread.
+     */
+    struct LoggerConfig {
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
-        std::optional<utils::BinaryFile> file_sink_{};
-        std::mutex mutex_{};
-        std::ostream *sink_{&std::cerr};
-        LogLevel min_level_{LogLevel::INFO};
-        bool colored_{true};
+        size_t pool_capacity{4096};
+        size_t max_pool_capacity{16384};
+        std::chrono::milliseconds flush_interval{50};
+        OverflowPolicy overflow_policy{OverflowPolicy::Drop};
+        bool async_mode{true};
+    };
+
+    /**
+     * @struct LogBuffer
+     * @brief Pre-allocated log record slot leased from LogBufferPool.
+     */
+    struct LogBuffer {
+        // ─── 1. Nested Types & Definitions (TOP) ───────────────────────────
+        static constexpr size_t kInlineCapacity = 512;
+
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        std::chrono::system_clock::time_point timestamp{};
+        std::string fallback{};
+        uint32_t line{0};
+        uint32_t length{0};
+        LogLevel level{LogLevel::INFO};
+        uint8_t thread_id_len{0};
+        bool has_location{false};
+        char thread_id_buf[24]{};
+        char filename_buf[64]{};
+        char inline_storage[kInlineCapacity]{};
 
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
-        Logger() = default;
+        LogBuffer() = default;
+        ~LogBuffer() = default;
+
+        LogBuffer(const LogBuffer &) = default;
+        LogBuffer &operator=(const LogBuffer &) = default;
+        LogBuffer(LogBuffer &&) noexcept = default;
+        LogBuffer &operator=(LogBuffer &&) noexcept = default;
+
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
+        void clear() noexcept {
+            length = 0;
+            fallback.clear();
+            has_location = false;
+            thread_id_len = 0;
+        }
+
+        [[nodiscard]] std::string_view message_view() const noexcept {
+            if (!fallback.empty()) {
+                return fallback;
+            }
+            return {inline_storage, length};
+        }
+
+        [[nodiscard]] std::string_view filename_view() const noexcept {
+            if (!has_location) return {};
+            return filename_buf;
+        }
+    };
+
+    /**
+     * @class Logger
+     * @brief Thread-safe, non-blocking asynchronous singleton logger with log buffer pooling.
+     */
+    class Logger {
+    public:
+        // ─── 1. Nested Types & Definitions (TOP) ───────────────────────────
+        struct BufferPool;
+        struct AsyncQueue;
+
+    private:
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        size_t pool_capacity_{4096};
+        size_t max_pool_capacity_{16384};
+        std::atomic<uint64_t> dropped_count_{0};
+        std::atomic<uint64_t> submitted_count_{0};
+        std::atomic<uint64_t> processed_count_{0};
+        std::chrono::milliseconds flush_interval_{50};
+        std::unique_ptr<BufferPool> pool_{};
+        std::unique_ptr<AsyncQueue> queue_{};
+        std::ostream *sink_{&std::cerr};
+        std::thread worker_thread_{};
+        std::mutex mutex_{};
+        std::mutex flush_mutex_{};
+        std::condition_variable cv_flush_{};
+        std::optional<utils::BinaryFile> file_sink_{};
+        LogLevel min_level_{LogLevel::INFO};
+        OverflowPolicy overflow_policy_{OverflowPolicy::Drop};
+        bool colored_{true};
+        bool async_mode_{true};
+        bool explicit_async_{false};
+        bool custom_stream_{false};
+        bool running_{false};
 
     public:
-        ~Logger() = default;
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        Logger();
+        ~Logger();
 
         Logger(const Logger &) = delete;
-
         Logger &operator=(const Logger &) = delete;
-
         Logger(Logger &&) = delete;
-
         Logger &operator=(Logger &&) = delete;
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
         /// Global singleton access
-        static Logger &instance() {
-            static Logger inst;
-            return inst;
-        }
+        static Logger &instance();
+
+        /// Reconfigure logger buffer pool and worker settings
+        void configure(const LoggerConfig &config);
 
         /// Set the minimum log level — anything below is discarded
-        void set_level(const LogLevel level = LogLevel::INFO) { min_level_ = level; }
+        void set_level(const LogLevel level = LogLevel::INFO) noexcept { min_level_ = level; }
 
         /// Get the current minimum log level
-        [[nodiscard]] LogLevel level() const { return min_level_; }
+        [[nodiscard]] LogLevel level() const noexcept { return min_level_; }
 
         /// Enable or disable ANSI terminal colors
-        void set_colored(const bool enable) { colored_ = enable; }
+        void set_colored(const bool enable) noexcept { colored_ = enable; }
 
         /// Check if ANSI colors are enabled
-        [[nodiscard]] bool colored() const { return colored_; }
+        [[nodiscard]] bool colored() const noexcept { return colored_; }
+
+        /// Set queue overflow policy
+        void set_overflow_policy(const OverflowPolicy policy) noexcept { overflow_policy_ = policy; }
+
+        /// Get current queue overflow policy
+        [[nodiscard]] OverflowPolicy overflow_policy() const noexcept { return overflow_policy_; }
+
+        /// Enable or disable asynchronous mode
+        void set_async(bool enable);
+
+        /// Check if asynchronous mode is active
+        [[nodiscard]] bool is_async() const noexcept { return async_mode_; }
+
+        /// Get count of dropped messages due to queue overflow
+        [[nodiscard]] uint64_t dropped_count() const noexcept {
+            return dropped_count_.load(std::memory_order_relaxed);
+        }
 
         /// Direct output to a different stream (default: std::cerr)
-        void set_output(std::ostream &os) {
-            std::lock_guard lock(mutex_);
-            file_sink_.reset();
-            sink_ = &os;
-        }
+        void set_output(std::ostream &os);
 
         /// Direct output to a file
-        void set_output(const std::string &path = "./logs/wavex.log") {
-            std::lock_guard lock(mutex_);
-            utils::BinaryFile::write_all(path, "", true); // Ensure dirs exist
-            file_sink_.emplace(path, utils::FileMode::Append);
-            if (file_sink_->is_open()) {
-                sink_ = nullptr;
-            }
-        }
+        void set_output(const std::string &path = "./logs/wavex.log");
+
+        /// Flush pending logs synchronously to sink
+        void flush();
+
+        /// Shutdown worker thread and flush
+        void shutdown();
 
         /**
          * @brief Core logging function with std::source_location.
@@ -163,8 +266,22 @@ namespace wavex::base {
                      std::format_string<Args...> fmt,
                      Args &&... args) {
             if (lvl < min_level_) return;
-            const std::string user_msg = std::format(fmt, std::forward<Args>(args)...);
-            write_loc(lvl, loc, user_msg);
+            if (is_sync_path()) {
+                const std::string user_msg = std::format(fmt, std::forward<Args>(args)...);
+                write_loc_sync(lvl, loc, user_msg);
+                return;
+            }
+            LogBuffer *slot = acquire_buffer(lvl);
+            if (!slot) return;
+            populate_header(slot, lvl, loc);
+            if (auto res = std::format_to_n(slot->inline_storage, LogBuffer::kInlineCapacity, fmt,
+                                            std::forward<Args>(args)...);
+                static_cast<size_t>(res.size) <= LogBuffer::kInlineCapacity) {
+                slot->length = static_cast<uint32_t>(res.size);
+            } else {
+                slot->fallback = std::format(fmt, std::forward<Args>(args)...);
+            }
+            enqueue_buffer(slot);
         }
 
         /**
@@ -174,7 +291,20 @@ namespace wavex::base {
                      const std::source_location &loc,
                      const std::string_view msg) {
             if (lvl < min_level_) return;
-            write_loc(lvl, loc, msg);
+            if (is_sync_path()) {
+                write_loc_sync(lvl, loc, msg);
+                return;
+            }
+            LogBuffer *slot = acquire_buffer(lvl);
+            if (!slot) return;
+            populate_header(slot, lvl, loc);
+            if (msg.size() <= LogBuffer::kInlineCapacity) {
+                std::memcpy(slot->inline_storage, msg.data(), msg.size());
+                slot->length = static_cast<uint32_t>(msg.size());
+            } else {
+                slot->fallback.assign(msg.data(), msg.size());
+            }
+            enqueue_buffer(slot);
         }
 
         /**
@@ -185,8 +315,22 @@ namespace wavex::base {
                  std::format_string<Args...> fmt,
                  Args &&... args) {
             if (lvl < min_level_) return;
-            const std::string user_msg = std::format(fmt, std::forward<Args>(args)...);
-            write(lvl, user_msg);
+            if (is_sync_path()) {
+                const std::string user_msg = std::format(fmt, std::forward<Args>(args)...);
+                write_sync(lvl, user_msg);
+                return;
+            }
+            LogBuffer *slot = acquire_buffer(lvl);
+            if (!slot) return;
+            populate_header_no_loc(slot, lvl);
+            if (auto res = std::format_to_n(slot->inline_storage, LogBuffer::kInlineCapacity, fmt,
+                                            std::forward<Args>(args)...);
+                static_cast<size_t>(res.size) <= LogBuffer::kInlineCapacity) {
+                slot->length = static_cast<uint32_t>(res.size);
+            } else {
+                slot->fallback = std::format(fmt, std::forward<Args>(args)...);
+            }
+            enqueue_buffer(slot);
         }
 
         /**
@@ -194,15 +338,42 @@ namespace wavex::base {
          */
         void log(const LogLevel lvl, const std::string_view msg) {
             if (lvl < min_level_) return;
-            write(lvl, msg);
+            if (is_sync_path()) {
+                write_sync(lvl, msg);
+                return;
+            }
+            LogBuffer *slot = acquire_buffer(lvl);
+            if (!slot) return;
+            populate_header_no_loc(slot, lvl);
+            if (msg.size() <= LogBuffer::kInlineCapacity) {
+                std::memcpy(slot->inline_storage, msg.data(), msg.size());
+                slot->length = static_cast<uint32_t>(msg.size());
+            } else {
+                slot->fallback.assign(msg.data(), msg.size());
+            }
+            enqueue_buffer(slot);
         }
 
     private:
+        [[nodiscard]] bool is_sync_path() const noexcept {
+            if (!async_mode_ || !running_) return true;
+            if (!explicit_async_ && custom_stream_) return true;
+            return false;
+        }
+
         static std::string_view extract_filename(std::string_view filepath);
+        static void populate_header(LogBuffer *slot, LogLevel lvl, const std::source_location &loc);
+        static void populate_header_no_loc(LogBuffer *slot, LogLevel lvl);
 
-        void write_loc(LogLevel lvl, const std::source_location &loc, std::string_view msg);
+        LogBuffer *acquire_buffer(LogLevel lvl);
+        void enqueue_buffer(LogBuffer *slot);
 
-        void write(LogLevel lvl, std::string_view msg);
+        void write_loc_sync(LogLevel lvl, const std::source_location &loc, std::string_view msg);
+        void write_sync(LogLevel lvl, std::string_view msg);
+
+        void start_worker();
+        void worker_loop();
+        void format_record(const LogBuffer *slot, std::string &line) const;
     };
 } // namespace wavex::base
 
@@ -225,6 +396,10 @@ namespace wavex::base {
  * @brief Modern zero-macro logging interface with automatic source_location capture.
  */
 namespace wavex::log {
+    using LogLevel = base::LogLevel;
+    using OverflowPolicy = base::OverflowPolicy;
+    using LoggerConfig = base::LoggerConfig;
+
     template<typename... Args>
     struct format_with_loc {
         std::format_string<Args...> fmt;
@@ -268,22 +443,22 @@ namespace wavex::log {
 
     template<typename... Args>
     inline void trace(format_with_loc<std::type_identity_t<Args>...> fwl, Args &&... args) {
-        base::Logger::instance().log_loc(base::LogLevel::TRACE, fwl.loc, fwl.fmt,
+        base::Logger::instance().log_loc(LogLevel::TRACE, fwl.loc, fwl.fmt,
                                                   std::forward<Args>(args)...);
     }
 
     inline void trace(const msg_with_loc &mwl) {
-        base::Logger::instance().log_loc(base::LogLevel::TRACE, mwl.loc, mwl.msg);
+        base::Logger::instance().log_loc(LogLevel::TRACE, mwl.loc, mwl.msg);
     }
 
     template<typename... Args>
     inline void debug(format_with_loc<std::type_identity_t<Args>...> fwl, Args &&... args) {
-        base::Logger::instance().log_loc(base::LogLevel::DEBUG, fwl.loc, fwl.fmt,
+        base::Logger::instance().log_loc(LogLevel::DEBUG, fwl.loc, fwl.fmt,
                                                   std::forward<Args>(args)...);
     }
 
     inline void debug(const msg_with_loc &mwl) {
-        base::Logger::instance().log_loc(base::LogLevel::DEBUG, mwl.loc, mwl.msg);
+        base::Logger::instance().log_loc(LogLevel::DEBUG, mwl.loc, mwl.msg);
     }
 
 #else
@@ -308,50 +483,70 @@ namespace wavex::log {
 
     template<typename... Args>
     inline void info(format_with_loc<std::type_identity_t<Args>...> fwl, Args &&... args) {
-        base::Logger::instance().log_loc(base::LogLevel::INFO, fwl.loc, fwl.fmt,
+        base::Logger::instance().log_loc(LogLevel::INFO, fwl.loc, fwl.fmt,
                                                   std::forward<Args>(args)...);
     }
 
     inline void info(const msg_with_loc &mwl) {
-        base::Logger::instance().log_loc(base::LogLevel::INFO, mwl.loc, mwl.msg);
+        base::Logger::instance().log_loc(LogLevel::INFO, mwl.loc, mwl.msg);
     }
 
     template<typename... Args>
     inline void warn(format_with_loc<std::type_identity_t<Args>...> fwl, Args &&... args) {
-        base::Logger::instance().log_loc(base::LogLevel::WARN, fwl.loc, fwl.fmt,
+        base::Logger::instance().log_loc(LogLevel::WARN, fwl.loc, fwl.fmt,
                                                   std::forward<Args>(args)...);
     }
 
     inline void warn(const msg_with_loc &mwl) {
-        base::Logger::instance().log_loc(base::LogLevel::WARN, mwl.loc, mwl.msg);
+        base::Logger::instance().log_loc(LogLevel::WARN, mwl.loc, mwl.msg);
     }
 
     template<typename... Args>
     inline void error(format_with_loc<std::type_identity_t<Args>...> fwl, Args &&... args) {
-        base::Logger::instance().log_loc(base::LogLevel::ERR, fwl.loc, fwl.fmt,
+        base::Logger::instance().log_loc(LogLevel::ERR, fwl.loc, fwl.fmt,
                                                   std::forward<Args>(args)...);
     }
 
     inline void error(const msg_with_loc &mwl) {
-        base::Logger::instance().log_loc(base::LogLevel::ERR, mwl.loc, mwl.msg);
+        base::Logger::instance().log_loc(LogLevel::ERR, mwl.loc, mwl.msg);
     }
 
     template<typename... Args>
     [[noreturn]] inline void fatal(format_with_loc<std::type_identity_t<Args>...> fwl, Args &&... args) {
-        base::Logger::instance().log_loc(base::LogLevel::FATAL, fwl.loc, fwl.fmt,
+        base::Logger::instance().log_loc(LogLevel::FATAL, fwl.loc, fwl.fmt,
                                                   std::forward<Args>(args)...);
+        base::Logger::instance().flush();
         std::abort();
     }
 
     [[noreturn]] inline void fatal(const msg_with_loc &mwl) {
-        base::Logger::instance().log_loc(base::LogLevel::FATAL, mwl.loc, mwl.msg);
+        base::Logger::instance().log_loc(LogLevel::FATAL, mwl.loc, mwl.msg);
+        base::Logger::instance().flush();
         std::abort();
     }
 
-    using LogLevel = base::LogLevel;
-
     inline void set_level(const LogLevel level) {
         base::Logger::instance().set_level(level);
+    }
+
+    inline void set_async(const bool enable) {
+        base::Logger::instance().set_async(enable);
+    }
+
+    inline void set_overflow_policy(const OverflowPolicy policy) {
+        base::Logger::instance().set_overflow_policy(policy);
+    }
+
+    inline void configure(const LoggerConfig &config) {
+        base::Logger::instance().configure(config);
+    }
+
+    inline void flush() {
+        base::Logger::instance().flush();
+    }
+
+    inline uint64_t dropped_count() {
+        return base::Logger::instance().dropped_count();
     }
 } // namespace wavex::log
 

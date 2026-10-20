@@ -12,7 +12,7 @@ include/wavex/
 │   ├── Memory.hpp            RequestArena, ConnectionMemoryPool
 │   ├── StringSink.hpp        string-sink concept for allocation-free serialization
 │   ├── Event.hpp             Event, EventBus, ShutdownEvent
-│   ├── Logger.hpp            levelled logger with source_location
+│   ├── Logger.hpp            async non-blocking logger, LogBuffer pool, source_location
 │   ├── MimeTypes.hpp, Uri.hpp, Url.hpp
 ├── Async/SpawnBlocking.hpp   coroutine awaitable for blocking work
 ├── CLI/CLI.hpp               command-line parser

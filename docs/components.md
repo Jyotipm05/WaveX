@@ -4,7 +4,7 @@
 
 | Component                  | Status      | Description                                                                                                                                              |
 |:---------------------------|:------------|:---------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `Base/Logger`              | ✅ Complete | Levelled logger (TRACE, DEBUG, INFO, WARN, ERROR, FATAL)                                                                                                 |
+| `Base/Logger`              | ✅ Complete | Non-blocking async logger with pre-allocated `LogBuffer` pooling, priority headroom, and drop policies |
 | `Base/Uri` / `Base/Url`    | ✅ Complete | RFC 3986 URI encode/decode & URL query string parser                                                                                                     |
 | `Base/MimeTypes`           | ✅ Complete | Fast file extension to MIME type mappings (`mime_type_from_ext`)                                                                                         |
 | `Base/Chainable`           | ✅ Complete | C++23 "Deducing `this`" static pipeline dispatch (`StaticChain`, `make_chain`, `KeepAlivePolicy`, `ConditionalChainable`)                                |
