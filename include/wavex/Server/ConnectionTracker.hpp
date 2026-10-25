@@ -13,6 +13,8 @@
 
 #pragma once
 
+#include <array>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -37,11 +39,19 @@ namespace wavex::server {
             }
         };
 
-        // ─── 2. Member Variables (Arranged for minimum padding) ──────────────
-        mutable std::mutex mtx;
-        std::unordered_map<uint64_t, Entry> all_sockets;
-        std::unordered_set<uint64_t> idle_sockets;
-        uint64_t next_id{1};
+        // ─── 2. Member Variables ─────────────────────────────────────────────
+        /// Lock striping: connection ids are sequential, so `id % kStripes` spreads them evenly and
+        /// concurrent register/idle/active/unregister calls from different workers rarely share a lock.
+        static constexpr std::size_t kStripes = 16;
+
+        struct alignas(64) Stripe {
+            mutable std::mutex mtx;
+            std::unordered_map<uint64_t, Entry> all_sockets;
+            std::unordered_set<uint64_t> idle_sockets;
+        };
+
+        std::array<Stripe, kStripes> stripes;
+        std::atomic<uint64_t> next_id{1};
 
         // ─── 3. Constructors & Destructor ────────────────────────────────────
         ConnectionTracker() = default;

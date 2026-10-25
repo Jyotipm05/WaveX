@@ -7,6 +7,8 @@
 
 #include <iostream>
 #include <string>
+#include <array>
+#include <atomic>
 #include <vector>
 #include <thread>
 #include <chrono>
@@ -573,6 +575,117 @@ void test_server_restartability() {
     check(server.is_stopped(), "Server stopped (cycle 2)");
 }
 
+
+// ─── Test 13: stop() with live connections, then run() again in the same process ──
+
+void test_server_hard_stop_and_restart() {
+    std::cout << "\n[Test 13] stop() drains live connections in-process; same Server object restarts\n";
+
+    wavex::engine::Http1Router router;
+    router.get("/ping", [](wavex::protos::http::Http1Request &, wavex::protos::http::Http1Response &res) -> asio::awaitable<void> {
+        res.status(200).send("pong");
+        co_return;
+    });
+
+    constexpr unsigned short port = 18096;
+    wavex::server::Http1Server server(router, "127.0.0.1", port);
+    server.enable_signal_handling(false);
+
+    for (int cycle = 1; cycle <= 2; ++cycle) {
+        std::thread srv([&server] { server.run(); });
+        while (!server.is_running()) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+        // 1. Open idle keep-alive connections (one request each, then silence) so they sit in the idle read.
+        asio::io_context client_ioc;
+        std::vector<asio::ip::tcp::socket> clients;
+        for (int i = 0; i < 24; ++i) {
+            clients.emplace_back(client_ioc);
+            clients.back().connect({asio::ip::make_address("127.0.0.1"), port});
+            const std::string req = "GET /ping HTTP/1.1\r\nHost: x\r\n\r\n";
+            asio::write(clients.back(), asio::buffer(req));
+        }
+        for (auto &c : clients) {
+            std::array<char, 256> buf{};
+            std::error_code ec;
+            (void) c.read_some(asio::buffer(buf), ec);
+        }
+        check(server.active_connections() >= 24, "live keep-alive connections are tracked");
+
+        // 2. Hard stop from the controlling thread while those connections are still open.
+        server.stop();
+        srv.join();
+        check(server.active_connections() == 0, "stop() leaves no connection behind");
+        check(server.is_stopped(), "server reports stopped");
+
+        // 3. The clients must observe the close (EOF) promptly, not hang. Poll non-blocking for up to 1 s.
+        bool all_closed = true;
+        for (auto &c : clients) {
+            c.non_blocking(true);
+            bool closed = false;
+            for (int t = 0; t < 100 && !closed; ++t) {
+                std::array<char, 16> buf{};
+                std::error_code ec;
+                const auto n = c.read_some(asio::buffer(buf), ec);
+                if (n == 0 && ec && ec != asio::error::would_block && ec != asio::error::try_again) {
+                    closed = true; // EOF or reset
+                } else {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+            }
+            all_closed = all_closed && closed;
+        }
+        check(all_closed, "clients see their connections closed after stop()");
+    }
+    std::cout << "  (two stop()/run() cycles on one Server object completed)\n";
+}
+
+
+// ─── Test 14: scale-down never retires a worker that owns live coroutines ──────
+
+// A coroutine *function* (not a capturing lambda): the frame copies its parameters, so nothing dangles.
+asio::awaitable<void> live_until_released(std::atomic<bool> *release, std::atomic<int> *running,
+                                          std::atomic<int> *finished) {
+    ++*running;
+    auto ex = co_await asio::this_coro::executor;
+    asio::steady_timer t(ex);
+    while (!release->load()) {
+        t.expires_after(std::chrono::milliseconds(5));
+        co_await t.async_wait(asio::use_awaitable);
+    }
+    ++*finished;
+}
+
+void test_scale_down_keeps_loaded_workers() {
+    std::cout << "\n[Test 14] ThreadPool scale-down must not strand live coroutines\n";
+
+    wavex::server::ThreadPoolConfig cfg;
+    cfg.set_limits(3, 3);
+    cfg.scale_down_cooldown_cycles = 1;
+    cfg.check_interval = std::chrono::milliseconds(10000); // we drive scaling by hand
+    wavex::server::ThreadPool pool(cfg);
+    check(pool.worker_count() == 3, "pool starts with 3 workers");
+    cfg.min_workers = 1; // from now on the pool may shrink
+
+    std::atomic<bool> release{false};
+    std::atomic<int> running{0}, finished{0};
+    for (int i = 0; i < 3; ++i) {
+        pool.spawn_coroutine(live_until_released(&release, &running, &finished));
+    }
+    for (int i = 0; i < 500 && running.load() < 3; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    check(running.load() == 3, "3 long-lived coroutines are running (one per worker)");
+
+    for (int i = 0; i < 10; ++i) pool.evaluate_scaling();
+    check(pool.worker_count() == 3, "no worker retired while it owns a live coroutine");
+
+    release = true;
+    for (int i = 0; i < 500 && finished.load() < 3; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    check(finished.load() == 3, "all coroutines ran to completion (none stranded)");
+
+    for (int i = 0; i < 10; ++i) pool.evaluate_scaling();
+    check(pool.worker_count() == 1, "pool scales down once the workers are idle");
+}
+
 // ─── main ─────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -591,6 +704,8 @@ int main() {
     test_server_external_shutdown_event();
     test_server_inflight_drain();
     test_server_restartability();
+    test_server_hard_stop_and_restart();
+    test_scale_down_keeps_loaded_workers();
 
     std::cout << "\n" << tests_passed << "/" << tests_run << " tests passed.\n";
     return tests_passed == tests_run ? 0 : 1;

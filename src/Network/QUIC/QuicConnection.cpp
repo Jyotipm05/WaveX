@@ -1802,7 +1802,8 @@ namespace wavex::network::quic {
 
             ConnectionCloseFrame ccf;
             ccf.error_code = static_cast<uint64_t>(err);
-            ccf.reason_phrase = std::string(reason);
+            // reason_phrase is a string_view; `reason` outlives this function, a temporary std::string would not.
+            ccf.reason_phrase = reason;
 
             std::string payload;
             serialize_frame(ccf, payload);

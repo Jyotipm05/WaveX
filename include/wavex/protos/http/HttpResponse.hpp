@@ -20,7 +20,9 @@
 #include <utility>
 #include <expected>
 #include <chrono>
+#include <memory>
 #include <wavex/Utils/BinaryFile.hpp>
+#include <wavex/Async/SpawnBlocking.hpp>
 #include <system_error>
 #include <functional>
 #include <memory_resource>
@@ -636,12 +638,20 @@ namespace wavex::protos::http {
             const CompressionMode compression = CompressionMode::None) {
             (void) compression; // Reserved for future zlib update
 
-            utils::BinaryFile file(filepath, utils::FileMode::Read);
-            if (!file.is_open()) {
+            // Every filesystem touch (open/stat/read) runs on the blocking pool so a slow disk or network
+            // mount never stalls a reactor/worker thread. The handle and buffer are owned by a shared
+            // state that the blocking task captures by value, so the task stays valid even if this
+            // coroutine is destroyed (e.g. connection closed) while a read is in flight.
+            auto st = co_await wavex::spawn_blocking([path = std::string(filepath), buffer_size] {
+                auto state = std::make_shared<FileSendState>(path, buffer_size);
+                if (state->file.is_open()) state->size = state->file.file_size();
+                return state;
+            });
+            if (!st->file.is_open()) {
                 co_return std::unexpected(std::make_error_code(std::errc::no_such_file_or_directory));
             }
 
-            const std::size_t file_size = file.file_size();
+            const std::size_t file_size = st->size;
 
             this->set("Content-Type", custom_mime);
 
@@ -654,10 +664,8 @@ namespace wavex::protos::http {
                     co_return res;
                 }
 
-                std::vector<char> buf(buffer_size);
-                while (file.read(buf.data(), buf.size()) > 0) {
-                    const auto bytes_read = file.gCount();
-                    if (auto res = co_await async_write_with_timeout(std::string_view(buf.data(), bytes_read), timeout);
+                while (const std::size_t n = co_await read_next_chunk(st)) {
+                    if (auto res = co_await async_write_with_timeout(std::string_view(st->buf.data(), n), timeout);
                         !res) {
                         co_return res;
                     }
@@ -667,10 +675,8 @@ namespace wavex::protos::http {
             }
 
             // Chunked streaming for large files
-            std::vector<char> buf(buffer_size);
-            while (file.read(buf.data(), buf.size()) > 0) {
-                const auto bytes_read = file.gCount();
-                if (auto res = co_await write_chunk(std::string_view(buf.data(), bytes_read), timeout); !res) {
+            while (const std::size_t n = co_await read_next_chunk(st)) {
+                if (auto res = co_await write_chunk(std::string_view(st->buf.data(), n), timeout); !res) {
                     co_return res;
                 }
             }
@@ -678,6 +684,27 @@ namespace wavex::protos::http {
         }
 
     private:
+        /// File handle + staging buffer for send_file(); shared so offloaded reads outlive the coroutine.
+        struct FileSendState {
+            utils::BinaryFile file;
+            std::vector<char> buf;
+            std::size_t size{0};
+
+            FileSendState(const std::string &path, const std::size_t buffer_size)
+                : file(path, utils::FileMode::Read), buf(buffer_size) {
+            }
+        };
+
+        /// Reads the next block on the blocking pool; returns 0 at end of file.
+        static asio::awaitable<std::size_t> read_next_chunk(std::shared_ptr<FileSendState> st) {
+            co_return co_await wavex::spawn_blocking([st]() -> std::size_t {
+                if (st->file.read(st->buf.data(), st->buf.size()) > 0) {
+                    return static_cast<std::size_t>(st->file.gCount());
+                }
+                return 0;
+            });
+        }
+
         [[nodiscard]] asio::awaitable<std::expected<void, std::error_code> > async_write_with_timeout(
             const std::string_view data,
             const std::chrono::milliseconds timeout) const {

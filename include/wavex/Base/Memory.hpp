@@ -11,7 +11,7 @@
  * Architecture (3-tier):
  *   Tier 0: RequestArena (std::pmr::monotonic_buffer_resource) — 4KB initial block size
  *           allocated lazily from connection pool, bump allocation, 0 malloc calls
- *   Tier 1: ConnectionMemoryPool (std::pmr::synchronized_pool_resource) — connection-scoped
+ *   Tier 1: ConnectionMemoryPool (std::pmr::unsynchronized_pool_resource) — connection-scoped
  *           thread-safe slab pool
  *   Tier 2: std::pmr::new_delete_resource() — global heap fallback (thread-safe)
  *
@@ -89,7 +89,12 @@ namespace wavex::memory {
     class ConnectionMemoryPool {
     private:
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
-        std::pmr::synchronized_pool_resource pool_;
+        // Deliberately unsynchronized. A connection's coroutine runs serialized (one resumption at a time, with
+        // the executor hand-off providing the happens-before edge when it hops workers), so the pool is never
+        // used concurrently. synchronized_pool_resource is not an option: libstdc++ allocates a pthread key per
+        // instance and Linux caps keys at 1024 (PTHREAD_KEYS_MAX), so the 1025th live connection would throw
+        // EAGAIN from its constructor.
+        std::pmr::unsynchronized_pool_resource pool_;
 
     public:
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────

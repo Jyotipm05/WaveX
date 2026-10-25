@@ -113,19 +113,28 @@ namespace wavex::server {
         auto &stream = *stream_ptr;
         auto weak_stream = std::weak_ptr<Stream>(stream_ptr);
 
+        // Sockets are not thread-safe. The tracker is driven from other threads (stop(), graceful drain), so
+        // its callbacks never touch the socket themselves: they post to this connection's own executor,
+        // where the coroutine runs, and the cancel/close happens serialized with the coroutine's I/O.
+        auto executor = co_await asio::this_coro::executor;
+
         const uint64_t conn_id = conn_tracker_.register_socket(
-            [weak_stream] {
-                if (auto s = weak_stream.lock()) {
-                    asio::error_code ec;
-                    s->lowest_layer().cancel(ec);
-                }
+            [weak_stream, executor] {
+                asio::post(executor, [weak_stream] {
+                    if (auto s = weak_stream.lock()) {
+                        asio::error_code ec;
+                        s->lowest_layer().cancel(ec);
+                    }
+                });
             },
-            [weak_stream] {
-                if (auto s = weak_stream.lock()) {
-                    asio::error_code ec;
-                    s->lowest_layer().cancel(ec);
-                    s->lowest_layer().close(ec);
-                }
+            [weak_stream, executor] {
+                asio::post(executor, [weak_stream] {
+                    if (auto s = weak_stream.lock()) {
+                        asio::error_code ec;
+                        s->lowest_layer().cancel(ec);
+                        s->lowest_layer().close(ec);
+                    }
+                });
             }
         );
         active_connections_.fetch_add(1, std::memory_order_acq_rel);
@@ -176,8 +185,6 @@ namespace wavex::server {
         std::size_t stream_buf_consumed = 0;
         typename CustTraits::connection_context default_conn_ctx{};
         auto &conn_ctx = CustTraits::get_connection_context(stream, default_conn_ctx);
-        auto executor = co_await asio::this_coro::executor;
-
         // Per-connection memory pool: outlives individual requests and travels safely across worker hops
 
         try {
@@ -330,7 +337,8 @@ namespace wavex::server {
                         request_count < max_keep_alive_requests_ ? max_keep_alive_requests_ - request_count : 0;
 
                 // Hard cap: reject requests that overflow query param or header limits
-                if (req.has_query_param_overflow()) [[unlikely]] {
+                if (req.has_query_param_overflow() || req.query.size() > max_query_params_ ||
+                    req.header_count() > max_headers_) [[unlikely]] {
                     CustRes err_res(arena.resource());
                     CustTraits::prepare_response(req, err_res, false, 0, 0);
                     err_res.status(431).send("Request Header Fields Too Large");

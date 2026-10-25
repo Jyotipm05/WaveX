@@ -2,6 +2,7 @@
  * @file test_client.cpp
  * @brief Unit & integration tests for HttpClient, HttpRequest (client), and HttpResponse (client).
  */
+#include <cstdlib>
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -625,8 +626,14 @@ int main() {
     test_http_request_client_serialization();
     test_http_response_client_parsing();
     test_http_client_integration();
-    test_external_example_server();
-    test_external_response_output();
+    // These two need the public internet (example.com), so they are opt-in:
+    // CI and offline machines skip them unless WAVEX_TEST_NETWORK=1.
+    if (const char *net = std::getenv("WAVEX_TEST_NETWORK"); net != nullptr && *net != '\0' && *net != '0') {
+        test_external_example_server();
+        test_external_response_output();
+    } else {
+        std::cout << "\n[Tests 4-5] SKIPPED: set WAVEX_TEST_NETWORK=1 to run the example.com requests\n";
+    }
     test_http_client_advanced_features();
 
     std::cout << "\n" << tests_passed << "/" << tests_run << " tests passed.\n";

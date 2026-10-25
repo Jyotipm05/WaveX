@@ -132,13 +132,16 @@ if (NOT asio_FOUND)
     FetchContent_Declare(
             asio
             GIT_REPOSITORY https://github.com/chriskohlhoff/asio.git
-            GIT_TAG asio-1-32-0
+            GIT_TAG 03ae834edbace31a96157b89bf50e5ee464e5ef9 # asio-1-32-0 (pinned to the commit)
             GIT_SHALLOW TRUE
     )
 
     FetchContent_GetProperties(asio)
     if (NOT asio_POPULATED)
-        FetchContent_Populate(asio)
+        # FetchContent_Populate(<name>) with declared details is deprecated (CMP0169) and an
+        # error under cmake_minimum_required(4.0). Asio has no top-level CMakeLists.txt, so
+        # MakeAvailable only downloads the sources and does not add a subdirectory.
+        FetchContent_MakeAvailable(asio)
 
         # Apply vcpkg's exact source-code patch
         set(ASIO_CONFIG_HPP "${asio_SOURCE_DIR}/asio/include/asio/detail/config.hpp")
@@ -164,7 +167,7 @@ endif ()
 find_package(nlohmann_json CONFIG QUIET)
 if (NOT nlohmann_json_FOUND)
     message(STATUS "nlohmann_json not found via find_package — fetching from GitHub")
-    FetchContent_Declare(nlohmann_json GIT_REPOSITORY https://github.com/nlohmann/json.git GIT_TAG v3.11.3 GIT_SHALLOW TRUE)
+    FetchContent_Declare(nlohmann_json GIT_REPOSITORY https://github.com/nlohmann/json.git GIT_TAG 9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03 GIT_SHALLOW TRUE) # v3.11.3
     set(JSON_BuildTests OFF CACHE INTERNAL "")
     set(JSON_Install ON CACHE INTERNAL "")
     FetchContent_MakeAvailable(nlohmann_json)
@@ -187,7 +190,7 @@ if (NOT re2_FOUND)
         FetchContent_Declare(
                 absl
                 GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
-                GIT_TAG 20240722.0 # Stable LTS
+                GIT_TAG 4447c7562e3bc702ade25105912dce503f0c4010 # 20240722.0 (Stable LTS, pinned to the commit)
                 GIT_SHALLOW TRUE
         )
         set(ABSL_BUILD_TESTING OFF CACHE INTERNAL "")
@@ -200,7 +203,7 @@ if (NOT re2_FOUND)
     FetchContent_Declare(
             re2
             GIT_REPOSITORY https://github.com/google/re2.git
-            GIT_TAG 2024-07-02
+            GIT_TAG 6dcd83d60f7944926bfd308cc13979fc53dd69ca # 2024-07-02 (pinned to the commit)
             GIT_SHALLOW TRUE
     )
     FetchContent_MakeAvailable(re2)
@@ -574,10 +577,15 @@ if (WAVEX_TEST)
         cmake_parse_arguments(ARG "" "" "DEFINES" ${ARGN})
         add_executable(${test_name} ${source})
         target_link_libraries(${test_name} PRIVATE wavex)
+        # The tests are plain assert()-based and some asserts wrap the call under test, so they must never be
+        # compiled out: undo the -DNDEBUG that Release/RelWithDebInfo add.
+        target_compile_options(${test_name} PRIVATE $<IF:$<CXX_COMPILER_ID:MSVC>,/UNDEBUG,-UNDEBUG>)
         if (ARG_DEFINES)
             target_compile_definitions(${test_name} PRIVATE ${ARG_DEFINES})
         endif ()
         add_test(NAME ${test_name} COMMAND ${test_name})
+        # Most tests bind fixed loopback ports; the lock makes `ctest -j N` safe without per-test ports.
+        set_tests_properties(${test_name} PROPERTIES RESOURCE_LOCK wavex_loopback_ports TIMEOUT 120)
         if (WAVEX_SAN_COMPILE_FLAGS)
             set_tests_properties(${test_name} PROPERTIES
                     LABELS "${WAVEX_SAN_LABEL}"
@@ -605,6 +613,8 @@ if (WAVEX_TEST)
     wavex_add_test(wavex_logger_async_tests tests/test_logger_async.cpp)
     wavex_add_test(wavex_server_keepalive_tests tests/test_server_keepalive.cpp)
     wavex_add_test(wavex_not_found_tests tests/test_not_found.cpp)
+    wavex_add_test(wavex_request_limits_tests tests/test_request_limits.cpp)
+    wavex_add_test(wavex_connection_tracker_tests tests/test_connection_tracker.cpp)
     wavex_add_test(wavex_http2_codec_tests tests/test_http2_codec.cpp)
     wavex_add_test(wavex_temp_file_tests tests/test_temp_file.cpp)
     wavex_add_test(wavex_compression_tests tests/test_compression.cpp)
@@ -638,4 +648,15 @@ if (WAVEX_TEST)
         target_link_libraries(wavex_postman_http3_server PRIVATE wavex)
         target_compile_definitions(wavex_postman_http3_server PRIVATE PROJECT_DIR="${CMAKE_SOURCE_DIR}")
     endif ()
+endif ()
+
+# ---------------------------------------------------------------------------
+# Benchmarks (opt-in): wavex_bench_server + wavex_loadgen. See benchmarks/README.md.
+# ---------------------------------------------------------------------------
+option(WAVEX_BENCH "Build the benchmark server and load generator" OFF)
+if (WAVEX_BENCH)
+    add_executable(wavex_bench_server benchmarks/bench_server.cpp)
+    target_link_libraries(wavex_bench_server PRIVATE wavex)
+    add_executable(wavex_loadgen benchmarks/loadgen.cpp)
+    target_link_libraries(wavex_loadgen PRIVATE wavex)
 endif ()

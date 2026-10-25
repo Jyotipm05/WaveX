@@ -123,11 +123,13 @@ namespace wavex::server {
         std::size_t max_query_params_{64};                    // 8 bytes
         std::size_t max_headers_{100};                        // 8 bytes
         std::atomic<std::size_t> active_connections_{0};      // 8 bytes
+        static constexpr std::chrono::milliseconds kStopDrainTimeout{2000}; ///< max wait in stop() for connections to close
         unsigned max_keep_alive_requests_{1000};              // 4 bytes
         unsigned short port_{0};                              // 2 bytes
         unsigned short alt_svc_port_{0};                      // 2 bytes
         std::atomic<ServerState> state_{ServerState::Stopped}; // 1 byte
         std::atomic<bool> is_stopped_{false};                 // 1 byte
+        std::atomic<bool> reactor_running_{false};            // 1 byte: true while run() is inside master_io_.run()
         std::atomic<bool> is_signal_shutdown_{false};         // 1 byte
         bool enable_signals_{true};                           // 1 byte
         bool exit_on_signal_{true};                           // 1 byte
@@ -216,6 +218,7 @@ namespace wavex::server {
     private:
         void start_graceful_shutdown(std::chrono::milliseconds timeout);
         void finish_shutdown();
+        void finish_after_forced_close(std::chrono::steady_clock::time_point deadline);
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
         void init_ssl();

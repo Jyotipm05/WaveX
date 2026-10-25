@@ -652,7 +652,9 @@ void test_http3_resumable_parser_c2() {
             long_body += "chunk-payload-" + std::to_string(i) + ";";
         }
         orig_req.body = long_body;
-        orig_req.headers.emplace_back("content-length", std::to_string(long_body.size()));
+        // header holds string_views: the value must outlive the request, so it cannot be a temporary.
+        const std::string long_body_len = std::to_string(long_body.size());
+        orig_req.headers.emplace_back("content-length", long_body_len);
 
         std::string wire = http3codec::serialize_request(orig_req);
         assert(!wire.empty());
@@ -729,7 +731,8 @@ void test_http3_resumable_parser_c2() {
         h3::response orig_res;
         orig_res.status_code = 200;
         orig_res.body = "Streamed HTTP/3 Response Body Payload";
-        orig_res.headers.emplace_back("content-length", std::to_string(orig_res.body.size()));
+        const std::string orig_res_len = std::to_string(orig_res.body.size());
+        orig_res.headers.emplace_back("content-length", orig_res_len);
 
         std::string wire = http3codec::serialize(orig_res);
         assert(!wire.empty());

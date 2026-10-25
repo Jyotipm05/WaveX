@@ -1,0 +1,72 @@
+name: Benchmarks
+
+# Manual only. On a 2 vCPU hosted runner the load generator and the server compete for the same cores, so
+# the numbers are for relative comparison (re-run on another commit), not for publication.
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: Seconds per scenario
+        default: "8"
+
+permissions:
+  contents: read
+
+env:
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_MAXSIZE: 500M
+
+jobs:
+  bench:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Cache OpenSSL 3.5 and ccache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/openssl-3.5.4
+            .ccache
+          key: bench-${{ hashFiles('.github/scripts/setup-linux.sh') }}-${{ github.sha }}
+          restore-keys: |
+            bench-${{ hashFiles('.github/scripts/setup-linux.sh') }}-
+
+      - name: Toolchain (CMake 4, OpenSSL 3.5)
+        run: bash .github/scripts/setup-linux.sh
+
+      - name: Configure and build (Release)
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DWAVEX_BENCH=ON -DWAVEX_USE_MODULE=OFF \
+            -DOPENSSL_ROOT_DIR="$OPENSSL_PREFIX" -DOPENSSL_INCLUDE_DIR="$OPENSSL_PREFIX/include" \
+            -DOPENSSL_CRYPTO_LIBRARY="$OPENSSL_PREFIX/lib/libcrypto.so" \
+            -DOPENSSL_SSL_LIBRARY="$OPENSSL_PREFIX/lib/libssl.so"
+          cmake --build build -j2 --target wavex_bench_server wavex_loadgen
+
+      - name: Run scenarios (ci tier)
+        env:
+          DURATION: ${{ inputs.duration }}
+        run: bash benchmarks/run.sh build ci
+
+      - name: Summary
+        run: |
+          {
+            echo "### Benchmarks (2 vCPU hosted runner, relative numbers only)"
+            echo
+            echo "| scenario | rps | p50 µs | p99 µs | p99.9 µs | errors | reconnects | idle ok |"
+            echo "|---|---:|---:|---:|---:|---:|---:|---:|"
+            python3 - <<'PY'
+          import json
+          for line in open("bench-results.jsonl"):
+              r = json.loads(line)
+              print(f"| {r['scenario']} | {r['rps']:.0f} | {r['p50_us']:.0f} | {r['p99_us']:.0f} | {r['p999_us']:.0f} | {r['errors']} | {r['reconnects']} | {r['idle_connected']}/{r['idle_requested']} |")
+          PY
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bench-results
+          path: bench-results.jsonl

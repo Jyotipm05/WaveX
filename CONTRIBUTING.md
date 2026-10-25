@@ -124,6 +124,24 @@ ctest --preset tsan
 
 ---
 
+## 🤖 Continuous Integration
+
+CI is built for GitHub's **free hosted runners** (Linux: 2 vCPU, 7 GB), so it deliberately stays small:
+
+| Workflow | When | What |
+|:---|:---|:---|
+| `ci.yml` | every push / PR to `dev`, `main` | GCC 14 Debug build + the full CTest suite (`-j2`) |
+| `sanitizers.yml` | push to `dev`, nightly, manual | TSan and ASan+UBSan builds of the same suite |
+| `bench.yml` | manual | `benchmarks/run.sh ci`: relative numbers on a shared 2 vCPU box |
+
+Things to know when a job fails on your PR:
+
+- The tests bind fixed loopback ports, so CTest serialises them with a resource lock. Don't add a test that needs a port without going through `wavex_add_test`.
+- Tests must not need the internet. The two `example.com` tests are opt-in with `WAVEX_TEST_NETWORK=1`.
+- 10,000-idle-connection scenarios do not fit the hosted runner. The `ci` benchmark tier holds 1,000 idle connections; `benchmarks/run.sh <build> full` runs 10,000 on a machine of your own.
+- Windows/MSVC and macOS are not in CI yet (Windows minutes cost 2x, macOS 10x on private repositories). Build locally with the presets before touching platform code.
+- Workflow actions are pinned by commit SHA. To update one, resolve the new tag's commit and change the SHA and the comment together.
+
 ## 📋 Testing Guidelines
 
 Every new feature, bug fix, or refactoring must be accompanied by relevant unit or integration tests.

@@ -20,6 +20,14 @@
 #include <iostream>
 #include <wavex/Utils/BinaryFile.hpp>
 #include <mutex>
+// Required by the standard for what this header uses. MSVC's STL already includes them transitively,
+// libstdc++/libc++ do not, so they are only spelled out for non-MSVC toolchains.
+#if !defined(_MSC_VER)
+#include <atomic>
+#include <condition_variable>
+#include <cstring>
+#include <thread>
+#endif
 #include <optional>
 #include <format>
 #include <source_location>
@@ -182,7 +190,7 @@ namespace wavex::base {
         std::atomic<uint64_t> dropped_count_{0};
         std::atomic<uint64_t> submitted_count_{0};
         std::atomic<uint64_t> processed_count_{0};
-        std::chrono::milliseconds flush_interval_{50};
+        std::atomic<int64_t> flush_interval_ms_{50}; ///< read by the worker while configure() may rewrite it
         std::unique_ptr<BufferPool> pool_{};
         std::unique_ptr<AsyncQueue> queue_{};
         std::ostream *sink_{&std::cerr};
@@ -194,10 +202,10 @@ namespace wavex::base {
         LogLevel min_level_{LogLevel::INFO};
         OverflowPolicy overflow_policy_{OverflowPolicy::Drop};
         bool colored_{true};
-        bool async_mode_{true};
+        std::atomic<bool> async_mode_{true}; ///< read on every log call, written by set_async()/configure()
         bool explicit_async_{false};
         bool custom_stream_{false};
-        bool running_{false};
+        std::atomic<bool> running_{false}; ///< shared between the worker, flush() and shutdown()
 
     public:
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────

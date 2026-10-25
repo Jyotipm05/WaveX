@@ -74,6 +74,11 @@ namespace wavex::base {
             }
         }
 
+        size_t free_count() {
+            std::lock_guard lock(mutex_);
+            return free_list_.size();
+        }
+
         LogBuffer *acquire() {
             std::lock_guard lock(mutex_);
             if (free_list_.empty()) return nullptr;
@@ -143,6 +148,11 @@ namespace wavex::base {
         std::condition_variable cv_not_empty_{};
         std::condition_variable cv_not_full_{};
         bool shutdown_{false};
+        // Both guarded by mutex_. They let producers/consumer skip notify syscalls when nobody sleeps:
+        // with a worker that is busy draining (the common case under load) a notify per record is pure
+        // overhead. Because the flags are read and written under mutex_, no wakeup can be lost.
+        bool consumer_waiting_{false};
+        size_t producers_waiting_{0};
 
         AsyncQueue(const size_t initial_cap, const size_t max_cap)
             : ring_(std::max<size_t>(16, initial_cap), nullptr),
@@ -164,12 +174,14 @@ namespace wavex::base {
             const bool is_priority = (lvl >= LogLevel::WARN);
 
             if (policy == OverflowPolicy::Block) {
+                ++producers_waiting_;
                 cv_not_full_.wait(lock, [this, is_priority, soft_cap] {
                     if (shutdown_) return true;
                     return is_priority
                                ? (count_.load(std::memory_order_relaxed) < capacity_)
                                : (count_.load(std::memory_order_relaxed) < soft_cap);
                 });
+                --producers_waiting_;
                 if (shutdown_) return false;
             } else if (policy == OverflowPolicy::Drop) {
                 const size_t cur = count_.load(std::memory_order_relaxed);
@@ -191,17 +203,20 @@ namespace wavex::base {
             ring_[tail_] = slot;
             tail_ = (tail_ + 1) % capacity_;
             count_.fetch_add(1, std::memory_order_relaxed);
+            const bool wake_consumer = consumer_waiting_;
             lock.unlock();
-            cv_not_empty_.notify_one();
+            if (wake_consumer) cv_not_empty_.notify_one();
             return true;
         }
 
         size_t pop_batch(LogBuffer **out_batch, const size_t max_batch, const std::chrono::milliseconds wait_timeout) {
             std::unique_lock lock(mutex_);
             if (count_.load(std::memory_order_relaxed) == 0 && !shutdown_) {
+                consumer_waiting_ = true;
                 cv_not_empty_.wait_for(lock, wait_timeout, [this] {
                     return count_.load(std::memory_order_relaxed) > 0 || shutdown_;
                 });
+                consumer_waiting_ = false;
             }
             if (count_.load(std::memory_order_relaxed) == 0) return 0;
 
@@ -211,7 +226,7 @@ namespace wavex::base {
                 head_ = (head_ + 1) % capacity_;
                 count_.fetch_sub(1, std::memory_order_relaxed);
             }
-            cv_not_full_.notify_all();
+            if (producers_waiting_ != 0) cv_not_full_.notify_all();
             return n;
         }
 
@@ -247,7 +262,7 @@ namespace wavex::base {
           dropped_count_(0),
           submitted_count_(0),
           processed_count_(0),
-          flush_interval_(50),
+          flush_interval_ms_(50),
           pool_(std::make_unique<BufferPool>(pool_capacity_, max_pool_capacity_)),
           queue_(std::make_unique<AsyncQueue>(pool_capacity_, max_pool_capacity_)),
           sink_(&std::cerr),
@@ -276,7 +291,7 @@ namespace wavex::base {
 
         pool_capacity_ = config.pool_capacity;
         max_pool_capacity_ = config.max_pool_capacity;
-        flush_interval_ = config.flush_interval;
+        flush_interval_ms_.store(config.flush_interval.count(), std::memory_order_relaxed);
         overflow_policy_ = config.overflow_policy;
         async_mode_ = config.async_mode;
         explicit_async_ = true;
@@ -409,7 +424,12 @@ namespace wavex::base {
         const size_t soft_cap = (q_capacity * 9) / 10;
         const size_t current_q_size = queue_->size();
 
-        if (const bool is_priority = (lvl >= LogLevel::WARN); !is_priority && current_q_size >= soft_cap) {
+        // Keep (capacity - soft_cap) pool slots in reserve for WARN+ even when the worker has already
+        // popped records from the queue but not yet returned their buffers to the pool.
+        const size_t reserve = q_capacity - soft_cap;
+        const bool is_priority = (lvl >= LogLevel::WARN);
+        if (!is_priority && (current_q_size >= soft_cap ||
+                             (overflow_policy_ == OverflowPolicy::Drop && pool_->free_count() <= reserve))) {
             if (overflow_policy_ == OverflowPolicy::Drop) {
                 dropped_count_.fetch_add(1, std::memory_order_relaxed);
                 return nullptr;
@@ -537,7 +557,8 @@ namespace wavex::base {
         uint64_t last_reported_drops = 0;
 
         while (running_) {
-            const size_t n = queue_->pop_batch(batch.data(), batch.size(), flush_interval_);
+            const size_t n = queue_->pop_batch(batch.data(), batch.size(),
+                                                   std::chrono::milliseconds(flush_interval_ms_.load(std::memory_order_relaxed)));
 
             // Non-silent loss notification check
             if (const uint64_t current_drops = dropped_count_.load(std::memory_order_relaxed);

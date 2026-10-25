@@ -91,9 +91,28 @@ void test_async_multithreaded_stress() {
     std::cout << "  -> test_async_multithreaded_stress PASSED\n";
 }
 
+namespace {
+// Stringbuf whose writes are slow, so the async worker reliably lags the producer.
+// Without it the worker drains faster than the test can fill the queue and the
+// overflow assertions become timing-dependent.
+class SlowStringBuf : public std::stringbuf {
+protected:
+    std::streamsize xsputn(const char *s, std::streamsize n) override {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        return std::stringbuf::xsputn(s, n);
+    }
+};
+
+struct SlowStream {
+    SlowStringBuf buf;
+    std::ostream os{&buf};
+    [[nodiscard]] std::string str() const { return buf.str(); }
+};
+} // namespace
+
 void test_priority_headroom_reservation() {
     std::cout << "[Test] Running test_priority_headroom_reservation...\n";
-    std::ostringstream oss;
+    SlowStream oss;
     auto &logger = wavex::base::Logger::instance();
 
     // Small pool capacity of 30 items:
@@ -108,7 +127,7 @@ void test_priority_headroom_reservation() {
         .async_mode = true
     };
     logger.configure(cfg);
-    logger.set_output(oss);
+    logger.set_output(oss.os);
     logger.set_colored(false);
     logger.set_level(wavex::base::LogLevel::INFO);
     logger.set_async(true);
@@ -139,7 +158,7 @@ void test_priority_headroom_reservation() {
 
 void test_drop_notification() {
     std::cout << "[Test] Running test_drop_notification...\n";
-    std::ostringstream oss;
+    SlowStream oss;
     auto &logger = wavex::base::Logger::instance();
 
     wavex::base::LoggerConfig cfg{
@@ -150,7 +169,7 @@ void test_drop_notification() {
         .async_mode = true
     };
     logger.configure(cfg);
-    logger.set_output(oss);
+    logger.set_output(oss.os);
     logger.set_colored(false);
     logger.set_level(wavex::base::LogLevel::INFO);
     logger.set_async(true);

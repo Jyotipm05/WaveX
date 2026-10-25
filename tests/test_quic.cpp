@@ -1614,7 +1614,7 @@ static void test_quic_tls_ctx_move_and_accept_stream() {
         auto send_stream_pkt = [&](uint64_t sid, const std::string_view payload_text, uint64_t pn) {
             StreamFrame sf;
             sf.stream_id = sid;
-            sf.data = std::string(payload_text);
+            sf.data = payload_text; // string_view: must not point at a temporary
             sf.fin = false;
             sf.has_length = true;
             sf.has_offset = false;

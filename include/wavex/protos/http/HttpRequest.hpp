@@ -287,6 +287,19 @@ namespace wavex::protos::http {
          */
         [[nodiscard]] bool has_query_param_overflow() const noexcept { return query_param_overflow_; }
 
+        /**
+         * @brief Number of request header fields, or 0 for codecs that do not expose a flat header list.
+         * @details Used by the server to enforce `set_max_headers()`. HTTP/2 and HTTP/3 bound header
+         *          size through HPACK/QPACK limits instead.
+         */
+        [[nodiscard]] std::size_t header_count() const noexcept {
+            if constexpr (requires { parsed_.headers.size(); }) {
+                return parsed_.headers.size();
+            } else {
+                return 0;
+            }
+        }
+
         /// Checks if this HTTP request indicates the connection should stay active (Keep-Alive)
         [[nodiscard]] bool should_keep_alive() const noexcept {
             const auto conn = parsed_.get_header("Connection");
@@ -346,11 +359,12 @@ namespace wavex::protos::http {
 
             const size_t num_params = route_params.size();
             std::array<ParamSlice, 32> inline_slices{};
+            // heap_slices must outlive `slices`; declaring it inside the else-block left a dangling pointer.
+            std::vector<ParamSlice> heap_slices;
             ParamSlice *slices = nullptr;
             if (num_params <= inline_slices.size()) {
                 slices = inline_slices.data();
             } else {
-                std::vector<ParamSlice> heap_slices;
                 heap_slices.resize(num_params);
                 slices = heap_slices.data();
             }

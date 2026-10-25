@@ -13,14 +13,32 @@ Tagged releases before 0.4.0 (`v0.1.0-alpha` to `v0.3.0-alpha`) are listed under
 - `serialize_into` for HTTP responses, emitting into any `StringSink` without intermediate copies.
 - `SipHash-2-4` connection-ID hashing with a process-wide seed; reusable cipher contexts for QUIC packet protection.
 - `CHANGELOG.md` and a restructured `docs/` tree.
+- GitHub Actions: `ci.yml` (Linux/GCC 14 build + tests on every push and PR), `sanitizers.yml` (TSan and ASan/UBSan nightly and on `dev`), `bench.yml` (manual). All sized for the free 2 vCPU hosted runner; actions are pinned by commit SHA.
+- Benchmark harness (`-DWAVEX_BENCH=ON`): `wavex_bench_server`, a dependency-free `wavex_loadgen` (p50/p99/p99.9, idle connections) and `benchmarks/run.sh` with `ci` and `full` tiers.
+- Tests for `ConnectionTracker` and for the configurable request header / query-parameter limits.
+- Tests for `Server::stop()` with idle keep-alive connections followed by in-process restart, and for elastic scale-down never retiring a worker that still runs connection coroutines.
 
 ### Changed
+- `ConnectionTracker` uses 16 lock stripes instead of one global mutex.
+- Async logger skips the per-record condition-variable notification when the worker is not asleep.
+- FetchContent dependencies (asio, abseil, RE2, nlohmann/json) are pinned to commit SHAs; the asio fallback uses `FetchContent_MakeAvailable` (CMake 4 rejects `FetchContent_Populate(<name>)`).
+- CTest runs every test under one resource lock so `ctest -j` is safe with the tests' fixed loopback ports, and sets a 120 s timeout.
 - `RequestArena` is now a movable RAII handle over a heap-stable `monotonic_buffer_resource`; the connection loop destroys request objects before the arena.
 - Query and route-parameter buffers use `std::pmr::string`.
 - README split into a short landing page plus guides, architecture, build and reference pages under `docs/`.
 - `CONTRIBUTING.md` prerequisites aligned with the supported toolchains (GCC 16+, Clang 18.1+, MSVC 19.44+, CMake 4.0+).
 
 ### Fixed
+- Connections beyond the 1024th were dropped: `ConnectionMemoryPool` used `std::pmr::synchronized_pool_resource`, which in libstdc++ takes one `pthread_key` per instance, and Linux allows only 1024 keys, so the constructor threw `EAGAIN`. The pool is now unsynchronized (a connection coroutine never runs concurrently with itself).
+- `Server::stop()` is now a full in-process quiesce so the same `Server` can `run()` again without leaking or racing: sockets are cancelled and closed on their owning worker (not from the caller's thread), the reactor is kept alive by a work guard until every connection has drained (bounded at 2 s), and only then are the worker pools stopped. The graceful-shutdown timeout path uses the same drain.
+- Elastic scale-down could retire a worker that still ran connection coroutines and strand them; workers now track live coroutines and are only retired when empty.
+- Tests are always built with assertions enabled (`-UNDEBUG`), because some asserts wrap the call under test and Release builds silently removed them.
+- `Server::set_max_headers()` and `set_max_query_params()` were stored but never enforced; requests over either limit now get `431` (HTTP/1.x; HTTP/2 and HTTP/3 still rely on HPACK/QPACK limits).
+- `HttpRequest::set_params` kept a pointer into a vector that was destroyed at the end of its `else` block when a route had more than 32 percent-encoded parameters (use-after-scope).
+- Async logger: WARN/ERROR/FATAL headroom was only reserved in the queue, not in the buffer pool, so priority records could be dropped while the worker was still holding popped buffers.
+- Missing standard includes in `Logger.hpp` (`<atomic>`, `<thread>`, `<condition_variable>`, `<cstring>`; listed under `#if !defined(_MSC_VER)` because MSVC's headers already pull them in) that failed to compile on GCC; `ClientRequest::method` no longer shadows the `method` type (rejected by GCC 14).
+- Flaky tests: logger overflow tests assumed the worker lags the producer, and the chunked-server test raced the listener start-up. The two `example.com` client tests now run only with `WAVEX_TEST_NETWORK=1`.
+- `send_file()` no longer blocks a worker thread: open, `stat` and every disk read run on the blocking pool.
 - Use-after-release hazard when a request was still alive after `arena.release()` in the 431 path.
 - HTTP/3 and QUIC hardening: Content-Length verification, stream-count limits, flow control, crypto-stream reassembly limits, reserved HTTP/2 frame rejection, max field section size.
 - Documentation: corrected the `CLI/CLI.hpp` include path, the `-h` (help) short-option clash in the CLI example, the `set_max_request_size` / `set_max_memory_buffer` setter names, and the preset names used for configure, build and test.

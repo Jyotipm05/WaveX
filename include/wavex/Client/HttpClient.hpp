@@ -81,7 +81,7 @@ namespace wavex::client {
         std::vector<std::pair<std::string, std::string> > headers_{};
         std::string body_{};
         utils::MultipartFormData multipart_builder_{};
-        method method_{method::GET};
+        protos::http::method method_{protos::http::method::GET};
 
     public:
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
@@ -127,7 +127,7 @@ namespace wavex::client {
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
 
-        ClientRequest &method(const method m) noexcept {
+        ClientRequest &method(const protos::http::method m) noexcept {
             method_ = m;
             return *this;
         }

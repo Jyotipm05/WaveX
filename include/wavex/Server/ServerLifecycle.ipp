@@ -116,7 +116,14 @@ namespace wavex::server {
         if constexpr (has_tcp_transport) {
             asio::co_spawn(master_io_, accept_loop(), asio::detached);
         }
+        // Keep the reactor alive until stop()/finish_shutdown() call master_io_.stop(). Without a guard,
+        // run() returns as soon as the acceptor is closed and every connection is momentarily between I/O
+        // operations (their coroutines are executing on workers); the next read a connection starts would
+        // then never be serviced and the connection could never drain.
+        auto reactor_guard = asio::make_work_guard(master_io_);
+        reactor_running_.store(true, std::memory_order_release);
         master_io_.run();
+        reactor_running_.store(false, std::memory_order_release);
 
         state_.store(ServerState::Stopped, std::memory_order_release);
         if (master_io_.stopped()) {
@@ -173,14 +180,41 @@ namespace wavex::server {
         if (shutdown_timer_) {
             shutdown_timer_->cancel(ec);
         }
-        pool_.stop_pool();
+        // The closes above run on the workers that own each connection. Let them finish before the pool is
+        // torn down, otherwise their sockets and coroutine frames would be stranded in worker io_contexts
+        // and the next run() of this same Server would start with leftovers. Bounded, so a handler that
+        // calls stop() on itself (it is one of the connections being drained) cannot hang forever.
+        {
+            const auto deadline = std::chrono::steady_clock::now() + kStopDrainTimeout;
+            while (active_connections_.load(std::memory_order_acquire) != 0 &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            if (const auto left = active_connections_.load(std::memory_order_acquire); left != 0) {
+                wavex::log::warn("[WaveX] stop(): {} connection(s) still draining after {} ms", left,
+                                 std::chrono::duration_cast<std::chrono::milliseconds>(kStopDrainTimeout).count());
+            }
+        }
         if (signals_) {
             std::ignore = signals_->cancel(ec);
             signals_.reset();
         }
         std::signal(SIGINT, SIG_DFL);
         std::signal(SIGTERM, SIG_DFL);
+
+        // Order matters for an in-process restart. Sockets live on the master reactor but their coroutines
+        // (and the completion handlers that resume them) target the worker io_contexts. Tearing the workers
+        // down while run() is still delivering completions is a use-after-free, so: stop the reactor, wait
+        // for run() to return, and only then destroy the workers.
         master_io_.stop();
+        {
+            const auto deadline = std::chrono::steady_clock::now() + kStopDrainTimeout;
+            while (reactor_running_.load(std::memory_order_acquire) &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+        pool_.stop_pool();
     }
 
     template<typename Codec, typename RouterType>
@@ -203,8 +237,23 @@ namespace wavex::server {
             if (!timer_ec) {
                 wavex::log::warn("[WaveX] Graceful shutdown timeout reached. Force-closing remaining sockets.");
                 conn_tracker_.force_close_all();
-                finish_shutdown();
+                // The closes run on the workers and their completions need this (reactor) thread, so wait
+                // for them by polling from a timer instead of blocking, then finish.
+                finish_after_forced_close(std::chrono::steady_clock::now() + kStopDrainTimeout);
             }
+        });
+    }
+
+    template<typename Codec, typename RouterType>
+    void Server<Codec, RouterType>::finish_after_forced_close(const std::chrono::steady_clock::time_point deadline) {
+        if (active_connections_.load(std::memory_order_acquire) == 0 ||
+            std::chrono::steady_clock::now() >= deadline || !shutdown_timer_) {
+            finish_shutdown();
+            return;
+        }
+        shutdown_timer_->expires_after(std::chrono::milliseconds(2));
+        shutdown_timer_->async_wait([this, deadline](const asio::error_code &ec) {
+            if (!ec) finish_after_forced_close(deadline);
         });
     }
 

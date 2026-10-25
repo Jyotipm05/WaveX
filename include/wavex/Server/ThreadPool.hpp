@@ -115,6 +115,10 @@ namespace wavex::server {
         std::atomic<bool> is_retiring{false}; // 1 byte
         std::atomic<bool> is_busy{false}; // 1 byte
         std::atomic<bool> stop_requested{false}; // 1 byte
+        /// Coroutines spawned onto this worker's io_context that have not finished yet. Shared so the
+        /// coroutine's guard can outlive the node (e.g. frames destroyed when the io_context is torn down).
+        std::shared_ptr<std::atomic<std::size_t> > live_coroutines =
+                std::make_shared<std::atomic<std::size_t> >(0);
 
         // ─── 2. Constructors & Destructor ────────────────────────────────────
         explicit WorkerNode(const std::size_t worker_id)
@@ -210,15 +214,24 @@ namespace wavex::server {
          */
         template<typename Coro>
         void spawn_coroutine(Coro coro) {
-            const std::size_t count = worker_count_.load(std::memory_order_acquire);
-            if (count == 0) [[unlikely]] return;
-            const std::size_t idx = next_worker_idx_.fetch_add(1, std::memory_order_relaxed) % count;
-            const WorkerNode *w = nullptr;
-            if (idx < kMaxWorkerSlots) [[likely]] {
-                w = worker_table_[idx].load(std::memory_order_acquire);
-            }
-            if (w && w->io_ctx) [[likely]] {
-                asio::co_spawn(*w->io_ctx, std::move(coro), asio::detached);
+            // Retry a few times: a worker can be retired between picking it and registering on it.
+            for (int attempt = 0; attempt < 4; ++attempt) {
+                const std::size_t count = worker_count_.load(std::memory_order_acquire);
+                if (count == 0) [[unlikely]] return;
+                const std::size_t idx = next_worker_idx_.fetch_add(1, std::memory_order_relaxed) % count;
+                WorkerNode *w = (idx < kMaxWorkerSlots) ? worker_table_[idx].load(std::memory_order_seq_cst) : nullptr;
+                if (!w || !w->io_ctx) [[unlikely]] continue;
+
+                // Register first, then re-check the slot (seq_cst on both sides pairs with the retire path in
+                // check_and_scale): either the retirer sees our count and keeps the worker, or we see the
+                // cleared slot and pick another worker. A coroutine can never land on a retiring worker.
+                w->live_coroutines->fetch_add(1, std::memory_order_seq_cst);
+                if (worker_table_[idx].load(std::memory_order_seq_cst) != w) [[unlikely]] {
+                    w->live_coroutines->fetch_sub(1, std::memory_order_seq_cst);
+                    continue;
+                }
+                asio::co_spawn(*w->io_ctx, track_live(w->live_coroutines, std::move(coro)), asio::detached);
+                return;
             }
         }
 
@@ -298,6 +311,16 @@ namespace wavex::server {
         }
 
     private:
+        /// Decrements the worker's live-coroutine count when the wrapped coroutine finishes or is destroyed.
+        template<typename Coro>
+        static asio::awaitable<void> track_live(std::shared_ptr<std::atomic<std::size_t> > live, Coro coro) {
+            struct Guard {
+                std::shared_ptr<std::atomic<std::size_t> > n;
+                ~Guard() { n->fetch_sub(1, std::memory_order_seq_cst); }
+            } guard{std::move(live)};
+            co_await std::move(coro);
+        }
+
         void check_burst_spill() noexcept {
             if (burst_spill_count_.fetch_add(1, std::memory_order_relaxed) + 1 >= 8) {
                 burst_spill_count_.store(0, std::memory_order_relaxed);
@@ -467,13 +490,25 @@ namespace wavex::server {
                         ++scale_down_cooldown_counter_;
                         if (scale_down_cooldown_counter_ >= config_.scale_down_cooldown_cycles) {
                             scale_down_cooldown_counter_ = 0;
-                            retiring_worker = workers_.back();
+                            // A worker that owns live connection coroutines must not be retired: stopping its
+                            // io_context would strand them (sockets stay open, frames never resume, and the
+                            // reactor keeps handlers that point at a destroyed context). Unpublish the slot
+                            // first, then look at the count; if anything is (or just became) live, put it back.
                             const std::size_t slot = workers_.size() - 1;
-                            worker_count_.store(slot, std::memory_order_release);
+                            const auto &candidate = workers_.back();
                             if (slot < kMaxWorkerSlots) {
-                                worker_table_[slot].store(nullptr, std::memory_order_release);
+                                worker_table_[slot].store(nullptr, std::memory_order_seq_cst);
                             }
-                            workers_.pop_back();
+                            worker_count_.store(slot, std::memory_order_seq_cst);
+                            if (candidate->live_coroutines->load(std::memory_order_seq_cst) != 0) {
+                                if (slot < kMaxWorkerSlots) {
+                                    worker_table_[slot].store(candidate.get(), std::memory_order_seq_cst);
+                                }
+                                worker_count_.store(slot + 1, std::memory_order_seq_cst);
+                            } else {
+                                retiring_worker = candidate;
+                                workers_.pop_back();
+                            }
                         }
                     } else {
                         scale_down_cooldown_counter_ = 0;
