@@ -204,14 +204,45 @@ namespace wavex::server {
         }
 
         /**
-         * @brief Spawn an Asio coroutine onto one of the worker io_contexts (lock-free fast path).
+         * @brief A worker reserved for one coroutine. The reservation counts as a live coroutine, so the
+         *        worker cannot be retired while the lease is held; it is released when the lease is destroyed
+         *        unused, or handed to spawn_leased().
          */
-        template<typename Coro>
-        void spawn_coroutine(Coro coro) {
+        class WorkerLease {
+        public:
+            WorkerLease() = default;
+            WorkerLease(WorkerLease &&o) noexcept = default;
+            WorkerLease &operator=(WorkerLease &&) = delete;
+            WorkerLease(const WorkerLease &) = delete;
+            WorkerLease &operator=(const WorkerLease &) = delete;
+
+            ~WorkerLease() {
+                if (live_) live_->fetch_sub(1, std::memory_order_seq_cst);
+            }
+
+            explicit operator bool() const noexcept { return ctx_ != nullptr; }
+
+            /// The worker's io_context: create sockets/timers for the leased coroutine on it.
+            [[nodiscard]] asio::io_context &context() const noexcept { return *ctx_; }
+
+        private:
+            friend class ThreadPool;
+            WorkerLease(std::shared_ptr<asio::io_context> ctx, std::shared_ptr<std::atomic<std::size_t> > live)
+                : ctx_(std::move(ctx)), live_(std::move(live)) {
+            }
+
+            std::shared_ptr<asio::io_context> ctx_{};
+            std::shared_ptr<std::atomic<std::size_t> > live_{};
+        };
+
+        /**
+         * @brief Reserve one worker (round-robin, lock-free). Empty lease if no worker is available.
+         */
+        [[nodiscard]] WorkerLease lease_worker() {
             // Retry a few times: a worker can be retired between picking it and registering on it.
             for (int attempt = 0; attempt < 4; ++attempt) {
                 const std::size_t count = worker_count_.load(std::memory_order_acquire);
-                if (count == 0) [[unlikely]] return;
+                if (count == 0) [[unlikely]] return {};
                 const std::size_t idx = next_worker_idx_.fetch_add(1, std::memory_order_relaxed) % count;
                 WorkerNode *w = (idx < kMaxWorkerSlots) ? worker_table_[idx].load(std::memory_order_seq_cst) : nullptr;
                 if (!w || !w->io_ctx) [[unlikely]] continue;
@@ -224,9 +255,29 @@ namespace wavex::server {
                     w->live_coroutines->fetch_sub(1, std::memory_order_seq_cst);
                     continue;
                 }
-                asio::co_spawn(*w->io_ctx, track_live(w->live_coroutines, std::move(coro)), asio::detached);
-                return;
+                return WorkerLease(w->io_ctx, w->live_coroutines);
             }
+            return {};
+        }
+
+        /**
+         * @brief Run a coroutine on the leased worker; the lease's reservation becomes the coroutine's
+         *        live count and is released when the coroutine finishes.
+         */
+        template<typename Coro>
+        void spawn_leased(WorkerLease lease, Coro coro) {
+            if (!lease) return;
+            auto ctx = lease.ctx_;
+            auto live = std::move(lease.live_);
+            asio::co_spawn(*ctx, track_live(std::move(live), std::move(coro)), asio::detached);
+        }
+
+        /**
+         * @brief Spawn an Asio coroutine onto one of the worker io_contexts (lock-free fast path).
+         */
+        template<typename Coro>
+        void spawn_coroutine(Coro coro) {
+            if (auto lease = lease_worker()) spawn_leased(std::move(lease), std::move(coro));
         }
 
         /**

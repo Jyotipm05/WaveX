@@ -690,6 +690,46 @@ void test_scale_down_keeps_loaded_workers() {
     check(pool.worker_count() == 1, "pool scales down once the workers are idle");
 }
 
+// ─── Test 15: worker leases ──────────────────────────────────────────────────
+
+void test_worker_lease() {
+    std::cout << "\n[Test 15] A leased worker is never retired; spawn_leased runs on the leased worker\n";
+
+    wavex::server::ThreadPoolConfig cfg;
+    cfg.set_limits(3, 3);
+    cfg.scale_down_cooldown_cycles = 1;
+    cfg.check_interval = std::chrono::milliseconds(10000); // we drive scaling by hand
+    wavex::server::ThreadPool pool(cfg);
+    cfg.min_workers = 1;
+
+    std::vector<wavex::server::ThreadPool::WorkerLease> leases;
+    for (int i = 0; i < 3; ++i) leases.push_back(pool.lease_worker());
+    check(leases.size() == 3 && static_cast<bool>(leases[0]) && static_cast<bool>(leases[1]) &&
+              static_cast<bool>(leases[2]),
+          "three workers leased");
+    for (int i = 0; i < 10; ++i) pool.evaluate_scaling();
+    check(pool.worker_count() == 3, "no worker retired while leased (even with no coroutine yet)");
+
+    // The coroutine started through the lease runs on the leased worker's thread, not on the caller's.
+    std::atomic<bool> done{false};
+    std::atomic<std::thread::id> ran_on{};
+    auto ctx_thread = std::make_shared<std::atomic<std::thread::id> >();
+    asio::post(leases[0].context(), [ctx_thread] { ctx_thread->store(std::this_thread::get_id()); });
+    pool.spawn_leased(std::move(leases[0]),
+                      [](std::atomic<bool> *d, std::atomic<std::thread::id> *id) -> asio::awaitable<void> {
+                          id->store(std::this_thread::get_id());
+                          d->store(true);
+                          co_return;
+                      }(&done, &ran_on));
+    for (int i = 0; i < 500 && !done.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    check(done.load() && ran_on.load() != std::this_thread::get_id(), "spawn_leased ran the coroutine on a worker");
+    check(ctx_thread->load() == ran_on.load(), "...the same thread that runs the leased context");
+
+    leases.clear(); // unused leases release their reservation
+    for (int i = 0; i < 10; ++i) pool.evaluate_scaling();
+    check(pool.worker_count() == 1, "pool scales down once every lease is gone");
+}
+
 // ─── main ─────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -710,6 +750,7 @@ int main() {
     test_server_restartability();
     test_server_hard_stop_and_restart();
     test_scale_down_keeps_loaded_workers();
+    test_worker_lease();
 
     std::cout << "\n" << tests_passed << "/" << tests_run << " tests passed.\n";
     return tests_passed == tests_run ? 0 : 1;

@@ -223,6 +223,7 @@ namespace wavex::server {
 #endif
 
         asio::awaitable<void> accept_loop();
+        static asio::ip::tcp::socket adopt_on_worker(asio::ip::tcp::socket &&accepted, asio::io_context &worker_io);
 
         template<typename Stream>
         static decltype(auto) get_stream_socket(Stream &s) noexcept;

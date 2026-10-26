@@ -21,6 +21,9 @@
 #include <string_view>
 #include <system_error>
 
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 #include <wavex/Base/Logger.hpp>
 #include <wavex/Base/Memory.hpp>
 #include <wavex/Base/MiddleWare.hpp>
@@ -43,19 +46,26 @@ namespace wavex::server {
     asio::awaitable<void> Server<Codec, RouterType>::accept_loop() {
         while (state_.load(std::memory_order_acquire) == ServerState::Running) {
             try {
-                asio::ip::tcp::socket socket = co_await acceptor_.async_accept();
+                asio::ip::tcp::socket accepted = co_await acceptor_.async_accept();
                 asio::error_code nd_ec;
-                std::ignore = socket.set_option(asio::ip::tcp::no_delay(true), nd_ec);
+                std::ignore = accepted.set_option(asio::ip::tcp::no_delay(true), nd_ec);
+
+                // One worker serves this connection for its whole life: lease it now (it cannot be retired
+                // meanwhile) and register the socket with that worker's own reactor, so readiness for the
+                // connection is handled on the worker instead of funnelling through the master io_context.
+                auto lease = pool_.lease_worker();
+                if (!lease) [[unlikely]] continue; // no workers (shutting down): drop the connection
+                asio::ip::tcp::socket socket = adopt_on_worker(std::move(accepted), lease.context());
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
                 if (tls_enabled_ && ssl_ctx_) {
                     auto stream = std::make_shared<asio::ssl::stream<asio::ip::tcp::socket> >(
                         std::move(socket), *ssl_ctx_);
-                    pool_.spawn_coroutine(handle_connection(std::move(stream)));
+                    pool_.spawn_leased(std::move(lease), handle_connection(std::move(stream)));
                     continue;
                 }
 #endif
-                pool_.spawn_coroutine(
-                    handle_connection(std::make_shared<asio::ip::tcp::socket>(std::move(socket))));
+                pool_.spawn_leased(std::move(lease),
+                                   handle_connection(std::make_shared<asio::ip::tcp::socket>(std::move(socket))));
             } catch (const std::exception &e) {
                 if (state_.load(std::memory_order_acquire) == ServerState::Running) {
                     std::cerr << "[Server] Accept error: " << e.what() << "\n";
@@ -63,6 +73,33 @@ namespace wavex::server {
                 break;
             }
         }
+    }
+
+    template<typename Codec, typename RouterType>
+    asio::ip::tcp::socket Server<Codec, RouterType>::adopt_on_worker(asio::ip::tcp::socket &&accepted,
+                                                                     asio::io_context &worker_io) {
+#if !defined(ASIO_HAS_IOCP)
+        // Re-register the connected socket with the worker's reactor. If anything fails the original socket is
+        // returned untouched (it keeps working through the master reactor), so this is purely an optimisation.
+        asio::error_code ec;
+        const auto protocol = accepted.local_endpoint(ec).protocol();
+        if (!ec) {
+            const auto fd = accepted.release(ec);
+            if (!ec) {
+                asio::ip::tcp::socket moved(worker_io);
+                if (!moved.assign(protocol, fd, ec)) {
+                    return moved;
+                }
+                // assign() failed after release(): the descriptor is ours to close. The returned socket is
+                // closed, so the connection coroutine ends on its first read.
+                ::close(fd);
+                return asio::ip::tcp::socket(worker_io);
+            }
+        }
+#else
+        (void) worker_io; // IOCP cannot hand a socket to another completion port
+#endif
+        return std::move(accepted);
     }
 
     template<typename Codec, typename RouterType>
