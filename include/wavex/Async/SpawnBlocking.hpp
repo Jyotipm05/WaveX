@@ -78,10 +78,14 @@ namespace wavex {
                             state->error = std::current_exception();
                         }
 
-                        asio::post(executor, [state, shared_handler, work = std::move(work)]() mutable {
+                        asio::post(executor, [state, shared_handler]() mutable {
                             auto h = std::move(*shared_handler);
                             h(state->error);
                         });
+                        // The guard is released here, by the worker, after post() has fully returned. Releasing
+                        // it from the posted handler lets run() return (and the caller destroy the io_context)
+                        // while this thread is still inside post().
+                        work.reset();
                     });
                 },
                 asio::use_awaitable
@@ -112,10 +116,14 @@ namespace wavex {
                             state->error = std::current_exception();
                         }
 
-                        asio::post(executor, [state, shared_handler, work = std::move(work)]() mutable {
+                        asio::post(executor, [state, shared_handler]() mutable {
                             auto h = std::move(*shared_handler);
                             h(state->error);
                         });
+                        // The guard is released here, by the worker, after post() has fully returned. Releasing
+                        // it from the posted handler lets run() return (and the caller destroy the io_context)
+                        // while this thread is still inside post().
+                        work.reset();
                     });
                 },
                 asio::use_awaitable

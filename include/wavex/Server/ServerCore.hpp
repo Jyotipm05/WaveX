@@ -26,7 +26,7 @@
 #include <wavex/Server/TlsConfig.hpp>
 #include <wavex/Engine/HttpRouter.hpp>
 #include <wavex/protos/ProtocolTraits.hpp>
-#include <wavex/Network/QUIC.hpp>
+#include <wavex/Network/TransportListener.hpp>
 #include <wavex/Base/Event.hpp>
 
 #include <asio/io_context.hpp>
@@ -63,14 +63,6 @@ namespace wavex::server {
         void release_thread_local_pool();
         void drain_and_abort_tcp(asio::ip::tcp::socket &sock);
     } // namespace detail
-
-    template<typename C>
-    inline constexpr bool is_http3_codec_v =
-#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
-        std::is_same_v<C, protos::http::http3codec>;
-#else
-        false;
-#endif
 
     /**
      * @class Server
@@ -113,8 +105,11 @@ namespace wavex::server {
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
         std::unique_ptr<asio::ssl::context> ssl_ctx_;         // 8 bytes (pointer)
-        std::unique_ptr<network::quic::QuicServer> quic_server_; // 8 bytes (pointer)
 #endif
+        /// Extra transport listeners produced by protocol_traits<Codec> (e.g. QUIC/UDP). The server only
+        /// knows the interface. run() installs them; stop()/exit() take them from other threads.
+        std::vector<std::unique_ptr<network::TransportListener> > listeners_;
+        std::mutex listeners_mtx_;
 
         std::chrono::milliseconds shutdown_timeout_{10000};   // 8 bytes
         std::chrono::seconds keep_alive_timeout_{5};           // 8 bytes
@@ -129,12 +124,13 @@ namespace wavex::server {
         unsigned short alt_svc_port_{0};                      // 2 bytes
         std::atomic<ServerState> state_{ServerState::Stopped}; // 1 byte
         std::atomic<bool> is_stopped_{false};                 // 1 byte
+        std::atomic<bool> acceptor_open_{false};              // mirrors acceptor_.is_open(); readable from any thread
         std::atomic<bool> reactor_running_{false};            // 1 byte: true while run() is inside master_io_.run()
         std::atomic<bool> is_signal_shutdown_{false};         // 1 byte
         bool enable_signals_{true};                           // 1 byte
         bool exit_on_signal_{true};                           // 1 byte
         bool tls_enabled_{false};                             // 1 byte
-        bool allow_insecure_quic_{false};                     // 1 byte
+        bool allow_insecure_{false};                          // 1 byte
 
     public:
         // ─── 3. Constructors & Destructor ────────────────────────────────────
@@ -163,11 +159,11 @@ namespace wavex::server {
         [[nodiscard]] bool is_tls_enabled() const noexcept;
         [[nodiscard]] const TlsConfig &tls_config() const noexcept;
 
-#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
-        // HTTP/3 & QUIC (ServerQuic.ipp)
+        // Transport capabilities (ServerConfig.ipp)
         [[nodiscard]] static bool is_http3_enabled() noexcept;
+        /// Permit transports that normally require TLS (e.g. QUIC) to start without it. Test/dev only.
         void allow_insecure(bool allow = true) noexcept;
-#endif
+        [[nodiscard]] bool allow_insecure_transports() const noexcept;
 
         // Connection handling (ServerConnection.ipp)
         template<typename Stream>
@@ -219,6 +215,8 @@ namespace wavex::server {
         void start_graceful_shutdown(std::chrono::milliseconds timeout);
         void finish_shutdown();
         void finish_after_forced_close(std::chrono::steady_clock::time_point deadline);
+        void close_acceptor();
+        void stop_listeners() noexcept;
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
         void init_ssl();

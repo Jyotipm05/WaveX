@@ -43,6 +43,7 @@ namespace wavex::network::quic {
         asio::ip::udp::endpoint sender_endpoint_{};
         std::unordered_map<ConnectionId, std::shared_ptr<QuicConnection> > connections_{};
         mutable std::mutex mtx_{};
+        mutable std::mutex sock_mtx_{}; // serializes socket_ use: stop() runs on a different thread than do_receive()
         std::array<uint8_t, 65536> recv_buf_{};
         StreamHandler stream_handler_{};
         UniStreamHandler uni_stream_handler_{};

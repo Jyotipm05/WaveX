@@ -109,6 +109,12 @@ namespace wavex::server {
                       "CustReq and CustRes must be constructible with std::pmr::memory_resource*");
         static_assert(requires(CustRes &r, std::pmr::string &s) { r.serialize_to(s); },
                       "CustRes must provide serialize_to(std::pmr::string&)");
+        // The request/response contract of the generic loop (codec + router seams). Anything protocol-flavoured
+        // beyond this goes through protocol_traits.
+        static_assert(requires(CustReq &q) { q.consumed_bytes(); q.method_type(); q.path(); },
+                      "CustReq must provide consumed_bytes(), method_type() and path() (codec/router contract)");
+        static_assert(requires(CustRes &r) { r.is_sent(); r.is_headers_sent(); },
+                      "CustRes must provide is_sent() and is_headers_sent()");
 
         auto &stream = *stream_ptr;
         auto weak_stream = std::weak_ptr<Stream>(stream_ptr);
@@ -306,7 +312,7 @@ namespace wavex::server {
 
                     if (max_request_size_ > 0 && stream_buf.size() > max_request_size_) [[unlikely]] {
                         CustRes err_res(arena.resource());
-                        err_res.status(413).send("Payload Too Large");
+                        CustTraits::write_error(err_res, protos::protocol_error::payload_too_large);
                         std::pmr::string err_wire(arena.resource());
                         err_res.serialize_to(err_wire);
                         co_await asio::async_write(stream, asio::buffer(err_wire),
@@ -322,7 +328,7 @@ namespace wavex::server {
 
                 if (p_res != CustomCodec::result::success) [[unlikely]] {
                     CustRes err_res(arena.resource());
-                    err_res.status(400).send("Bad Request");
+                    CustTraits::write_error(err_res, protos::protocol_error::bad_request);
                     std::pmr::string err_wire(arena.resource());
                     err_res.serialize_to(err_wire);
                     co_await asio::async_write(stream, asio::buffer(err_wire),
@@ -336,12 +342,12 @@ namespace wavex::server {
                 const unsigned remaining =
                         request_count < max_keep_alive_requests_ ? max_keep_alive_requests_ - request_count : 0;
 
-                // Hard cap: reject requests that overflow query param or header limits
-                if (req.has_query_param_overflow() || req.query.size() > max_query_params_ ||
-                    req.header_count() > max_headers_) [[unlikely]] {
+                // Hard cap: the protocol policy decides what its structural limits are and how to refuse.
+                if (CustTraits::exceeds_limits(req, protos::request_limits{max_headers_, max_query_params_}))
+                    [[unlikely]] {
                     CustRes err_res(arena.resource());
                     CustTraits::prepare_response(req, err_res, false, 0, 0);
-                    err_res.status(431).send("Request Header Fields Too Large");
+                    CustTraits::write_error(err_res, protos::protocol_error::limits_exceeded);
                     std::pmr::string err_wire(arena.resource());
                     err_res.serialize_to(err_wire);
                     co_await asio::async_write(stream, asio::buffer(err_wire),
@@ -423,7 +429,7 @@ namespace wavex::server {
                         });
                 }
 
-                res.status(match ? 200 : 404);
+                CustTraits::set_default_status(res, static_cast<bool>(match));
 
                 try {
                     if (!match) [[unlikely]] {
@@ -444,22 +450,14 @@ namespace wavex::server {
                     }
                 } catch (const std::exception &ex) {
                     wavex::log::error("[Server] Unhandled exception in request handler for {}: {}",
-                                      req.path(), ex.what());
+                                      CustTraits::request_label(req), ex.what());
                     if (!res.is_headers_sent()) {
-                        res.status(500);
-                        if constexpr (requires { res.set("Content-Type", "text/plain"); }) {
-                            res.set("Content-Type", "text/plain");
-                        }
-                        res.send("Internal Server Error");
+                        CustTraits::write_error(res, protos::protocol_error::internal_error);
                     }
                 } catch (...) {
-                    wavex::log::error("[Server] Unknown exception in request handler for {}", req.path());
+                    wavex::log::error("[Server] Unknown exception in request handler for {}", CustTraits::request_label(req));
                     if (!res.is_headers_sent()) {
-                        res.status(500);
-                        if constexpr (requires { res.set("Content-Type", "text/plain"); }) {
-                            res.set("Content-Type", "text/plain");
-                        }
-                        res.send("Internal Server Error");
+                        CustTraits::write_error(res, protos::protocol_error::internal_error);
                     }
                 }
 
@@ -469,7 +467,15 @@ namespace wavex::server {
                         state_.load(std::memory_order_acquire) == ServerState::ShuttingDown;
                 const bool effective_keep = keep && !is_shutting_down;
 
-                const unsigned short alt_svc_port = (has_quic_transport || alt_svc_port_ > 0)
+                // Alt-Svc advertisement is a policy decision; the kernel only forwards the port.
+                constexpr bool advertise_by_default = [] {
+                    if constexpr (requires { CustTraits::advertises_alt_svc_by_default; }) {
+                        return static_cast<bool>(CustTraits::advertises_alt_svc_by_default);
+                    } else {
+                        return false;
+                    }
+                }();
+                const unsigned short alt_svc_port = (advertise_by_default || alt_svc_port_ > 0)
                                                         ? (alt_svc_port_ > 0 ? alt_svc_port_ : port_)
                                                         : 0;
                 CustTraits::prepare_response(req, res, effective_keep,

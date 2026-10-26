@@ -13,6 +13,7 @@
 
 #pragma once
 
+#include <future>
 #include <csignal>
 #include <iostream>
 #include <wavex/Base/Logger.hpp>
@@ -67,6 +68,7 @@ namespace wavex::server {
                 std::ignore = acceptor_.listen(
                     asio::socket_base::max_listen_connections, ec);
             }
+            acceptor_open_.store(acceptor_.is_open(), std::memory_order_release);
         }
 
         // Pre-compile all middleware chains for zero-allocation resolve() hot path
@@ -86,32 +88,15 @@ namespace wavex::server {
             });
         }
 
-#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
-        // Conditionally start the QUIC/UDP listener on the same port
-        if constexpr (has_quic_transport) {
-            if (!tls_enabled_ && !allow_insecure_quic_) {
-                throw std::runtime_error(
-                    "QUIC transport requires TLS 1.3. "
-                    "Call server.enable_tls(cert, key) before server.run().");
+        // Extra transports the protocol policy asks for (e.g. a QUIC/UDP listener next to the TCP acceptor).
+        if constexpr (requires { traits::template make_transport_listener<Server>(std::declval<Server &>()); }) {
+            auto listener = traits::template make_transport_listener<Server>(*this);
+            if (listener) {
+                listener->start();
+                std::lock_guard lock(listeners_mtx_);
+                listeners_.push_back(std::move(listener));
             }
-            quic_server_ = std::make_unique<network::quic::QuicServer>(
-                master_io_, address_, port_);
-            if (tls_enabled_) {
-                quic_server_->set_tls_credentials(tls_config_.cert_file, tls_config_.key_file);
-            }
-            quic_server_->set_stream_handler(
-                [this](std::shared_ptr<network::quic::QuicStream> stream)
-                    -> asio::awaitable<void> {
-                    if (!stream) co_return;
-                    if ((stream->stream_id() & 0x03) == 0x00) {
-                        spawn_connection(std::move(stream));
-                    }
-                    co_return;
-                });
-            quic_server_->start();
-            wavex::log::info("[WaveX] QUIC/UDP listener active on {}:{}", address_, port_);
         }
-#endif
 
         if constexpr (has_tcp_transport) {
             asio::co_spawn(master_io_, accept_loop(), asio::detached);
@@ -163,19 +148,49 @@ namespace wavex::server {
     }
 
     template<typename Codec, typename RouterType>
+    void Server<Codec, RouterType>::stop_listeners() noexcept {
+        std::vector<std::unique_ptr<network::TransportListener> > taken; {
+            std::lock_guard lock(listeners_mtx_);
+            taken.swap(listeners_);
+        }
+        for (auto &l: taken) l->stop();
+    }
+
+    /// Closes the listening socket. An asio acceptor is not thread-safe and the accept loop runs on the
+    /// reactor thread, so when the reactor is running elsewhere the close is posted there and awaited.
+    template<typename Codec, typename RouterType>
+    void Server<Codec, RouterType>::close_acceptor() {
+        const auto do_close = [this] {
+            asio::error_code ec;
+            std::ignore = acceptor_.close(ec);
+            acceptor_open_.store(false, std::memory_order_release);
+        };
+        if (!reactor_running_.load(std::memory_order_acquire) ||
+            master_io_.get_executor().running_in_this_thread()) {
+            do_close();
+            return;
+        }
+        auto done = std::make_shared<std::promise<void> >();
+        auto fut = done->get_future();
+        asio::post(master_io_, [do_close, done] {
+            do_close();
+            done->set_value();
+        });
+        if (fut.wait_for(kStopDrainTimeout) != std::future_status::ready) {
+            wavex::log::warn("[WaveX] acceptor close is still pending on the reactor after {} ms",
+                             kStopDrainTimeout.count());
+        }
+    }
+
+    template<typename Codec, typename RouterType>
     void Server<Codec, RouterType>::stop() {
         if (is_stopped_.exchange(true, std::memory_order_acq_rel)) {
             return;
         }
         state_.store(ServerState::Stopped, std::memory_order_release);
         asio::error_code ec;
-        std::ignore = acceptor_.close(ec);
-#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
-        if (quic_server_) {
-            quic_server_->stop();
-            quic_server_.reset();
-        }
-#endif
+        close_acceptor();
+        stop_listeners();
         conn_tracker_.force_close_all();
         if (shutdown_timer_) {
             shutdown_timer_->cancel(ec);
@@ -220,7 +235,7 @@ namespace wavex::server {
     template<typename Codec, typename RouterType>
     void Server<Codec, RouterType>::start_graceful_shutdown(std::chrono::milliseconds timeout) {
         asio::error_code ec;
-        std::ignore = acceptor_.close(ec);
+        close_acceptor();
 
         // Cancel all idle sockets waiting for keep-alive requests immediately
         conn_tracker_.cancel_all_idle();
@@ -265,12 +280,7 @@ namespace wavex::server {
         if (shutdown_timer_) {
             shutdown_timer_->cancel(ec);
         }
-#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
-        if (quic_server_) {
-            quic_server_->stop();
-            quic_server_.reset();
-        }
-#endif
+        stop_listeners();
         if (signals_) {
             std::ignore = signals_->cancel(ec);
             signals_.reset();

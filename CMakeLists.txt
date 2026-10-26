@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 4.0)
-project(wavex VERSION 0.4.0 LANGUAGES C CXX)
+project(wavex VERSION 0.4.1 LANGUAGES C CXX)
 
 # ===========================================================================
 #  Header Configuration
@@ -357,6 +357,8 @@ target_sources(wavex
         include/wavex/Network/QUIC/QuicStream.hpp
         include/wavex/Network/QUIC/QuicConnection.hpp
         include/wavex/Network/QUIC/QuicServer.hpp
+        include/wavex/Network/QUIC/QuicListener.hpp
+        include/wavex/Network/TransportListener.hpp
         include/wavex/Network/QUIC/QuicClient.hpp
         include/wavex/Network/QUIC/QuicSocket.hpp
         include/wavex/Server/WorkStealingQueue.hpp
@@ -370,7 +372,6 @@ target_sources(wavex
         include/wavex/Server/ServerConnection.ipp
         include/wavex/Server/ServerConfig.ipp
         include/wavex/Server/ServerTls.ipp
-        include/wavex/Server/ServerQuic.ipp
         include/wavex/Server/ServerAliases.hpp
         include/wavex/Server/ComposedHttpServer.hpp
         include/wavex/Server/Server.hpp
@@ -615,6 +616,7 @@ if (WAVEX_TEST)
     wavex_add_test(wavex_not_found_tests tests/test_not_found.cpp)
     wavex_add_test(wavex_request_limits_tests tests/test_request_limits.cpp)
     wavex_add_test(wavex_connection_tracker_tests tests/test_connection_tracker.cpp)
+    wavex_add_test(wavex_protocol_traits_tests tests/test_protocol_traits.cpp)
     wavex_add_test(wavex_http2_codec_tests tests/test_http2_codec.cpp)
     wavex_add_test(wavex_temp_file_tests tests/test_temp_file.cpp)
     wavex_add_test(wavex_compression_tests tests/test_compression.cpp)

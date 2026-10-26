@@ -58,6 +58,8 @@ export namespace wavex::base {
 
 export namespace wavex::protos {
     using protos::protocol_traits;
+    using protos::protocol_error;
+    using protos::request_limits;
 }
 
 export namespace wavex::protos::http {

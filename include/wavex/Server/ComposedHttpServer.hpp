@@ -46,7 +46,8 @@ namespace wavex::server {
         Http3Router owned_h3_router_{};
         Http2Router *h2_router_{nullptr}; // 8 bytes
         Http3Router *h3_router_{nullptr}; // 8 bytes
-        std::unique_ptr<network::quic::QuicServer> quic_server_{nullptr}; // 8 bytes
+        std::unique_ptr<network::quic::QuicServer> quic_server_{nullptr}; // 8 bytes; guarded by quic_mtx_
+        std::mutex quic_mtx_;                                             // run() installs it, stop()/exit() take it
         std::string address_{"0.0.0.0"}; // complex (32 bytes)
         TlsConfig tls_config_{}; // complex
         Http2Server server_; // complex
@@ -119,6 +120,7 @@ namespace wavex::server {
             tls_enabled_ = true;
             server_.enable_tls(tls_config_);
             tls_config_ = server_.tls_config();
+            std::lock_guard quic_lock(quic_mtx_);
             if (quic_server_) {
                 quic_server_->set_tls_credentials(tls_config_.cert_file, tls_config_.key_file);
             }
@@ -135,6 +137,7 @@ namespace wavex::server {
 
         void set_max_field_section_size(const uint64_t max_size) noexcept {
             max_field_section_size_ = max_size;
+            std::lock_guard quic_lock(quic_mtx_);
             if (quic_server_) {
                 quic_server_->set_max_field_section_size(max_size);
             }
@@ -155,15 +158,15 @@ namespace wavex::server {
                     "Call server.enable_tls(cert, key) before server.run().");
             }
 
-            quic_server_ = std::make_unique<network::quic::QuicServer>(
+            auto quic = std::make_unique<network::quic::QuicServer>(
                 server_.io_context(), address_, port_);
-            quic_server_->set_max_field_section_size(max_field_section_size_);
+            quic->set_max_field_section_size(max_field_section_size_);
 
             if (tls_enabled_) {
-                quic_server_->set_tls_credentials(tls_config_.cert_file, tls_config_.key_file);
+                quic->set_tls_credentials(tls_config_.cert_file, tls_config_.key_file);
             }
 
-            quic_server_->set_uni_stream_handler(
+            quic->set_uni_stream_handler(
                 [](std::shared_ptr<network::quic::QuicStream> stream)
             -> asio::awaitable<void> {
                     if (!stream) co_return;
@@ -178,7 +181,7 @@ namespace wavex::server {
                         std::move(stream), session_ctx);
                 });
 
-            quic_server_->set_stream_handler(
+            quic->set_stream_handler(
                 [this](std::shared_ptr<network::quic::QuicStream> stream)
             -> asio::awaitable<void> {
                     if (!stream) co_return;
@@ -193,30 +196,32 @@ namespace wavex::server {
                     co_return;
                 });
 
-            quic_server_->start();
+            quic->start(); {
+                std::lock_guard quic_lock(quic_mtx_);
+                quic_server_ = std::move(quic);
+            }
             log::info("[WaveX] ComposedHttpServer QUIC/UDP listener active on {}:{}", address_, port_);
 
             server_.run();
 
-            if (quic_server_) {
-                quic_server_->stop();
-                quic_server_.reset();
+            stop_quic();
+        }
+
+        void stop_quic() {
+            std::unique_ptr<network::quic::QuicServer> quic; {
+                std::lock_guard quic_lock(quic_mtx_);
+                quic = std::move(quic_server_);
             }
+            if (quic) quic->stop();
         }
 
         void stop() {
-            if (quic_server_) {
-                quic_server_->stop();
-                quic_server_.reset();
-            }
+            stop_quic();
             server_.stop();
         }
 
         void exit(const std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
-            if (quic_server_) {
-                quic_server_->stop();
-                quic_server_.reset();
-            }
+            stop_quic();
             server_.exit(timeout);
         }
 

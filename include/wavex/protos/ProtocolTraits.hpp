@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include <cstddef>
+#include <memory>
 #include <string>
 #include <string_view>
 #ifndef ASIO_HAS_CO_AWAIT
@@ -34,6 +36,59 @@
 #endif
 
 namespace wavex::protos {
+    /// Protocol-neutral reasons for which the server kernel must reject a request itself.
+    enum class protocol_error {
+        bad_request,         ///< the request could not be parsed
+        payload_too_large,   ///< the request exceeded the configured size limit
+        limits_exceeded,     ///< the request exceeded a structural limit (see request_limits)
+        internal_error       ///< the handler threw
+    };
+
+    /// Structural limits the server hands to the protocol policy; what they count is up to the protocol.
+    struct request_limits {
+        std::size_t max_headers{0};
+        std::size_t max_query_params{0};
+    };
+
+    namespace detail {
+        /// Shared by the HTTP specializations: they differ only in framing, not in how errors are phrased.
+        template<typename Response>
+        void write_http_error(Response &res, const protocol_error e) {
+            switch (e) {
+                case protocol_error::bad_request: res.status(400).send("Bad Request"); break;
+                case protocol_error::payload_too_large: res.status(413).send("Payload Too Large"); break;
+                case protocol_error::limits_exceeded: res.status(431).send("Request Header Fields Too Large"); break;
+                case protocol_error::internal_error:
+                    res.status(500);
+                    if constexpr (requires { res.set("Content-Type", "text/plain"); }) {
+                        res.set("Content-Type", "text/plain");
+                    }
+                    res.send("Internal Server Error");
+                    break;
+            }
+        }
+
+        template<typename Request>
+        bool http_exceeds_limits(const Request &req, const request_limits &lim) noexcept {
+            return req.has_query_param_overflow() || req.query.size() > lim.max_query_params ||
+                   req.header_count() > lim.max_headers;
+        }
+
+        template<typename Response>
+        void http_default_status(Response &res, const bool route_found) {
+            res.status(route_found ? 200 : 404);
+        }
+
+        template<typename Response>
+        void http_write_not_found(Response &res, const std::string &body, const std::string &content_type) {
+            res.status(404);
+            if (!content_type.empty()) {
+                res.set("Content-Type", content_type);
+            }
+            res.send(body);
+        }
+    } // namespace detail
+
     /**
      * @struct protocol_traits
      * @brief Primary template: conservative defaults for a simple,
@@ -44,6 +99,9 @@ namespace wavex::protos {
      *  - keep_alive()                                   (Persistence decision per request)
      *  - prepare_response()                             (Protocol-specific response headers/state)
      *  - configure_alpn()                               (TLS ALPN selector registration)
+     *  - exceeds_limits() / write_error() / set_default_status() / write_not_found() / request_label()
+     *                                                   (the kernel never touches response fields)
+     *  - make_transport_listener()                      (optional: an extra listener, e.g. QUIC/UDP)
      */
     template<typename Codec>
     struct protocol_traits {
@@ -92,6 +150,34 @@ namespace wavex::protos {
                                      unsigned, unsigned, unsigned short = 0) {
         }
 
+
+        /// True if the request breaks a structural limit. Default: protocols without such limits never do.
+        template<typename Request>
+        static bool exceeds_limits(const Request &, const request_limits &) noexcept {
+            return false;
+        }
+
+        /// Fill `res` for a kernel-level rejection. Default: leave it empty (protocol decides how to signal).
+        template<typename Response>
+        static void write_error(Response &, protocol_error) {
+        }
+
+        /// Called before dispatch with whether a route matched. Default: nothing to set.
+        template<typename Response>
+        static void set_default_status(Response &, bool) {
+        }
+
+        /// Fill `res` with the server-level "no route" reply (Server::set_not_found). Default: nothing.
+        template<typename Response>
+        static void write_not_found(Response &, const std::string &/*body*/, const std::string &/*media_type*/) {
+        }
+
+        /// Short text identifying the request in server log lines (e.g. its path). Default: empty.
+        template<typename Request>
+        static std::string_view request_label(const Request &) noexcept {
+            return {};
+        }
+
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
         /// Register the ALPN selection callback for this protocol (server-side).
         static void configure_alpn(SSL_CTX *) {
@@ -116,6 +202,31 @@ struct wavex::protos::protocol_traits<wavex::protos::http::http1codec> {
     static constexpr bool has_connection_preface = false;
     static constexpr bool has_tcp_transport = true;
     static constexpr bool has_quic_transport = false;
+
+    template<typename Request>
+    static bool exceeds_limits(const Request &req, const request_limits &lim) noexcept {
+        return detail::http_exceeds_limits(req, lim);
+    }
+
+    template<typename Response>
+    static void write_error(Response &res, const protocol_error e) {
+        detail::write_http_error(res, e);
+    }
+
+    template<typename Response>
+    static void set_default_status(Response &res, const bool route_found) {
+        detail::http_default_status(res, route_found);
+    }
+
+    template<typename Response>
+    static void write_not_found(Response &res, const std::string &body, const std::string &media_type) {
+        detail::http_write_not_found(res, body, media_type);
+    }
+
+    template<typename Request>
+    static std::string_view request_label(const Request &req) noexcept {
+        return req.path();
+    }
 
     template<typename Stream>
     static asio::awaitable<bool> on_connection_start(Stream &, std::string &) {
@@ -182,6 +293,31 @@ struct wavex::protos::protocol_traits<wavex::protos::http::http2codec> {
     static constexpr bool has_connection_preface = true;
     static constexpr bool has_tcp_transport = true;
     static constexpr bool has_quic_transport = false;
+
+    template<typename Request>
+    static bool exceeds_limits(const Request &req, const request_limits &lim) noexcept {
+        return detail::http_exceeds_limits(req, lim);
+    }
+
+    template<typename Response>
+    static void write_error(Response &res, const protocol_error e) {
+        detail::write_http_error(res, e);
+    }
+
+    template<typename Response>
+    static void set_default_status(Response &res, const bool route_found) {
+        detail::http_default_status(res, route_found);
+    }
+
+    template<typename Response>
+    static void write_not_found(Response &res, const std::string &body, const std::string &media_type) {
+        detail::http_write_not_found(res, body, media_type);
+    }
+
+    template<typename Request>
+    static std::string_view request_label(const Request &req) noexcept {
+        return req.path();
+    }
 
     /**
          * @brief RFC 7540 §3.5: validate client preface (24-byte PRI), reply with
@@ -269,6 +405,7 @@ struct wavex::protos::protocol_traits<wavex::protos::http::http2codec> {
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
 #include <wavex/protos/http/http3codec.hpp>
 #include <wavex/Network/QUIC/QuicConnection.hpp>
+#include <wavex/Network/QUIC/QuicListener.hpp>
 
 template<>
 struct wavex::protos::protocol_traits<wavex::protos::http::http3codec> {
@@ -282,6 +419,40 @@ struct wavex::protos::protocol_traits<wavex::protos::http::http3codec> {
 
     // HTTP/3 requires a QUIC/UDP listener alongside the TCP/TLS listener.
     static constexpr bool has_quic_transport = true;
+
+    /// The generic server advertises Alt-Svc on its own port when this is set (see Server::run).
+    static constexpr bool advertises_alt_svc_by_default = true;
+
+    template<typename Request>
+    static bool exceeds_limits(const Request &req, const request_limits &lim) noexcept {
+        return detail::http_exceeds_limits(req, lim);
+    }
+
+    template<typename Response>
+    static void write_error(Response &res, const protocol_error e) {
+        detail::write_http_error(res, e);
+    }
+
+    template<typename Response>
+    static void set_default_status(Response &res, const bool route_found) {
+        detail::http_default_status(res, route_found);
+    }
+
+    template<typename Response>
+    static void write_not_found(Response &res, const std::string &body, const std::string &media_type) {
+        detail::http_write_not_found(res, body, media_type);
+    }
+
+    template<typename Request>
+    static std::string_view request_label(const Request &req) noexcept {
+        return req.path();
+    }
+
+    /// The QUIC/UDP listener for this protocol. The generic server only sees a TransportListener.
+    template<typename Host>
+    static std::unique_ptr<wavex::network::TransportListener> make_transport_listener(Host &host) {
+        return std::make_unique<wavex::network::quic::QuicTransportListener<Host> >(host);
+    }
 
     template<typename Stream>
     static auto &get_connection_context(Stream &stream, connection_context &fallback) {

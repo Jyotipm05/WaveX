@@ -41,6 +41,15 @@ The WaveX server kernel (`Server<Codec, Router>`) must remain **completely proto
 - **Problem**: Causes `Server<http1codec>` to compile and store state for HTTP/3, leaking UDP transport concerns into a TCP server.
 - **Fix**: Re-encapsulated protocol composition in `ComposedHttpServer`.
 
+### Mistake 3: Transport Objects and HTTP Response Fields in the Generic Server
+- **Anti-Pattern**: `Server` owning a `QuicServer` (plus its mutex and an "insecure QUIC" flag), starting it in `run()` and stopping it in `stop()`; and the connection loop calling `res.status(431)`, `req.header_count()`, `req.query.size()` for every codec.
+- **Problem**: A custom binary protocol could not use the server without HTTP-shaped request and response types, and `Server` compiled against QUIC.
+- **Fix**:
+  - Extra transports go through `network::TransportListener`. The protocol policy supplies one with `protocol_traits<Codec>::make_transport_listener<Host>(host)` (only HTTP/3 does, via `network::quic::QuicTransportListener`). `Server` stores `std::unique_ptr<TransportListener>` and calls `start()`/`stop()`.
+  - Kernel-level rejections and limits go through the policy: `exceeds_limits(req, request_limits)`, `write_error(res, protocol_error)`, `set_default_status(res, route_found)`, `write_not_found(res, body, media_type)` (behind `Server::set_not_found*`) and `request_label(req)` (log text). Defaults are no-ops; the HTTP specializations map them to 400/413/431/500 and 200/404.
+- **Rule**: if `Server` code must name a codec, a transport implementation or a response field, add a hook to `protocol_traits` instead.
+- **Contract kept on purpose**: the loop requires `consumed_bytes()`, `method_type()`, `path()` from the request (codec/router seams) and `is_sent()`, `is_headers_sent()`, `serialize_to()` from the response; these are `static_assert`ed in `handle_connection_impl`.
+
 ---
 
 ## 3. Multi-Protocol Composition (`ComposedHttpServer`)

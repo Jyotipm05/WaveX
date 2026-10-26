@@ -26,9 +26,8 @@ jobs:
     name: ${{ matrix.name }}
     runs-on: ubuntu-24.04
     timeout-minutes: 75
-    # ThreadSanitizer currently reports known races (sockets closed from a non-owning thread by
-    # Server::stop()/ConnectionTracker, LocalQueue slots, QUIC acceptor close). They are tracked for the
-    # scheduler rework, so TSan is informational until that lands; ASan/UBSan must stay green.
+    # Both sanitizer jobs are strict: the suite is TSan-clean (halt_on_error=1), so a report is a regression.
+    # `informational` stays in the matrix so a job can be demoted temporarily without restructuring.
     continue-on-error: ${{ matrix.informational }}
     strategy:
       fail-fast: false
@@ -36,7 +35,7 @@ jobs:
         include:
           - name: ThreadSanitizer
             option: WAVEX_TEST_TSAN
-            informational: true
+            informational: false
           - name: ASan + UBSan + LSan
             option: WAVEX_TEST_ASAN
             informational: false

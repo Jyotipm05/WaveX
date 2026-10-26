@@ -189,6 +189,17 @@ namespace wavex::protos {
 
         // ALPN configuration for TLS negotiation (optional)
         static void configure_alpn(void */*ssl_ctx*/) noexcept {}
+
+        // Optional kernel-level hooks. The server never touches response fields itself: when it must reject
+        // a request it asks the policy. Omit them and the defaults do nothing (no status codes needed).
+        static bool exceeds_limits(const MyRequest &, const request_limits &) noexcept { return false; }
+        static void write_error(MyResponse &, protocol_error) {}        // bad_request, payload_too_large,
+                                                                         // limits_exceeded, internal_error
+        static void set_default_status(MyResponse &, bool /*route_found*/) {}
+
+        // Optional: an extra transport listener (e.g. QUIC/UDP) started and stopped with the server.
+        // template<typename Host>
+        // static std::unique_ptr<wavex::network::TransportListener> make_transport_listener(Host &host);
     };
 
 } // namespace wavex::protos

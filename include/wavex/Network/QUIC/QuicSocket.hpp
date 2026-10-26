@@ -18,6 +18,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <atomic>
 #include <mutex>
 #include <string>
 #include <system_error>
@@ -309,8 +310,12 @@ namespace wavex::network::quic {
         std::string tls_cert_file_{};
         std::string tls_key_file_{};
         std::array<uint8_t, 65536> recv_buf_{};
-        bool is_listening_{false};
-        bool is_open_{false};
+        // close()/cancel() may be called from any thread while the io thread runs do_receive(); the flags are
+        // atomic and every touch of udp_socket_ after construction is serialized by sock_mtx_ (asio sockets
+        // are not thread-safe).
+        mutable std::mutex sock_mtx_{};
+        std::atomic<bool> is_listening_{false};
+        std::atomic<bool> is_open_{false};
 
     public:
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────

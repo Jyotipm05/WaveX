@@ -473,8 +473,8 @@ namespace wavex::network::quic {
           tls_cert_file_(std::move(other.tls_cert_file_)),
           tls_key_file_(std::move(other.tls_key_file_)),
           recv_buf_(other.recv_buf_),
-          is_listening_(other.is_listening_),
-          is_open_(other.is_open_) {
+          is_listening_(other.is_listening_.load()),
+          is_open_(other.is_open_.load()) {
         other.is_listening_ = false;
         other.is_open_ = false;
     }
@@ -493,8 +493,8 @@ namespace wavex::network::quic {
             tls_cert_file_ = std::move(other.tls_cert_file_);
             tls_key_file_ = std::move(other.tls_key_file_);
             recv_buf_ = other.recv_buf_;
-            is_listening_ = other.is_listening_;
-            is_open_ = other.is_open_;
+            is_listening_ = other.is_listening_.load();
+            is_open_ = other.is_open_.load();
             other.is_listening_ = false;
             other.is_open_ = false;
         }
@@ -549,11 +549,17 @@ namespace wavex::network::quic {
 
     void basic_quic_acceptor::close(std::error_code &ec) noexcept {
         is_listening_ = false;
-        is_open_ = false;
-        cancel(ec);
-        if (udp_socket_.is_open()) {
-            udp_socket_.close(ec);
+        is_open_ = false; {
+            std::lock_guard sock_lock(sock_mtx_);
+            ec.clear();
+            if (udp_socket_.is_open()) {
+                udp_socket_.cancel(ec);
+                udp_socket_.close(ec);
+            }
         }
+        // Fail queued accept handlers (the socket part of cancel() is a no-op now).
+        std::error_code ignored;
+        cancel(ignored);
         std::unordered_map<ConnectionId, std::shared_ptr<QuicConnection> > conns; {
             std::lock_guard lock(mtx_);
             conns = std::move(connections_);
@@ -572,9 +578,11 @@ namespace wavex::network::quic {
     }
 
     void basic_quic_acceptor::cancel(std::error_code &ec) noexcept {
-        ec.clear();
-        if (udp_socket_.is_open()) {
-            udp_socket_.cancel(ec);
+        ec.clear(); {
+            std::lock_guard sock_lock(sock_mtx_);
+            if (udp_socket_.is_open()) {
+                udp_socket_.cancel(ec);
+            }
         }
         std::deque<AcceptHandlerFn> pending; {
             std::lock_guard lock(mtx_);
@@ -594,7 +602,10 @@ namespace wavex::network::quic {
     }
 
     basic_quic_acceptor::endpoint_type basic_quic_acceptor::local_endpoint(std::error_code &ec) const noexcept {
-        auto ep = udp_socket_.local_endpoint(ec);
+        endpoint_type ep; {
+            std::lock_guard sock_lock(sock_mtx_);
+            ep = udp_socket_.local_endpoint(ec);
+        }
         if (!ec && ep.address().is_unspecified()) {
             ep.address(asio::ip::address_v4::loopback());
         }
@@ -665,6 +676,7 @@ namespace wavex::network::quic {
     }
 
     void basic_quic_acceptor::do_receive() {
+        std::lock_guard sock_lock(sock_mtx_);
         if (!is_listening_ || !udp_socket_.is_open()) return;
 
         udp_socket_.async_receive_from(
@@ -725,8 +737,11 @@ namespace wavex::network::quic {
                         vn_packet.push_back(1);
 
                         auto buf = std::make_shared<std::string>(std::move(vn_packet));
-                        udp_socket_.async_send_to(asio::buffer(*buf), sender_endpoint_, [buf](auto, auto) {
-                        });
+                        {
+                            std::lock_guard sock_lock(sock_mtx_);
+                            udp_socket_.async_send_to(asio::buffer(*buf), sender_endpoint_, [buf](auto, auto) {
+                            });
+                        }
                         do_receive();
                         return;
                     }
@@ -824,6 +839,7 @@ namespace wavex::network::quic {
         for (auto datagrams = conn->poll_outgoing_datagrams(); auto &dgram: datagrams) {
             if (dgram.empty()) continue;
             auto buf = std::make_shared<std::string>(std::move(dgram));
+            std::lock_guard sock_lock(sock_mtx_);
             udp_socket_.async_send_to(
                 asio::buffer(*buf), conn->peer_endpoint(),
                 [buf](std::error_code, std::size_t) {

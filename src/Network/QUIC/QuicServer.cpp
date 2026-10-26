@@ -61,8 +61,11 @@ namespace wavex::network::quic {
         if (stopped_.exchange(true)) return;
         running_.store(false);
 
-        asio::error_code ec;
-        socket_.close(ec); // cancels pending async_receive_from first
+        {
+            std::lock_guard sock_lock(sock_mtx_);
+            asio::error_code ec;
+            socket_.close(ec); // cancels pending async_receive_from first
+        }
 
         // Teardown MUST happen on the io thread, after all in-flight
         // handle_datagram/flush_outbound calls have finished, and posted
@@ -100,6 +103,7 @@ namespace wavex::network::quic {
     }
 
     void QuicServer::do_receive() {
+        std::lock_guard sock_lock(sock_mtx_);
         if (!running_.load() || stopped_.load()) return;
 
         socket_.async_receive_from(
@@ -167,8 +171,11 @@ namespace wavex::network::quic {
                         vn_packet.push_back(1);
 
                         auto buf = std::make_shared<std::string>(std::move(vn_packet));
-                        socket_.async_send_to(asio::buffer(*buf), sender_endpoint_, [buf](auto, auto) {
-                        });
+                        {
+                            std::lock_guard sock_lock(sock_mtx_);
+                            socket_.async_send_to(asio::buffer(*buf), sender_endpoint_, [buf](auto, auto) {
+                            });
+                        }
                         do_receive();
                         return;
                     }
@@ -302,10 +309,12 @@ namespace wavex::network::quic {
     }
 
     void QuicServer::flush_outbound(const std::shared_ptr<QuicConnection> &conn) {
-        if (stopped_.load() || !socket_.is_open()) return;
+        if (stopped_.load()) return;
         for (auto datagrams = conn->poll_outgoing_datagrams(); auto &dgram: datagrams) {
             if (dgram.empty()) continue;
             auto buf = std::make_shared<std::string>(std::move(dgram));
+            std::lock_guard sock_lock(sock_mtx_);
+            if (!socket_.is_open()) return;
             socket_.async_send_to(
                 asio::buffer(*buf), conn->peer_endpoint(),
                 [buf](const std::error_code ec, std::size_t) {

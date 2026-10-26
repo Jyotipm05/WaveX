@@ -610,7 +610,7 @@ namespace wavex::base {
 
                 pool_->release_batch(batch.data(), n);
                 processed_count_.fetch_add(n, std::memory_order_release);
-                cv_flush_.notify_all();
+                notify_flush_waiters();
             } else {
                 std::lock_guard lock(mutex_);
                 if (file_sink_.has_value() && file_sink_->is_open()) {
@@ -640,8 +640,16 @@ namespace wavex::base {
             }
             pool_->release_batch(batch.data(), n);
             processed_count_.fetch_add(n, std::memory_order_release);
-            cv_flush_.notify_all();
+            notify_flush_waiters();
         }
+    }
+
+    // flush() tests processed_count_ under flush_mutex_ and then sleeps. Taking the mutex here (even though
+    // nothing is written under it) orders this notify after the waiter is either asleep or has seen the new
+    // count, so the wakeup cannot fall between its predicate check and its wait.
+    void Logger::notify_flush_waiters() {
+        { std::lock_guard flush_lock(flush_mutex_); }
+        cv_flush_.notify_all();
     }
 
     void Logger::format_record(const LogBuffer *slot, std::string &line) const {

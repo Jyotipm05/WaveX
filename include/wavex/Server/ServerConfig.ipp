@@ -158,11 +158,7 @@ namespace wavex::server {
         server_not_found_handler_ =
                 [b = std::move(body), ct = std::move(content_type)](
             RequestType &, ResponseType &res) -> asio::awaitable<void> {
-                    res.status(404);
-                    if (!ct.empty()) {
-                        res.set("Content-Type", ct);
-                    }
-                    res.send(b);
+                    traits::write_not_found(res, b, ct);
                     co_return;
                 };
     }
@@ -183,6 +179,21 @@ namespace wavex::server {
 
     template<typename Codec, typename RouterType>
     bool Server<Codec, RouterType>::is_acceptor_open() const noexcept {
-        return acceptor_.is_open();
+        return acceptor_open_.load(std::memory_order_acquire);
+    }
+
+    template<typename Codec, typename RouterType>
+    bool Server<Codec, RouterType>::is_http3_enabled() noexcept {
+        return has_quic_transport;
+    }
+
+    template<typename Codec, typename RouterType>
+    void Server<Codec, RouterType>::allow_insecure(const bool allow) noexcept {
+        allow_insecure_ = allow;
+    }
+
+    template<typename Codec, typename RouterType>
+    bool Server<Codec, RouterType>::allow_insecure_transports() const noexcept {
+        return allow_insecure_;
     }
 } // namespace wavex::server

@@ -19,8 +19,7 @@
  *   5. Yield (1 ms sleep) to avoid tight CPU spin
  *
  * Task submission priority (ThreadPool::dispatch):
- *   1. Try to push into the next round-robin worker's LocalQueue
- *   2. If the LocalQueue is full (≥255 tasks), spill to InjectorQueue
+ *   Always push to the InjectorQueue (LocalQueues are single-owner and filled only by stealing)
  */
 
 #pragma once
@@ -154,6 +153,12 @@ namespace wavex::server {
         InjectorQueue injector_; ///< Global overflow & external submission queue
         std::vector<std::shared_ptr<WorkerNode> > workers_;
         std::array<std::atomic<WorkerNode *>, kMaxWorkerSlots> worker_table_{};
+        /// Threads currently probing peers' queues through raw pointers from worker_table_. A retired node is
+        /// only destroyed once this has been observed at zero *after* it was unpublished (see reclaim_retired()).
+        alignas(64) std::atomic<std::size_t> active_thieves_{0};
+        /// Retired (unpublished, joined) nodes waiting for safe reclamation. Touched only by the monitor
+        /// thread, and by stop_pool() after the monitor has been joined.
+        std::vector<std::shared_ptr<WorkerNode> > retired_;
         std::thread monitor_thread_;
         std::atomic<std::size_t> worker_count_{0};
         std::atomic<std::size_t> burst_spill_count_{0};
@@ -184,29 +189,18 @@ namespace wavex::server {
         // ─── 4. Member Functions ─────────────────────────────────────────────
 
         /**
-         * @brief Submit a generic task to the pool.
+         * @brief Submit a generic task to the pool (callable from any thread).
          *
-         * Tries to push into the next round-robin worker's LocalQueue first.
-         * Falls back to the InjectorQueue if the local ring is full (lock-free fast path).
+         * Always goes through the InjectorQueue: a LocalQueue is a single-owner deque (only its worker may
+         * push or pop at the back), so external producers must never touch it. Idle workers drain the
+         * injector within one poll interval; the worker-local rings are filled only by their owner, from
+         * batches stolen off busy peers.
          */
         void dispatch(Task task) {
-            const std::size_t count = worker_count_.load(std::memory_order_acquire);
-            if (count == 0) [[unlikely]] {
-                // No workers yet — queue directly into injector
-                injector_.push(std::move(task));
-                check_burst_spill();
-                return;
-            }
-            const std::size_t idx = next_worker_idx_.fetch_add(1, std::memory_order_relaxed) % count;
-            const WorkerNode *w = nullptr;
-            if (idx < kMaxWorkerSlots) [[likely]] {
-                w = worker_table_[idx].load(std::memory_order_acquire);
-            }
-            if (!w || !w->queue->push(std::move(task))) [[unlikely]] {
-                // LocalQueue full or slot unavailable → spill to global injector
-                injector_.push(std::move(task));
-                check_burst_spill();
-            }
+            injector_.push(std::move(task));
+            // A deep backlog is the signal to wake the monitor early (this replaces the old "local ring full"
+            // spill); ordinary load is picked up by the periodic check.
+            if (injector_.size() >= LocalQueue::CAPACITY - 1) check_burst_spill();
         }
 
         /**
@@ -308,6 +302,8 @@ namespace wavex::server {
                 if (w->thread.joinable())
                     w->thread.join();
             }
+            // Every worker thread is joined, so no thief remains: retired nodes can go too.
+            retired_.clear();
         }
 
     private:
@@ -363,6 +359,13 @@ namespace wavex::server {
 
                 // ── 2. Steal from a random peer's LocalQueue (FIFO, lock-free)
                 {
+                    // seq_cst pairs with the unpublish/observe sequence in reclaim_retired(): once a retired node
+                    // is unpublished and this counter reads zero, no thief can still hold its pointer.
+                    struct ThiefScope {
+                        std::atomic<std::size_t> &n;
+                        explicit ThiefScope(std::atomic<std::size_t> &c) : n(c) { n.fetch_add(1, std::memory_order_seq_cst); }
+                        ~ThiefScope() { n.fetch_sub(1, std::memory_order_seq_cst); }
+                    } thief_scope{active_thieves_};
                     if (const std::size_t n = worker_count_.load(std::memory_order_acquire); n > 1) {
                         // Pick a random start to avoid thundering-herd on worker 0.
                         const std::size_t start = rng() % n;
@@ -520,6 +523,18 @@ namespace wavex::server {
 
             if (retiring_worker) {
                 decommission_worker(retiring_worker);
+                retired_.push_back(std::move(retiring_worker));
+            }
+            reclaim_retired();
+        }
+
+        /// Destroy retired nodes once no thread can still hold a raw pointer to them. They were unpublished
+        /// (worker_table_ slot cleared, seq_cst) before being parked, and thieves bump active_thieves_
+        /// (seq_cst) before reading the table, so a zero here means every thief that could have seen the node
+        /// has left the steal loop and any later one cannot find it.
+        void reclaim_retired() {
+            if (!retired_.empty() && active_thieves_.load(std::memory_order_seq_cst) == 0) {
+                retired_.clear();
             }
         }
 

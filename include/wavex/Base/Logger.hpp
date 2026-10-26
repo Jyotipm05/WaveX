@@ -369,6 +369,8 @@ namespace wavex::base {
             return false;
         }
 
+        void notify_flush_waiters();
+
         static std::string_view extract_filename(std::string_view filepath);
         static void populate_header(LogBuffer *slot, LogLevel lvl, const std::source_location &loc);
         static void populate_header_no_loc(LogBuffer *slot, LogLevel lvl);

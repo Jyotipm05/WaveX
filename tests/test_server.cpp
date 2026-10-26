@@ -284,6 +284,7 @@ void test_proportional_hysteresis_scaling() {
     config.upper_thresholds = {5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140};
     config.lower_thresholds = {2, 4, 8, 15, 25, 35, 45, 55, 65, 75, 85, 95, 105, 115, 125};
 
+    { // pool is destroyed (monitor thread joined) before the shared config is touched again below
     wavex::server::ThreadPool pool(config);
     check(pool.worker_count() == 1, "Initial worker count is 1 (min_workers)");
 
@@ -324,6 +325,8 @@ void test_proportional_hysteresis_scaling() {
     pool.evaluate_scaling();
     check(pool.cooldown_counter() == 0, "Cooldown counter reset to 0 after triggering scale-down");
     check(pool.worker_count() == scaled_workers - 1, "Worker count reduced by 1 after 3 consecutive low load checks");
+
+    }
 
     // Reset check_interval for subsequent tests
     config.check_interval = std::chrono::milliseconds(100);
@@ -414,7 +417,7 @@ void test_server_graceful_remote_shutdown() {
         server.run();
     });
 
-    while (!server.is_running()) {
+    while (!server.is_running() || !server.is_acceptor_open()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     check(server.is_running(), "Server is running on 18091");
@@ -463,7 +466,7 @@ void test_server_external_shutdown_event() {
         server.run();
     });
 
-    while (!server.is_running()) {
+    while (!server.is_running() || !server.is_acceptor_open()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     check(server.is_running(), "Server running on 18092");
@@ -498,7 +501,7 @@ void test_server_inflight_drain() {
         server.run();
     });
 
-    while (!server.is_running()) {
+    while (!server.is_running() || !server.is_acceptor_open()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
@@ -553,7 +556,8 @@ void test_server_restartability() {
 
     // Lifecycle 2 — restart the same server instance
     std::thread srv_th2([&server] { server.run(); });
-    while (!server.is_running()) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    // is_running() flips before the listening socket exists; clients must wait for the acceptor.
+    while (!server.is_running() || !server.is_acceptor_open()) std::this_thread::sleep_for(std::chrono::milliseconds(10));
     check(server.is_running(), "Server running again (cycle 2)");
 
     bool ping_ok = false;
@@ -593,7 +597,7 @@ void test_server_hard_stop_and_restart() {
 
     for (int cycle = 1; cycle <= 2; ++cycle) {
         std::thread srv([&server] { server.run(); });
-        while (!server.is_running()) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        while (!server.is_running() || !server.is_acceptor_open()) std::this_thread::sleep_for(std::chrono::milliseconds(10));
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
         // 1. Open idle keep-alive connections (one request each, then silence) so they sit in the idle read.
