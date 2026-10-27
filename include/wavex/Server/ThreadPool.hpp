@@ -43,6 +43,7 @@
 #include <asio/executor_work_guard.hpp>
 #include <asio/io_context.hpp>
 
+#include <wavex/Base/Logger.hpp>
 #include <wavex/Server/WorkStealingQueue.hpp>
 
 namespace wavex::server {
@@ -59,6 +60,9 @@ namespace wavex::server {
         std::size_t max_workers = default_max_workers();
         std::size_t scale_up_divider = 2;
         std::size_t scale_down_cooldown_cycles = 3;
+        /// A worker running one task longer than this is reported by the monitor thread as stalled
+        /// (a blocking call or CPU loop on a worker starves every connection it owns). Zero disables.
+        std::chrono::milliseconds stall_threshold{1000};
 
         // ─── 2. Constructors & Destructor ────────────────────────────────────
         ThreadPoolConfig() {
@@ -114,6 +118,10 @@ namespace wavex::server {
         std::atomic<bool> is_retiring{false}; // 1 byte
         std::atomic<bool> is_busy{false}; // 1 byte
         std::atomic<bool> stop_requested{false}; // 1 byte
+        /// steady_clock ns at which the current task started; 0 while not inside a task.
+        std::atomic<std::int64_t> task_start_ns{0};
+        /// Start stamp of the last task already reported as stalled (monitor thread only, under workers_mutex_).
+        std::int64_t reported_stall_ns{0};
         /// Coroutines spawned onto this worker's io_context that have not finished yet. Shared so the
         /// coroutine's guard can outlive the node (e.g. frames destroyed when the io_context is torn down).
         std::shared_ptr<std::atomic<std::size_t> > live_coroutines =
@@ -168,6 +176,7 @@ namespace wavex::server {
         std::atomic<std::size_t> burst_spill_count_{0};
         std::atomic<std::size_t> next_worker_idx_{0};
         std::size_t scale_down_cooldown_counter_{0};
+        std::atomic<std::size_t> stall_count_{0};
         std::atomic<bool> pool_stopping_{false};
         bool monitor_signal_{false};
 
@@ -310,6 +319,14 @@ namespace wavex::server {
             return worker_count_.load(std::memory_order_acquire);
         }
 
+        /// Number of tasks flagged as stalled since construction (diagnostics/testing).
+        [[nodiscard]] std::size_t stall_count() const noexcept {
+            return stall_count_.load(std::memory_order_relaxed);
+        }
+
+        /// Run the stall check now (diagnostics/testing).
+        void evaluate_stalls() { check_stalls(); }
+
         /// Force an immediate scaling evaluation.
         void evaluate_scaling() {
             check_and_scale();
@@ -408,6 +425,13 @@ namespace wavex::server {
             // kIoBudget of task time, the io_context gets a turn before the next task is taken.
             std::size_t tasks_since_io = 0;
             auto last_io = std::chrono::steady_clock::now();
+            const auto run_task = [&](auto &task) {
+                w->is_busy = true;
+                w->task_start_ns.store(now_ns(), std::memory_order_relaxed);
+                task();
+                w->task_start_ns.store(0, std::memory_order_relaxed);
+                w->is_busy = false;
+            };
             const auto io_tick = [&] {
                 if (++tasks_since_io < kTasksPerIoTick &&
                     std::chrono::steady_clock::now() - last_io < kIoBudget) {
@@ -421,9 +445,7 @@ namespace wavex::server {
             while (!w->stop_requested && !w->is_retiring) {
                 // ── 1. Pop from own LocalQueue (LIFO, cache-local) ──────────
                 if (auto task = w->queue->pop()) [[likely]] {
-                    w->is_busy = true;
-                    (*task)();
-                    w->is_busy = false;
+                    run_task(*task);
                     io_tick();
                     continue;
                 }
@@ -443,9 +465,7 @@ namespace wavex::server {
                         for (std::size_t i = 0; i < n; ++i) {
                             if (const auto *other = worker_table_[(start + i) % n].load(std::memory_order_acquire); other && other->id != w->id && !other->is_retiring.load(std::memory_order_relaxed)) {
                                 if (auto stolen = other->queue->steal_half(*w->queue)) {
-                                    w->is_busy = true;
-                                    (*stolen)();
-                                    w->is_busy = false;
+                                    run_task(*stolen);
                                     io_tick();
                                     goto next_iteration; // restart priority chain
                                 }
@@ -456,9 +476,7 @@ namespace wavex::server {
 
                 // ── 3. Drain one task from the global InjectorQueue ──────────
                 if (auto task = injector_.pop()) {
-                    w->is_busy = true;
-                    (*task)();
-                    w->is_busy = false;
+                    run_task(*task);
                     io_tick();
                     continue;
                 }
@@ -499,7 +517,31 @@ namespace wavex::server {
                 monitor_signal_ = false;
                 lock.unlock();
 
+                check_stalls();
                 check_and_scale();
+            }
+        }
+
+        static std::int64_t now_ns() noexcept {
+            const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+            return ns > 0 ? static_cast<std::int64_t>(ns) : 1;
+        }
+
+        /// Flags workers stuck in a single task past `stall_threshold`. Each stalled task is reported once.
+        void check_stalls() {
+            if (config_.stall_threshold.count() <= 0) return;
+            const auto limit = std::chrono::duration_cast<std::chrono::nanoseconds>(config_.stall_threshold).count();
+            const std::int64_t now = now_ns();
+            std::lock_guard lock(workers_mutex_);
+            for (const auto &w: workers_) {
+                const std::int64_t start = w->task_start_ns.load(std::memory_order_relaxed);
+                if (start == 0 || start == w->reported_stall_ns || now - start < limit) continue;
+                w->reported_stall_ns = start;
+                stall_count_.fetch_add(1, std::memory_order_relaxed);
+                WX_LOG_WARN("ThreadPool: worker {} has been inside one task for {} ms; a blocking call or long loop "
+                            "on a worker stalls every connection it owns (use spawn_blocking)",
+                            w->id, (now - start) / 1000000);
             }
         }
 

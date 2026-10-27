@@ -770,6 +770,40 @@ void test_worker_io_fairness() {
           "...before half of the backlog had finished (io_context is not starved)");
 }
 
+void test_stall_detector() {
+    std::cout << "\n[Test 17] Stall detector flags a worker stuck in one task\n";
+
+    wavex::server::ThreadPoolConfig cfg;
+    cfg.set_limits(1, 1);
+    cfg.check_interval = std::chrono::milliseconds(10000);
+    cfg.stall_threshold = std::chrono::milliseconds(50);
+    wavex::server::ThreadPool pool(cfg);
+
+    std::atomic<bool> started{false}, release{false}, done{false};
+    pool.dispatch([&] {
+        started = true;
+        while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        done = true;
+    });
+    for (int i = 0; i < 2000 && !started.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    check(started.load(), "the long task started");
+
+    pool.evaluate_stalls();
+    check(pool.stall_count() == 0, "a task that has only just started is not a stall");
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    pool.evaluate_stalls();
+    check(pool.stall_count() == 1, "a task running past the threshold is flagged");
+    pool.evaluate_stalls();
+    check(pool.stall_count() == 1, "...but only once per task");
+
+    release = true;
+    for (int i = 0; i < 2000 && !done.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    pool.evaluate_stalls();
+    check(pool.stall_count() == 1, "an idle worker is not reported");
+}
+
 // ─── main ─────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -792,6 +826,7 @@ int main() {
     test_scale_down_keeps_loaded_workers();
     test_worker_lease();
     test_worker_io_fairness();
+    test_stall_detector();
 
     std::cout << "\n" << tests_passed << "/" << tests_run << " tests passed.\n";
     return tests_passed == tests_run ? 0 : 1;

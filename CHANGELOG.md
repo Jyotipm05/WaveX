@@ -17,6 +17,7 @@ Tagged releases before 0.4.0 (`v0.1.0-alpha` to `v0.3.0-alpha`) are listed under
 - Benchmark harness (`-DWAVEX_BENCH=ON`): `wavex_bench_server`, a dependency-free `wavex_loadgen` (p50/p99/p99.9, idle connections) and `benchmarks/run.sh` with `ci` and `full` tiers.
 - Tests for `ConnectionTracker` and for the configurable request header / query-parameter limits.
 - Tests for `Server::stop()` with idle keep-alive connections followed by in-process restart, and for elastic scale-down never retiring a worker that still runs connection coroutines.
+- Stall detector: the pool monitor flags a worker stuck inside one task longer than `ThreadPoolConfig::stall_threshold` (default 1 s, 0 disables), logs one warning per stalled task naming the worker, and exposes `ThreadPool::stall_count()`.
 
 ### Changed
 - `ConnectionTracker` uses 16 lock stripes instead of one global mutex.
