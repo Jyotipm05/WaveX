@@ -129,29 +129,23 @@ namespace wavex::network::quic {
                 if (is_long) {
                     unpacked = unpack_packet_header(datagram, hdr, hdr_len);
                 } else {
+                    // Short headers always carry a server-chosen CID, and all of those have
+                    // server_cid_len_ bytes, so no per-packet scan over the connection table is needed
+                    // (that scan was O(connections) work an attacker could trigger with any short packet).
                     unpacked = unpack_packet_header(datagram, hdr, hdr_len, server_cid_len_);
-                    if (unpacked) {
-                        std::lock_guard lock(mtx_);
-                        if (!connections_.contains(hdr.dcid)) {
-                            for (const auto &known_cid: connections_ | std::views::keys) {
-                                if (known_cid.length() != server_cid_len_ && datagram.size() > known_cid.length()) {
-                                    std::size_t alt_len = 0;
-                                    if (PacketHeader alt_hdr; unpack_packet_header(datagram, alt_hdr, alt_len, known_cid.length()) &&
-                                                              alt_hdr.dcid == known_cid) {
-                                        hdr = alt_hdr;
-                                        hdr_len = alt_len;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
 
                 if (!unpacked) {
                     wavex::log::warn("[QUIC] [server] Failed to unpack packet header from {} bytes UDP datagram", bytes_recvd);
                 } else {
 
+                    // RFC 9000 §6.1/§14.1: only answer unknown versions for datagrams large enough to be a
+                    // client Initial, so Version Negotiation cannot be used for reflection/amplification.
+                    if (hdr.is_long && hdr.version != QUIC_VERSION_1 && hdr.version != 0 &&
+                        bytes_recvd < kMinInitialDatagramSize) {
+                        do_receive();
+                        return;
+                    }
                     if (hdr.is_long && hdr.version != QUIC_VERSION_1 && hdr.version != 0) {
                         // RFC 9000 §6: Version Negotiation packet
                         std::string vn_packet;
@@ -182,12 +176,17 @@ namespace wavex::network::quic {
 
                     std::shared_ptr<QuicConnection> conn; {
                         std::lock_guard lock(mtx_);
+                        // Route by DCID only. The table is keyed by server-chosen CIDs and the client's original
+                        // DCID; a client-chosen SCID must never select (or overwrite) another connection.
                         auto it = connections_.find(hdr.dcid);
-                        if (it == connections_.end() && !hdr.scid.empty()) {
-                            it = connections_.find(hdr.scid);
-                        }
                         if (it != connections_.end()) {
                             conn = it->second;
+                        } else if (hdr.is_long && hdr.type == PacketType::Initial &&
+                                   bytes_recvd < kMinInitialDatagramSize) {
+                            // RFC 9000 §14.1: a server MUST discard Initial packets carried in datagrams
+                            // smaller than 1200 bytes (anti-amplification).
+                            wavex::log::debug("[QUIC] [server] Dropping undersized Initial datagram ({} bytes)",
+                                              bytes_recvd);
                         } else if (hdr.is_long && hdr.type == PacketType::Initial) {
                             // New incoming connection (Initial)
                             const ConnectionId server_cid = ConnectionId::random(server_cid_len_);
@@ -211,14 +210,23 @@ namespace wavex::network::quic {
                                 }
                             });
 
-                            conn->set_closed_callback([this, server_cid](const ConnectionId &scid, const ConnectionId &peer_cid, const ConnectionId &orig_dcid) {
-                                asio::post(io_, [this, server_cid, scid, peer_cid, orig_dcid] {
+                            conn->set_closed_callback([this, server_cid, owner = conn.get()](
+                                const ConnectionId &scid, const ConnectionId &, const ConnectionId &orig_dcid) {
+                                asio::post(io_, [this, server_cid, scid, orig_dcid, owner] {
                                     if (stopped_.load()) return;
                                     std::lock_guard lock(mtx_);
-                                    connections_.erase(server_cid);
-                                    connections_.erase(scid);
-                                    if (!orig_dcid.empty()) connections_.erase(orig_dcid);
-                                    if (!peer_cid.empty()) connections_.erase(peer_cid);
+                                    // Only erase entries that still point at this connection: a key may have
+                                    // been re-used by a newer connection in the meantime.
+                                    auto erase_owned = [&](const ConnectionId &key) {
+                                        if (key.empty()) return;
+                                        if (const auto it = connections_.find(key);
+                                            it != connections_.end() && it->second.get() == owner) {
+                                            connections_.erase(it);
+                                        }
+                                    };
+                                    erase_owned(server_cid);
+                                    erase_owned(scid);
+                                    erase_owned(orig_dcid);
                                     wavex::log::info("[QUIC] [server] Removed closed connection (remaining={})", connections_.size());
                                 });
                             });
@@ -232,8 +240,7 @@ namespace wavex::network::quic {
                                 wavex::log::error("[QUIC] Failed to init_tls_handshake_engine for new incoming connection!");
                             }
                             connections_[server_cid] = conn;
-                            connections_[hdr.dcid] = conn;
-                            if (!hdr.scid.empty()) connections_[hdr.scid] = conn;
+                            connections_.try_emplace(hdr.dcid, conn);
 
                             if (stream_handler_ || uni_stream_handler_) {
                                 conn->set_stream_created_callback([this](std::shared_ptr<QuicStream> stream) {

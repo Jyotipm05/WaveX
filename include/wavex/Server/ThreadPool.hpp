@@ -144,6 +144,10 @@ namespace wavex::server {
     class ThreadPool {
         // ─── 1. Nested Types & Constants ─────────────────────────────────────
         static constexpr std::size_t kMaxWorkerSlots = 128;
+        /// Worker fairness: poll the io_context at least every this many tasks ...
+        static constexpr std::size_t kTasksPerIoTick = 16;
+        /// ... or after this much wall time since its last turn, whichever comes first.
+        static constexpr std::chrono::microseconds kIoBudget{250};
 
         // ─── 2. Member Variables (Arranged for minimum padding) ──────────────
         ThreadPoolConfig &config_;
@@ -399,12 +403,28 @@ namespace wavex::server {
             // Seed per-thread RNG for randomized steal target selection.
             std::mt19937 rng{std::random_device{}()};
 
+            // Fairness: connection I/O (socket completions, timers, coroutine resumptions) lives on this
+            // worker's io_context, and a queue of tasks must not starve it. After kTasksPerIoTick tasks, or
+            // kIoBudget of task time, the io_context gets a turn before the next task is taken.
+            std::size_t tasks_since_io = 0;
+            auto last_io = std::chrono::steady_clock::now();
+            const auto io_tick = [&] {
+                if (++tasks_since_io < kTasksPerIoTick &&
+                    std::chrono::steady_clock::now() - last_io < kIoBudget) {
+                    return;
+                }
+                w->io_ctx->poll();
+                tasks_since_io = 0;
+                last_io = std::chrono::steady_clock::now();
+            };
+
             while (!w->stop_requested && !w->is_retiring) {
                 // ── 1. Pop from own LocalQueue (LIFO, cache-local) ──────────
                 if (auto task = w->queue->pop()) [[likely]] {
                     w->is_busy = true;
                     (*task)();
                     w->is_busy = false;
+                    io_tick();
                     continue;
                 }
 
@@ -426,6 +446,7 @@ namespace wavex::server {
                                     w->is_busy = true;
                                     (*stolen)();
                                     w->is_busy = false;
+                                    io_tick();
                                     goto next_iteration; // restart priority chain
                                 }
                             }
@@ -438,6 +459,7 @@ namespace wavex::server {
                     w->is_busy = true;
                     (*task)();
                     w->is_busy = false;
+                    io_tick();
                     continue;
                 }
 
@@ -449,6 +471,8 @@ namespace wavex::server {
                     if (w->io_ctx->poll() == 0) {
                         w->io_ctx->run_one_for(std::chrono::microseconds(100));
                     }
+                    tasks_since_io = 0;
+                    last_io = std::chrono::steady_clock::now();
                 }
 
             next_iteration:;

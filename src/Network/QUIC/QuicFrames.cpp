@@ -172,6 +172,14 @@ namespace wavex::network::quic {
                         PARSE_FAIL("ACK decode range len");
                     ack.ranges.push_back(AckRange{gap, len});
                 }
+                if (ack.ecn) {
+                    // RFC 9000 §19.3.2: ACK_ECN carries ECT(0), ECT(1) and ECN-CE counts after the ranges.
+                    // They must be consumed, otherwise every following frame in the packet is misparsed.
+                    for (int i = 0; i < 3; ++i) {
+                        if (uint64_t ecn_count = 0; !VarInt::decode(payload, cursor, ecn_count))
+                            PARSE_FAIL("ACK_ECN decode ECN counts");
+                    }
+                }
                 out_frames.emplace_back(std::move(ack));
             } else if (raw_type == 0x04) {
                 ResetStreamFrame rsf;
@@ -298,10 +306,9 @@ namespace wavex::network::quic {
                     PARSE_FAIL("DATAGRAM dlen exceeds payload bounds");
                 cursor += dlen;
             } else {
-                log::warn(
-                    "[QUIC] parse_frames: unrecognized frame type 0x{:02x} at offset {} in {} bytes payload, stopping packet frame parsing",
-                    raw_type, cursor, payload.size());
-                break;
+                // RFC 9000 §12.4: an unknown frame type is a FRAME_ENCODING_ERROR. Returning success here
+                // would let the packet be acknowledged while its remaining frames were never processed.
+                PARSE_FAIL("unrecognized frame type");
             }
         }
         return true;

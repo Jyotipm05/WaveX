@@ -22,6 +22,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -97,6 +98,7 @@ namespace wavex::network::quic {
             // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
             std::vector<std::pair<uint64_t, uint64_t> > intervals{};
             uint64_t largest_pn{0};
+            uint64_t evicted_below{0}; // PNs below this were dropped by the range cap
             bool has_packets{false};
             bool ack_eliciting_pending{false};
 
@@ -121,9 +123,21 @@ namespace wavex::network::quic {
             void mark_ack_sent() noexcept { ack_eliciting_pending = false; }
             [[nodiscard]] auto needs_ack() const noexcept -> bool { return has_packets && ack_eliciting_pending; }
 
+            /// True if `pn` was already received (or is older than the oldest range still tracked).
+            /// RFC 9000 §12.3: duplicate packets must be discarded rather than processed again.
+            [[nodiscard]] auto contains(const uint64_t pn) const noexcept -> bool {
+                if (!has_packets) return false;
+                if (evicted_below > 0 && pn < evicted_below) return true;
+                for (const auto &[lo, hi]: intervals) {
+                    if (pn >= lo && pn <= hi) return true;
+                }
+                return false;
+            }
+
             void reset() noexcept {
                 intervals.clear();
                 largest_pn = 0;
+                evicted_below = 0;
                 has_packets = false;
                 ack_eliciting_pending = false;
             }
@@ -170,9 +184,13 @@ namespace wavex::network::quic {
         std::unordered_map<uint64_t, wavex::utils::StreamBuffer> stream_send_queues_{};
         std::unordered_map<uint64_t, bool> stream_send_fin_{};
         std::deque<std::string> pending_outbound_datagrams_{};
+        std::deque<std::string> amplification_held_datagrams_{}; // built but over the 3x budget
         std::deque<std::string> buffered_handshake_packets_{};
         std::deque<std::string> buffered_one_rtt_packets_{};
         std::deque<std::shared_ptr<QuicStream> > accepted_streams_{};
+        // Peer-initiated stream IDs below the highest opened one that have not been seen yet
+        // (implicitly opened, RFC 9000 §3.2). Anything below the high-water mark and not in here is closed.
+        std::set<uint64_t> unseen_peer_stream_ids_{};
         std::shared_ptr<void> user_context_{};
         std::optional<std::function<void(std::shared_ptr<QuicStream>)> > stream_acceptor_{};
         StreamCreatedCallback on_stream_created_{};
@@ -196,6 +214,7 @@ namespace wavex::network::quic {
         std::array<std::vector<SentPacket>, 3> sent_packets_{};
         std::array<uint64_t, 3> next_packet_number_{0, 0, 0};
         std::array<uint64_t, 3> largest_acked_packet_{0, 0, 0};
+        std::array<uint64_t, 2> next_peer_stream_idx_{0, 0}; // [0]=bidi, [1]=uni
         std::chrono::steady_clock::time_point loss_time_{};
         std::chrono::milliseconds idle_timeout_{30000};
         uint64_t max_data_{1024 * 1024}; // 1 MB
@@ -232,6 +251,10 @@ namespace wavex::network::quic {
         bool draining_buffered_packets_{false};
         bool http3_session_initialized_{false};
         bool handshake_done_sent_{false};
+        bool in_tls_engine_{false};
+        bool tls_rerun_pending_{false};
+        bool peer_cid_switched_{false};
+        bool verify_peer_{true};
         uint8_t local_key_phase_{0};
         uint8_t peer_key_phase_{0};
 
@@ -283,6 +306,12 @@ namespace wavex::network::quic {
             if (state_ == ConnectionState::Connected && on_connected_) {
                 on_connected_();
             }
+        }
+
+        /// Client only: verify the server certificate chain and host/IP (on by default).
+        void set_verify_peer(const bool verify) noexcept {
+            std::scoped_lock lock(mtx_);
+            verify_peer_ = verify;
         }
 
         void set_sni_hostname(std::string sni) {
@@ -497,6 +526,16 @@ namespace wavex::network::quic {
         void flush_stream_send_queues();
 
         void drain_buffered_packets();
+
+        /// Keys for sending a short-header packet, or nullptr if 1-RTT keys are not available yet.
+        /// Initial keys are only returned in mock (non-TLS) mode, never on a real TLS connection.
+        [[nodiscard]] auto one_rtt_send_keys() const noexcept -> const ProtectionKeys *;
+
+        /// RFC 9000 §12.4 / Table 3: whether a frame may appear in a packet of the given type.
+        [[nodiscard]] static auto frame_allowed_in(const Frame &frame, PacketType type) noexcept -> bool;
+
+        /// Shared teardown. `send_close` is false when the peer closed the connection (draining).
+        void terminate(bool send_close, TransportError err, std::string_view reason);
 
         [[nodiscard]] auto build_quic_transport_params() const -> std::string;
     };

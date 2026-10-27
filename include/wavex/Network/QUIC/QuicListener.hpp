@@ -18,6 +18,7 @@
 #include <asio/awaitable.hpp>
 #include <wavex/Base/Logger.hpp>
 #include <wavex/Network/QUIC/QuicServer.hpp>
+#include <wavex/protos/http/http3codec.hpp>
 #include <wavex/Network/TransportListener.hpp>
 
 namespace wavex::network::quic {
@@ -44,6 +45,21 @@ namespace wavex::network::quic {
             if (host_.is_tls_enabled()) {
                 quic->set_tls_credentials(host_.tls_config().cert_file, host_.tls_config().key_file);
             }
+            // Peer control / QPACK streams must reach the HTTP/3 session handler; without this the
+            // generic server silently drained them and never saw the client's SETTINGS or GOAWAY.
+            quic->set_uni_stream_handler(
+                [](std::shared_ptr<QuicStream> stream) -> asio::awaitable<void> {
+                    if (!stream) co_return;
+                    const auto conn = stream->connection();
+                    if (!conn) co_return;
+                    auto ctx = std::static_pointer_cast<wavex::protos::http::http3::connection_context>(conn->user_context());
+                    if (!ctx) {
+                        ctx = std::make_shared<wavex::protos::http::http3::connection_context>();
+                        conn->set_user_context(ctx);
+                    }
+                    co_await wavex::protos::http::http3codec::session_handler::handle_unidirectional_stream(
+                        std::move(stream), ctx);
+                });
             quic->set_stream_handler(
                 [this](std::shared_ptr<QuicStream> stream) -> asio::awaitable<void> {
                     if (!stream) co_return;

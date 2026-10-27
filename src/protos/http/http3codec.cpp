@@ -22,6 +22,31 @@
 namespace wavex::protos::http::http3 {
     namespace {
         std::atomic<uint64_t> s_default_max_field_section_size{65536};
+
+        /// Strict content-length: 1*DIGIT only (RFC 9110 §8.6). strtoull accepted "+5", " 5", "5abc"
+        /// and wrapped "-1" to ~2^64, which left the request permanently incomplete.
+        bool parse_content_length(const std::string_view v, uint64_t &out) noexcept {
+            if (v.empty()) return false;
+            const auto [ptr, ec] = std::from_chars(v.data(), v.data() + v.size(), out);
+            return ec == std::errc{} && ptr == v.data() + v.size();
+        }
+
+        /// Field values must not contain CR, LF or NUL (RFC 9114 §4.2, RFC 9110 §5.5). These would
+        /// otherwise survive into logs, HTTP/1.1 upstreams or response headers echoed back.
+        bool is_valid_field_value(const std::string_view v) noexcept {
+            return std::ranges::none_of(v, [](const char c) { return c == '\r' || c == '\n' || c == '\0'; });
+        }
+
+        /// Lowercase token characters only; ':' is allowed solely as the pseudo-header prefix.
+        bool is_valid_field_name(const std::string_view n) noexcept {
+            if (n.empty() || n == ":") return false;
+            for (std::size_t i = 0; i < n.size(); ++i) {
+                const auto u = static_cast<unsigned char>(n[i]);
+                if (n[i] == ':' && i == 0) continue;
+                if (u <= 0x20 || u >= 0x7f || n[i] == ':' || (u >= 'A' && u <= 'Z')) return false;
+            }
+            return true;
+        }
     }
 
     uint64_t parser::default_max_field_section_size() noexcept {
@@ -816,6 +841,11 @@ namespace wavex::protos::http::http3 {
                 }
             } else if (hdr.type == static_cast<uint64_t>(frame_type::HEADERS)) {
                 if (req.state_.headers_received) {
+                    // Trailing HEADERS: skip only once the whole frame is buffered. Advancing past the end
+                    // of the buffer left cursor > buffer.size() and reported bytes that were never read.
+                    if (hdr_bytes + hdr.length > remaining.size()) {
+                        break;
+                    }
                     cursor += hdr_bytes + hdr.length;
                     req.state_.cursor = cursor;
                     continue;
@@ -851,11 +881,11 @@ namespace wavex::protos::http::http3 {
                 bool seen_regular_header = false;
 
                 for (auto &[name, val]: decoded) {
-                    for (const char c: name) {
-                        if (std::isupper(static_cast<unsigned char>(c))) {
-                            req.state_.reset();
-                            return result::error;
-                        }
+                    // RFC 9114 §4.2 / §10.3: malformed names (uppercase, controls, spaces) and values carrying
+                    // CR, LF or NUL make the whole request malformed.
+                    if (!is_valid_field_name(name) || !is_valid_field_value(val)) {
+                        req.state_.reset();
+                        return result::error;
                     }
 
                     if (name.starts_with(':')) {
@@ -910,16 +940,22 @@ namespace wavex::protos::http::http3 {
                         }
 
                         if (name == "content-length") {
-                            if (const auto cl = std::strtoull(val.c_str(), nullptr, 10); cl != 0 || val == "0") {
-                                req.state_.has_content_length = true;
-                                req.state_.content_length = cl;
+                            uint64_t cl = 0;
+                            // Reject non-numeric values and conflicting duplicates (RFC 9110 §8.6).
+                            if (!parse_content_length(val, cl) ||
+                                (req.state_.has_content_length && req.state_.content_length != cl)) {
+                                req.state_.reset();
+                                return result::error;
                             }
+                            req.state_.has_content_length = true;
+                            req.state_.content_length = cl;
                         }
                         req.headers_storage.emplace_back(std::move(name), std::move(val));
                     }
                 }
 
-                if (!has_method || (!has_path && req.method_type != method::CONNECT)) {
+                // RFC 9114 §4.3.1: non-CONNECT requests need :method, :scheme and :path.
+                if (!has_method || (req.method_type != method::CONNECT && (!has_path || !has_scheme))) {
                     req.state_.reset();
                     return result::error;
                 }
@@ -1058,6 +1094,9 @@ namespace wavex::protos::http::http3 {
                 }
             } else if (hdr.type == static_cast<uint64_t>(frame_type::HEADERS)) {
                 if (res.state_.headers_received) {
+                    if (hdr_bytes + hdr.length > remaining.size()) {
+                        break; // wait for the whole trailing HEADERS frame
+                    }
                     cursor += hdr_bytes + hdr.length;
                     res.state_.cursor = cursor;
                     continue;
@@ -1124,10 +1163,14 @@ namespace wavex::protos::http::http3 {
                             return result::error;
                         }
                         if (name == "content-length") {
-                            if (const auto cl = std::strtoull(val.c_str(), nullptr, 10); cl != 0 || val == "0") {
-                                res.state_.has_content_length = true;
-                                res.state_.content_length = cl;
+                            uint64_t cl = 0;
+                            if (!parse_content_length(val, cl) ||
+                                (res.state_.has_content_length && res.state_.content_length != cl)) {
+                                res.state_.reset();
+                                return result::error;
                             }
+                            res.state_.has_content_length = true;
+                            res.state_.content_length = cl;
                         }
                         res.headers_storage.emplace_back(std::move(name), std::move(val));
                     }

@@ -648,6 +648,7 @@ static void test_quic_server_client_loopback() {
 
     // Client connects
     QuicClient client(client_io);
+    client.set_verify_peer(false); // ssl/test.crt is self-signed
     bool connected = false;
     std::string client_received_echo;
 
@@ -1292,10 +1293,11 @@ static void test_malformed_packets_and_fuzzing() {
         frames.clear();
         assert(!parse_frames(trunc_ack, frames));
 
-        // Unknown frame type (e.g. 0x2f) - must safely stop/skip without crash
+        // Unknown frame type (e.g. 0x2f) - must be rejected (FRAME_ENCODING_ERROR, RFC 9000 §12.4)
+        // rather than silently stopping, which let the packet be ACKed with frames unprocessed.
         const std::string unknown_frame = "\x2f\x00\x00";
         frames.clear();
-        assert(parse_frames(unknown_frame, frames));
+        assert(!parse_frames(unknown_frame, frames));
     }
 
     // 5. Crypto Tamper Detection (AEAD auth tag mismatch)
@@ -1881,14 +1883,27 @@ static void test_quic_critical_mtu_flow_control_anti_amplification() {
         ProtectionKeys client_initial_local, client_initial_remote;
         CryptoSuite::derive_initial_secrets(client_dcid, client_initial_local, client_initial_remote);
 
-        // Send a Handshake packet to validate address (RFC 9000 §8.1)
+        // An undecryptable Handshake packet must NOT validate the address (that was the bug): only an
+        // authenticated packet may. In mock mode an authenticated 1-RTT packet does (RFC 9000 §8.1).
+        {
+            PacketHeader bogus_hs;
+            bogus_hs.is_long = true;
+            bogus_hs.type = PacketType::Handshake;
+            bogus_hs.version = QUIC_VERSION_1;
+            bogus_hs.dcid = server_cid;
+            bogus_hs.scid = client_scid;
+            bogus_hs.packet_number = 1;
+            std::string bogus_pkt;
+            CryptoSuite::protect_packet(client_initial_local, bogus_hs, std::string(100, '\0'), bogus_pkt);
+            conn->handle_datagram(bogus_pkt);
+            assert(!conn->is_peer_address_validated());
+        }
+
         PacketHeader hs_hdr;
-        hs_hdr.is_long = true;
-        hs_hdr.type = PacketType::Handshake;
-        hs_hdr.version = QUIC_VERSION_1;
+        hs_hdr.is_long = false;
+        hs_hdr.type = PacketType::OneRTT;
         hs_hdr.dcid = server_cid;
-        hs_hdr.scid = client_scid;
-        hs_hdr.packet_number = 1;
+        hs_hdr.packet_number = 2;
         std::string initial_pkt(1200, '\0');
         CryptoSuite::protect_packet(client_initial_local, hs_hdr, std::string(100, '\0'), initial_pkt);
         conn->handle_datagram(initial_pkt);

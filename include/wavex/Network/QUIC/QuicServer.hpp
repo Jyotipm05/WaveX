@@ -34,6 +34,8 @@ namespace wavex::network::quic {
         // ─── 1. Nested Types & Definitions (TOP) ───────────────────────────
         using StreamHandler = std::function<asio::awaitable<void>(std::shared_ptr<QuicStream>)>;
         using UniStreamHandler = std::function<asio::awaitable<void>(std::shared_ptr<QuicStream>)>;
+        /// RFC 9000 §14.1: minimum UDP payload of a datagram carrying a client Initial packet.
+        static constexpr std::size_t kMinInitialDatagramSize = 1200;
 
     private:
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────

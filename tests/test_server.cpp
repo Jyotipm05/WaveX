@@ -730,6 +730,46 @@ void test_worker_lease() {
     check(pool.worker_count() == 1, "pool scales down once every lease is gone");
 }
 
+// ─── Test 16: a task backlog must not starve the worker's io_context ──────────
+
+void test_worker_io_fairness() {
+    std::cout << "\n[Test 16] Worker polls its io_context while a task backlog is pending\n";
+
+    wavex::server::ThreadPoolConfig cfg;
+    cfg.set_limits(1, 1);
+    cfg.check_interval = std::chrono::milliseconds(10000);
+    wavex::server::ThreadPool pool(cfg);
+
+    constexpr int total = 300;
+    std::atomic<int> executed{0};
+    std::atomic<int> executed_when_io_ran{-1};
+
+    // Hold the only worker busy so the whole backlog is queued before anything runs.
+    std::atomic<bool> go{false};
+    pool.dispatch([&go] {
+        while (!go.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    });
+    for (int i = 0; i < total; ++i) {
+        pool.dispatch([&executed] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            executed.fetch_add(1);
+        });
+    }
+    {
+        auto lease = pool.lease_worker();
+        asio::post(lease.context(), [&] { executed_when_io_ran = executed.load(); });
+    }
+    go = true;
+
+    for (int i = 0; i < 2000 && executed.load() < total; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    check(executed.load() == total, "the whole backlog still ran");
+    check(executed_when_io_ran.load() >= 0, "the io_context handler ran");
+    // Without a fairness tick the handler waits for all 300 tasks (~300 ms). With it, it runs within a
+    // handful of tasks.
+    check(executed_when_io_ran.load() >= 0 && executed_when_io_ran.load() < total / 2,
+          "...before half of the backlog had finished (io_context is not starved)");
+}
+
 // ─── main ─────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -751,6 +791,7 @@ int main() {
     test_server_hard_stop_and_restart();
     test_scale_down_keeps_loaded_workers();
     test_worker_lease();
+    test_worker_io_fairness();
 
     std::cout << "\n" << tests_passed << "/" << tests_run << " tests passed.\n";
     return tests_passed == tests_run ? 0 : 1;

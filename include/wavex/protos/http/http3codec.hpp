@@ -762,6 +762,10 @@ namespace wavex::protos::http {
 
                 std::string stream_buf;
                 char buf[1024];
+                // Upper bound on bytes buffered while waiting for a complete control frame or encoder
+                // instruction. Without it a peer can declare a huge frame length (or send an instruction
+                // that never parses) and grow this buffer without limit.
+                constexpr std::size_t kMaxBufferedBytes = 64 * 1024;
 
                 // 1. Read unidirectional stream type (RFC 9114 §6.2)
                 uint64_t stream_type = 0;
@@ -784,6 +788,7 @@ namespace wavex::protos::http {
                         std::size_t frame_bytes = 0;
                         const auto res = parser::parse_frame(stream_buf, hdr, payload, frame_bytes);
                         if (res == parser::result::incomplete) {
+                            if (stream_buf.size() > kMaxBufferedBytes) break; // H3_EXCESSIVE_LOAD
                             auto [ec, n] = co_await stream->async_read_some(
                                 asio::buffer(buf), asio::as_tuple(asio::use_awaitable));
                             if (ec || n == 0) break;
@@ -813,8 +818,10 @@ namespace wavex::protos::http {
                                     // SETTINGS_QPACK_MAX_TABLE_CAPACITY (peer's advertised capacity limit)
                                     ctx->peer_qpack_max_table_capacity = val;
                                 } else if (id == 0x06) {
-                                    // SETTINGS_MAX_FIELD_SECTION_SIZE
-                                    ctx->max_field_section_size = val;
+                                    // SETTINGS_MAX_FIELD_SECTION_SIZE: the limit for what WE send to the peer.
+                                    // It must never overwrite our own receive limit (max_field_section_size),
+                                    // or a client could raise the server's header-size cap to 2^62.
+                                    ctx->peer_max_field_section_size = val;
                                 } else if (id == 0x07) {
                                     // SETTINGS_QPACK_BLOCKED_STREAMS
                                     ctx->peer_qpack_blocked_streams = val;
@@ -846,14 +853,18 @@ namespace wavex::protos::http {
                         if (cursor > 0) {
                             stream_buf.erase(0, cursor);
                         }
+                        // A malformed instruction is indistinguishable from an incomplete one here, so cap
+                        // what can accumulate instead of buffering forever (QPACK_ENCODER_STREAM_ERROR).
+                        if (stream_buf.size() > kMaxBufferedBytes) break;
 
                         auto [ec, n] = co_await stream->async_read_some(
                             asio::buffer(buf), asio::as_tuple(asio::use_awaitable));
                         if (ec || n == 0) break;
                         stream_buf.append(buf, n);
                     }
-                } else if (stream_type == 0x03) {
-                    // QPACK Decoder Stream (RFC 9204 §4.2)
+                } else {
+                    // QPACK Decoder Stream (0x03), and unknown / GREASE stream types which RFC 9114 §6.2
+                    // says must be ignored: drain them so unread data does not pile up in the stream.
                     while (stream->is_open()) {
                         auto [ec, n] = co_await stream->async_read_some(
                             asio::buffer(buf), asio::as_tuple(asio::use_awaitable));

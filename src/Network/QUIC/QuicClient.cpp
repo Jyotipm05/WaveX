@@ -49,6 +49,7 @@ namespace wavex::network::quic {
         connection_ = std::make_shared<QuicConnection>(client_cid, initial_peer_cid, server_endpoint_, false,
                                                        io_.get_executor(), initial_peer_cid);
         connection_->set_sni_hostname(std::string(host));
+        connection_->set_verify_peer(verify_peer_);
         connection_->set_outbound_callback([this] {
             flush_outbound();
         });
@@ -133,10 +134,22 @@ namespace wavex::network::quic {
     }
 
     void QuicClient::do_receive() {
+        // Receive into a separate endpoint: writing into server_endpoint_ would let any host that sends
+        // a single datagram to this port redirect all of the client's subsequent traffic.
         socket_.async_receive_from(
-            asio::buffer(recv_buf_), server_endpoint_,
+            asio::buffer(recv_buf_), recv_endpoint_,
             [this](const std::error_code ec, const std::size_t bytes_recvd) {
-                if (ec || bytes_recvd == 0) return;
+                if (ec == asio::error::operation_aborted || !socket_.is_open()) return;
+                if (ec || bytes_recvd == 0) {
+                    do_receive();
+                    return;
+                }
+                if (recv_endpoint_ != server_endpoint_) {
+                    wavex::log::debug("[QuicClient] Ignoring datagram from unexpected peer {}",
+                                      recv_endpoint_.address().to_string());
+                    do_receive();
+                    return;
+                }
                 wavex::log::debug("[QuicClient] Received {} bytes from server", bytes_recvd);
                 const std::string_view datagram(reinterpret_cast<const char *>(recv_buf_.data()), bytes_recvd);
                 if (connection_) {

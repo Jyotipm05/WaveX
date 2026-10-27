@@ -28,10 +28,12 @@ namespace wavex::network::quic {
         asio::io_context &io_;
         asio::ip::udp::socket socket_;
         asio::ip::udp::endpoint server_endpoint_{};
+        asio::ip::udp::endpoint recv_endpoint_{}; // sender of the last datagram; never used for sending
         std::shared_ptr<QuicConnection> connection_{};
         mutable std::mutex mtx_{};
         std::array<uint8_t, 65536> recv_buf_{};
         bool connected_{false};
+        bool verify_peer_{true};
 
     public:
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
@@ -45,6 +47,9 @@ namespace wavex::network::quic {
         auto create_stream(bool bidirectional = true) -> std::shared_ptr<QuicStream>;
 
         void close();
+
+        /// Verify the server certificate (default). Only disable for local testing with self-signed certs.
+        void set_verify_peer(const bool verify) noexcept { verify_peer_ = verify; }
 
     private:
         void do_receive();

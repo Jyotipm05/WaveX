@@ -283,8 +283,9 @@ void test_qpack_huffman_literal_names_c5() {
     fields.push_back('\0'); // RIC = 0
     fields.push_back('\0'); // Base = 0
 
-    // Add :method GET (static 17) and :path / (static 1)
+    // Add :method GET (static 17), :scheme https (static 23, required by RFC 9114 §4.3.1) and :path / (static 1)
     qpk::encoder::encode_indexed_static(fields, 17);
+    qpk::encoder::encode_indexed_static(fields, 23);
     qpk::encoder::encode_indexed_static(fields, 1);
 
     // Literal Field Line with Literal Name (001 N H Name_Len(3+))

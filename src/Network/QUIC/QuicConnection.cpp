@@ -4,6 +4,8 @@
 #include <wavex/Network/QUIC/QuicConnection.hpp>
 #include <wavex/Base/Logger.hpp>
 
+#include <openssl/x509v3.h>
+
 #include "wavex/Network/QUIC/VarInt.hpp"
 
 #if defined(min)
@@ -26,6 +28,18 @@
 #include <cassert>
 
 namespace wavex::network::quic {
+    namespace {
+        /// RFC 9000 §14.1: every UDP datagram a client sends that carries an Initial packet (including
+        /// ACK-only and CONNECTION_CLOSE packets) must be at least 1200 bytes, or servers discard it.
+        void pad_client_initial(const PacketHeader &hdr, std::string &payload) {
+            const std::size_t est_overhead =
+                    1 + 4 + (1 + hdr.dcid.length()) + (1 + hdr.scid.length()) + 1 + 2 + 4 + 16;
+            if (payload.size() + est_overhead < 1200) {
+                payload.resize(1200 - est_overhead, '\0');
+            }
+        }
+    } // namespace
+
     // ─── 7. QuicConnection Implementation ──────────────────────────────────────
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
@@ -221,6 +235,7 @@ namespace wavex::network::quic {
         intervals.insert(it, {pn, pn});
 
         if (intervals.size() > 64) {
+            evicted_below = (std::max)(evicted_below, intervals.front().second + 1);
             intervals.erase(intervals.begin());
         }
     }
@@ -375,14 +390,14 @@ namespace wavex::network::quic {
                             const unsigned char proto_len = in[i++];
                             if (i + proto_len > inlen) break;
                             if (const std::string_view proto(reinterpret_cast<const char *>(in + i), proto_len);
-                                proto == "h3" || proto == "h3-29") {
+                                proto == "h3") {
                                 *out = in + i;
                                 *outlen = proto_len;
                                 return SSL_TLSEXT_ERR_OK;
                             }
                             i += proto_len;
                         }
-                        return SSL_TLSEXT_ERR_NOACK;
+                        return SSL_TLSEXT_ERR_ALERT_FATAL; // no_application_protocol
                     },
                     nullptr);
             }
@@ -398,11 +413,29 @@ namespace wavex::network::quic {
             SSL_set_accept_state(tls_->ssl);
         } else {
             SSL_set_connect_state(tls_->ssl);
-            SSL_set_verify(tls_->ssl, SSL_VERIFY_NONE, nullptr);
-            if (!sni_hostname_.empty()) {
-                SSL_set_tlsext_host_name(tls_->ssl, sni_hostname_.c_str());
+            if (verify_peer_) {
+                // Verify the server chain against the default trust store and check the name/IP.
+                SSL_CTX_set_default_verify_paths(tls_->ctx);
+                SSL_set_verify(tls_->ssl, SSL_VERIFY_PEER, nullptr);
+                if (!sni_hostname_.empty()) {
+                    X509_VERIFY_PARAM *param = SSL_get0_param(tls_->ssl);
+                    if (X509_VERIFY_PARAM_set1_ip_asc(param, sni_hostname_.c_str()) != 1) {
+                        SSL_set1_host(tls_->ssl, sni_hostname_.c_str());
+                    }
+                }
+            } else {
+                wavex::log::warn("[QUIC] Client certificate verification is DISABLED (set_verify_peer(false))");
+                SSL_set_verify(tls_->ssl, SSL_VERIFY_NONE, nullptr);
             }
-            static constexpr unsigned char kAlpnProtos[] = "\x02h3\x05h3-29";
+            if (!sni_hostname_.empty()) {
+                // SNI must not carry an IP literal (RFC 6066 §3).
+                asio::error_code addr_ec;
+                (void) asio::ip::make_address(sni_hostname_, addr_ec);
+                if (addr_ec) {
+                    SSL_set_tlsext_host_name(tls_->ssl, sni_hostname_.c_str());
+                }
+            }
+            static constexpr unsigned char kAlpnProtos[] = "\x02h3";
             SSL_set_alpn_protos(tls_->ssl, kAlpnProtos, sizeof(kAlpnProtos) - 1);
         }
 
@@ -469,8 +502,10 @@ namespace wavex::network::quic {
             VarInt::encode(val, out);
         };
 
+        // original_destination_connection_id is server-only: a client sending it is a
+        // TRANSPORT_PARAMETER_ERROR (RFC 9000 §18.2).
         const ConnectionId &orig_cid = (!original_dcid_.empty()) ? original_dcid_ : local_cid_;
-        if (!orig_cid.empty()) {
+        if (is_server_ && !orig_cid.empty()) {
             VarInt::encode(0x00, out); // original_destination_connection_id
             VarInt::encode(orig_cid.length(), out);
             out.append(reinterpret_cast<const char *>(orig_cid.data()), orig_cid.length());
@@ -482,7 +517,7 @@ namespace wavex::network::quic {
             out.append(reinterpret_cast<const char *>(local_cid_.data()), local_cid_.length());
         }
 
-        add_varint_param(0x01, 30000); // max_idle_timeout (30s)
+        add_varint_param(0x01, static_cast<uint64_t>(idle_timeout_.count())); // max_idle_timeout (ms)
         add_varint_param(0x04, max_data_); // initial_max_data (1MB)
         add_varint_param(0x05, max_stream_data_); // initial_max_stream_data_bidi_local (256KB)
         add_varint_param(0x06, max_stream_data_); // initial_max_stream_data_bidi_remote (256KB)
@@ -560,13 +595,13 @@ namespace wavex::network::quic {
                 // OSSL_RECORD_PROTECTION_LEVEL_HANDSHAKE
                 handshake_keys_peer_ = std::move(keys);
                 wavex::log::debug("[QUIC] on_tls_secret: handshake_keys_peer_ set (read)");
-                drain_buffered_packets();
+                // Buffered packets are drained by run_tls_engine() once SSL_do_handshake() has returned:
+                // draining here would re-enter SSL_do_handshake() from inside its own callback.
             } else if (prot_level >= 3) {
                 // OSSL_RECORD_PROTECTION_LEVEL_APPLICATION
                 one_rtt_keys_peer_ = std::move(keys);
                 wavex::log::debug(
                     "[QUIC] on_tls_secret: one_rtt_keys_peer_ set (read)");
-                drain_buffered_packets();
             }
         }
         keys.cleanse();
@@ -691,16 +726,35 @@ namespace wavex::network::quic {
             return;
         }
 
-        if (const int ret = SSL_do_handshake(tls_->ssl); ret != 1) {
-            const int err = SSL_get_error(tls_->ssl, ret);
+        // OpenSSL must never be re-entered from one of its own callbacks. A nested request is
+        // recorded and served by looping once the outer SSL_do_handshake() call has returned.
+        if (in_tls_engine_) {
+            tls_rerun_pending_ = true;
+            return;
+        }
+
+        int ret = 0;
+        int err = SSL_ERROR_NONE;
+        in_tls_engine_ = true;
+        do {
+            tls_rerun_pending_ = false;
+            ret = SSL_do_handshake(tls_->ssl);
+            err = (ret == 1) ? SSL_ERROR_NONE : SSL_get_error(tls_->ssl, ret);
+        } while (tls_rerun_pending_ && ret != 1 && err == SSL_ERROR_WANT_READ);
+        in_tls_engine_ = false;
+
+        if (ret != 1) {
             if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
                 wavex::log::debug("[QUIC] SSL_do_handshake: waiting for IO (rc={}, err={})", ret, err);
+                // New read keys may have been installed during the call: process what was waiting on them.
+                drain_buffered_packets();
                 if (on_outbound_) on_outbound_();
                 return;
             }
             wavex::log::error("[QUIC] SSL_do_handshake fatal error rc={} SSL_get_error={}", ret, err);
-            // Fatal TLS error
-            state_ = ConnectionState::Closed;
+            // RFC 9001 §4.8: TLS failures are reported as CRYPTO_ERROR (0x0100 + alert). The alert is not
+            // plumbed through yet, so use the generic handshake_failure alert (40).
+            close(static_cast<TransportError>(0x0100 + 40), "TLS handshake failed");
             return;
         }
 
@@ -746,7 +800,7 @@ namespace wavex::network::quic {
             hdr.key_phase = (local_key_phase_ != 0);
             hdr.dcid = peer_cid_;
             hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
-            keys = one_rtt_keys_local_.valid ? &one_rtt_keys_local_ : &initial_keys_local_;
+            keys = one_rtt_send_keys();
         } else if (type == PacketType::Handshake) {
             hdr.is_long = true;
             hdr.type = PacketType::Handshake;
@@ -771,6 +825,9 @@ namespace wavex::network::quic {
 
         std::string payload;
         serialize_frame(ack, payload);
+        if (!is_server_ && type == PacketType::Initial) {
+            pad_client_initial(hdr, payload);
+        }
 
         if (std::string packet; CryptoSuite::protect_packet(*keys, hdr, payload, packet)) {
             pending_outbound_datagrams_.push_back(std::move(packet));
@@ -835,7 +892,9 @@ namespace wavex::network::quic {
                 congestion_controller_.on_packet_acked(pkt.bytes_sent);
                 if (pkt.packet_number == ack.largest_acknowledged) {
                     const auto rtt_sample = std::chrono::duration_cast<std::chrono::microseconds>(now - pkt.time_sent);
-                    congestion_controller_.update_rtt(rtt_sample, std::chrono::microseconds(ack.ack_delay * 1000));
+                    // ACK Delay is encoded in units of 2^ack_delay_exponent microseconds. The peer's
+                    // transport parameters are not parsed yet, so the default exponent (3) is assumed.
+                    congestion_controller_.update_rtt(rtt_sample, std::chrono::microseconds(ack.ack_delay << 3));
                 }
             } else {
                 remaining.push_back(std::move(pkt));
@@ -1044,8 +1103,9 @@ namespace wavex::network::quic {
                     hdr.type = PacketType::OneRTT;
                     hdr.key_phase = (local_key_phase_ != 0);
                     hdr.dcid = peer_cid_;
+                    keys = one_rtt_send_keys();
+                    if (!keys) return;
                     hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
-                    keys = one_rtt_keys_local_.valid ? &one_rtt_keys_local_ : &initial_keys_local_;
                 }
 
                 if (keys && keys->valid) {
@@ -1059,9 +1119,11 @@ namespace wavex::network::quic {
                 }
             } else if constexpr (std::is_same_v<T, StreamFrame>) {
                 StreamFrame sf = f;
-                if (auto it = streams_.find(sf.stream_id); it == streams_.end() || !it->second->is_open()) {
-                    return;
-                }
+                // Do NOT skip streams that were closed or erased locally: a response's last packets are
+                // typically sent right before the stream finishes, and they still need to arrive. The
+                // frame owns its bytes (owned_data), so it is safe to resend after the stream is gone.
+                const ProtectionKeys *keys = one_rtt_send_keys();
+                if (!keys) return;
 
                 std::string payload;
                 serialize_frame(sf, payload);
@@ -1074,7 +1136,7 @@ namespace wavex::network::quic {
                 hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
 
                 std::string packet;
-                if (const auto &keys = one_rtt_keys_local_.valid ? one_rtt_keys_local_ : initial_keys_local_; CryptoSuite::protect_packet(keys, hdr, payload, packet)) {
+                if (CryptoSuite::protect_packet(*keys, hdr, payload, packet)) {
                     wavex::log::debug(
                         "[QUIC] retransmit_frame: resending STREAM frame (sid={}, offset={}, size={}, new_pn={})",
                         sf.stream_id, sf.offset, sf.data.size(), hdr.packet_number);
@@ -1093,8 +1155,9 @@ namespace wavex::network::quic {
                 std::string payload;
                 serialize_frame(hdf, payload);
 
-                const auto &keys = one_rtt_keys_local_.valid ? one_rtt_keys_local_ : initial_keys_local_;
-                if (std::string packet; CryptoSuite::protect_packet(keys, hdr, payload, packet)) {
+                const ProtectionKeys *keys = one_rtt_send_keys();
+                if (!keys) return;
+                if (std::string packet; CryptoSuite::protect_packet(*keys, hdr, payload, packet)) {
                     wavex::log::debug("[QUIC] retransmit_frame: resending HANDSHAKE_DONE frame (new_pn={})",
                                       hdr.packet_number);
                     track_sent_packet(PacketType::OneRTT, hdr.packet_number, packet.size(), {hdf});
@@ -1167,7 +1230,8 @@ namespace wavex::network::quic {
                     if (hdr.type == PacketType::Initial) {
                         keys = &initial_keys_peer_;
                     } else if (hdr.type == PacketType::Handshake) {
-                        peer_address_validated_ = true; // RFC 9000 §8.1: Client Handshake packet validates peer address
+                        // Address validation happens below, after the packet has been decrypted: an
+                        // unauthenticated header must never lift the anti-amplification limit.
                         if (!handshake_keys_peer_.valid) {
                             if (buffered_handshake_packets_.size() < 16) {
                                 buffered_handshake_packets_.emplace_back(packet_bytes);
@@ -1220,11 +1284,27 @@ namespace wavex::network::quic {
                     continue;
                 }
 
+                // RFC 9000 §12.3: a packet number that was already received is a duplicate (retransmitted
+                // by the network or replayed by an attacker) and must not be processed a second time.
+                if (ack_trackers_[space_idx].contains(hdr.packet_number)) {
+                    wavex::log::debug("[QUIC] handle_datagram: dropping duplicate packet pn={} type={}",
+                                      hdr.packet_number, static_cast<int>(hdr.type));
+                    continue;
+                }
+
                 if (hdr.is_long) {
                     if (hdr.type == PacketType::Initial) {
                         has_received_initial_ = true;
+                        // RFC 9000 §7.2: the client switches to the server-chosen SCID from the first
+                        // Initial packet it receives, and keeps using it for the rest of the connection.
+                        if (!is_server_ && !peer_cid_switched_ && !hdr.scid.empty()) {
+                            peer_cid_ = hdr.scid;
+                            peer_cid_switched_ = true;
+                        }
                     } else if (hdr.type == PacketType::Handshake) {
                         has_received_handshake_ = true;
+                        // RFC 9000 §8.1: a successfully processed Handshake packet validates the address.
+                        if (is_server_) peer_address_validated_ = true;
                     }
                 } else {
                     peer_address_validated_ = true; // RFC 9000 §8.1: Authenticated 1-RTT validates address
@@ -1240,6 +1320,26 @@ namespace wavex::network::quic {
                 }
 
                 if (std::vector<Frame> frames; parse_frames(plaintext, frames)) {
+                    // RFC 9000 §12.4: only PADDING, PING, ACK, CRYPTO and CONNECTION_CLOSE (0x1c) may be
+                    // carried by Initial and Handshake packets. Initial keys are derived from the public
+                    // DCID, so accepting e.g. STREAM frames there would let anyone who sees the CID inject
+                    // requests that bypass TLS. (Mock/non-TLS test mode keeps the old permissive behaviour.)
+                    if (tls_ && tls_->initialized) {
+                        bool allowed = true;
+                        for (const auto &f: frames) {
+                            if (!frame_allowed_in(f, hdr.type)) {
+                                allowed = false;
+                                break;
+                            }
+                        }
+                        if (!allowed) {
+                            wavex::log::warn("[QUIC] Frame not permitted in packet type={} (pn={}): PROTOCOL_VIOLATION",
+                                             static_cast<int>(hdr.type), hdr.packet_number);
+                            close(TransportError::ProtocolViolation, "frame not permitted in packet type");
+                            return;
+                        }
+                    }
+
                     bool is_ack_eliciting = false;
                     bool has_crypto_frame = false;
                     for (const auto &f: frames) {
@@ -1279,10 +1379,10 @@ namespace wavex::network::quic {
                     process_frames(frames, hdr.packet_number, hdr.type, created_streams);
                     wavex::log::debug("[QUIC] handle_datagram: process_frames returned for pn={}", hdr.packet_number);
                 } else {
-                    std::string hex;
-                    for (unsigned char c: plaintext) hex += std::format("{:02x} ", c);
-                    log::warn("[QUIC] parse_frames failed for packet pn={} (plaintext_len={}) hex: {}",
-                              hdr.packet_number, plaintext.size(), hex);
+                    log::warn("[QUIC] parse_frames failed for packet pn={} (plaintext_len={}): FRAME_ENCODING_ERROR",
+                              hdr.packet_number, plaintext.size());
+                    close(TransportError::FrameEncodingError, "malformed or unknown frame");
+                    return;
                 }
             }
 
@@ -1338,17 +1438,46 @@ namespace wavex::network::quic {
                 } else if constexpr (std::is_same_v<T, StreamFrame>) {
                     // STREAM frames are ack-eliciting; coalesced ACK is handled at packet/datagram level
                     std::shared_ptr<QuicStream> target_stream; {
+                        const bool is_bidi = (frame.stream_id & 0x02) == 0x00;
+                        const bool peer_initiated = ((frame.stream_id & 0x01) != 0) == !is_server_;
+                        // RFC 9000 §19.8: STREAM frames on a locally initiated unidirectional stream are
+                        // a STREAM_STATE_ERROR (we are the only sender on it).
+                        if (!peer_initiated && !is_bidi) {
+                            close(TransportError::StreamStateError, "STREAM frame on send-only stream");
+                            return;
+                        }
                         auto it = streams_.find(frame.stream_id);
                         if (it == streams_.end()) {
-                            // B8: Enforce advertised stream count limits (RFC 9000 §4.6)
-                            const bool is_bidi = (frame.stream_id & 0x02) == 0x00;
-                            const uint64_t stream_idx = frame.stream_id >> 2;
-                            if (const uint64_t max_allowed = is_bidi ? max_peer_bidi_streams_ : max_peer_uni_streams_;
-                                stream_idx >= max_allowed) {
-                                wavex::log::warn("[QUIC] Peer exceeded stream limit: sid={} (idx={}) >= max_allowed={}",
-                                                 frame.stream_id, stream_idx, max_allowed);
-                                close(TransportError::StreamLimitError, "Stream limit exceeded");
+                            if (!peer_initiated) {
+                                // Locally initiated stream that we already closed (late retransmission), or one
+                                // we never opened. Neither may create a new stream.
                                 return;
+                            }
+
+                            const uint64_t stream_idx = frame.stream_id >> 2;
+                            auto &next_idx = next_peer_stream_idx_[is_bidi ? 0 : 1];
+                            if (stream_idx < next_idx) {
+                                // Below the high-water mark: either implicitly opened earlier and seen now for
+                                // the first time, or already finished and closed. A late or duplicated frame for
+                                // a closed stream must NOT be dispatched as a brand-new request.
+                                if (unseen_peer_stream_ids_.erase(frame.stream_id) == 0) {
+                                    return;
+                                }
+                            } else {
+                                // B8: Enforce advertised stream count limits (RFC 9000 §4.6)
+                                if (const uint64_t max_allowed = is_bidi ? max_peer_bidi_streams_ : max_peer_uni_streams_;
+                                    stream_idx >= max_allowed) {
+                                    wavex::log::warn(
+                                        "[QUIC] Peer exceeded stream limit: sid={} (idx={}) >= max_allowed={}",
+                                        frame.stream_id, stream_idx, max_allowed);
+                                    close(TransportError::StreamLimitError, "Stream limit exceeded");
+                                    return;
+                                }
+                                // Lower-numbered streams of the same type are implicitly opened (RFC 9000 §3.2).
+                                for (uint64_t idx = next_idx; idx < stream_idx; ++idx) {
+                                    unseen_peer_stream_ids_.insert((idx << 2) | (frame.stream_id & 0x03));
+                                }
+                                next_idx = stream_idx + 1;
                             }
 
                             auto stream = std::make_shared<QuicStream>(shared_from_this(), frame.stream_id, executor_);
@@ -1423,7 +1552,9 @@ namespace wavex::network::quic {
                             frame.frame_type, frame.reason_phrase,
                             static_cast<int>(pkt_type), pn);
                     }
-                    state_ = ConnectionState::Closed;
+                    // Tear down properly (timers, streams, closed callback) so the server's connection
+                    // table entry is released. RFC 9000 §10.2.2: no CONNECTION_CLOSE is sent in reply.
+                    terminate(false, TransportError::NoError, "");
                 }
             }, f);
         }
@@ -1456,6 +1587,8 @@ namespace wavex::network::quic {
 
     void QuicConnection::send_handshake_done() {
         if (!is_server_ || handshake_done_sent_) return;
+        const ProtectionKeys *keys = one_rtt_send_keys();
+        if (!keys) return; // HANDSHAKE_DONE is only valid in a 1-RTT packet
         handshake_done_sent_ = true;
 
         PacketHeader one_rtt_hdr;
@@ -1469,8 +1602,7 @@ namespace wavex::network::quic {
         std::string one_rtt_payload;
         serialize_frame(hdf, one_rtt_payload);
 
-        const auto &keys = one_rtt_keys_local_.valid ? one_rtt_keys_local_ : initial_keys_local_;
-        if (std::string one_rtt_packet; CryptoSuite::protect_packet(keys, one_rtt_hdr, one_rtt_payload, one_rtt_packet)) {
+        if (std::string one_rtt_packet; CryptoSuite::protect_packet(*keys, one_rtt_hdr, one_rtt_payload, one_rtt_packet)) {
             track_sent_packet(PacketType::OneRTT, one_rtt_hdr.packet_number, one_rtt_packet.size(), {hdf});
             pending_outbound_datagrams_.push_back(std::move(one_rtt_packet));
             wavex::log::info("[QUIC] HANDSHAKE_DONE sent on 1-RTT (keys_valid={})", one_rtt_keys_local_.valid);
@@ -1518,10 +1650,10 @@ namespace wavex::network::quic {
             if (const auto it = streams_.find(stream_id); it != streams_.end()) {
                 stream_to_close = it->second;
                 streams_.erase(it);
-                stream_send_offsets_.erase(stream_id);
-                stream_data_sent_.erase(stream_id);
-                stream_send_queues_.erase(stream_id);
-                stream_send_fin_.erase(stream_id);
+                // Send-side state (queue, offset, pending FIN) is intentionally kept: bytes that flow
+                // control or congestion has not let out yet would otherwise be silently truncated.
+                // flush_stream_send_queues() drops it once everything has been packetized.
+                flush_stream_send_queues();
             }
         }
         if (stream_to_close) {
@@ -1579,12 +1711,21 @@ namespace wavex::network::quic {
     void QuicConnection::flush_stream_send_queues() {
         if (state_ == ConnectionState::Closed) return;
 
+        // STREAM frames are only valid in 1-RTT (or 0-RTT) packets. Never fall back to Initial keys on a
+        // real TLS connection: data queued before the handshake completes waits here instead.
+        const ProtectionKeys *keys = one_rtt_send_keys();
+        if (!keys) return;
+
         // MTU packetization: safe stream frame payload fitting inside typical network MTU (RFC 9000 §14.1)
         // ReSharper disable once CppTooWideScopeInitStatement
         constexpr std::size_t kMaxStreamFramePayload = 1150;
 
-        for (auto &[sid, queue]: stream_send_queues_) {
-            while (!queue.empty() || stream_send_fin_[sid]) {
+        for (auto q_it = stream_send_queues_.begin(); q_it != stream_send_queues_.end();) {
+            const uint64_t sid = q_it->first;
+            auto &queue = q_it->second;
+            bool &fin_pending = stream_send_fin_[sid];
+
+            while (!queue.empty() || fin_pending) {
                 // Flow control limits (A4)
                 const uint64_t conn_credit = (max_data_ > data_sent_) ? (max_data_ - data_sent_) : 0;
                 uint64_t &stream_sent = stream_data_sent_[sid];
@@ -1594,17 +1735,6 @@ namespace wavex::network::quic {
                     wavex::log::debug("[QUIC] Flow control credit blocked on sid={} (conn_credit={}, stream_credit={})",
                                       sid, conn_credit, stream_credit);
                     break;
-                }
-
-                // Anti-amplification limit (D1, RFC 9000 §8.1)
-                if (is_server_ && !peer_address_validated_) {
-                    if (const uint64_t max_allowed_send = 3 * (std::max<uint64_t>)(cumulative_bytes_received_, 1200);
-                        cumulative_bytes_sent_ + 100 > max_allowed_send) {
-                        wavex::log::debug(
-                            "[QUIC] Anti-amplification 3x limit reached (sent={} > 3*recv={}), suppressing outbound",
-                            cumulative_bytes_sent_, cumulative_bytes_received_);
-                        break;
-                    }
                 }
 
                 std::size_t chunk_len = queue.size();
@@ -1623,7 +1753,7 @@ namespace wavex::network::quic {
                 }
 
                 const bool is_last = (chunk_len == queue.size());
-                const bool chunk_fin = is_last && stream_send_fin_[sid];
+                const bool chunk_fin = is_last && fin_pending;
 
                 StreamFrame sf;
                 sf.stream_id = sid;
@@ -1634,9 +1764,6 @@ namespace wavex::network::quic {
                 uint64_t &cur_offset = stream_send_offsets_[sid];
                 sf.offset = cur_offset;
                 sf.has_offset = (cur_offset > 0);
-                cur_offset += chunk_len;
-                data_sent_ += chunk_len;
-                stream_sent += chunk_len;
 
                 std::string payload;
                 serialize_frame(sf, payload);
@@ -1649,23 +1776,38 @@ namespace wavex::network::quic {
                 hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
 
                 std::string packet;
-                if (const auto &keys = one_rtt_keys_local_.valid ? one_rtt_keys_local_ : initial_keys_local_;
-                    CryptoSuite::protect_packet(keys, hdr, payload, packet)) {
-                    sf.owned_data = std::make_shared<const std::string>(sf.data);
-                    sf.data = *sf.owned_data;
-                    track_sent_packet(PacketType::OneRTT, hdr.packet_number, packet.size(), {sf});
-                    cumulative_bytes_sent_ += packet.size();
-                    pending_outbound_datagrams_.push_back(std::move(packet));
+                if (!CryptoSuite::protect_packet(*keys, hdr, payload, packet)) {
+                    // Keep the bytes queued rather than silently dropping them.
+                    wavex::log::error("[QUIC] flush_stream_send_queues: protect_packet failed for sid={}", sid);
+                    break;
                 }
+                sf.owned_data = std::make_shared<const std::string>(sf.data);
+                sf.data = *sf.owned_data;
+                track_sent_packet(PacketType::OneRTT, hdr.packet_number, packet.size(), {sf});
+                pending_outbound_datagrams_.push_back(std::move(packet));
 
+                cur_offset += chunk_len;
+                data_sent_ += chunk_len;
+                stream_sent += chunk_len;
                 queue.consume(chunk_len);
                 if (chunk_fin) {
-                    stream_send_fin_[sid] = false;
+                    fin_pending = false;
                 }
 
                 if (chunk_len == 0 && chunk_fin) {
                     break;
                 }
+            }
+
+            // A stream that close_stream() already removed keeps its send state only until everything
+            // queued (including FIN) has been handed to the packetizer.
+            if (queue.empty() && !fin_pending && !streams_.contains(sid)) {
+                stream_send_fin_.erase(sid);
+                stream_send_offsets_.erase(sid);
+                stream_data_sent_.erase(sid);
+                q_it = stream_send_queues_.erase(q_it);
+            } else {
+                ++q_it;
             }
         }
     }
@@ -1779,10 +1921,75 @@ namespace wavex::network::quic {
             datagrams.push_back(std::move(current_dgram));
         }
 
+        // RFC 9000 §8.1: until the client's address is validated the server may send at most three
+        // times the bytes it has received. This covers every datagram (the TLS flight with the
+        // certificate chain is the main amplification vector), not just STREAM data. Datagrams over
+        // budget are held back and released as more client bytes arrive or the address validates.
+        if (is_server_ && tls_ && tls_->initialized) {
+            std::vector<std::string> ready;
+            ready.reserve(amplification_held_datagrams_.size() + datagrams.size());
+            for (auto &d: amplification_held_datagrams_) ready.push_back(std::move(d));
+            amplification_held_datagrams_.clear();
+            for (auto &d: datagrams) ready.push_back(std::move(d));
+
+            datagrams.clear();
+            for (auto &d: ready) {
+                if (!peer_address_validated_ &&
+                    (!amplification_held_datagrams_.empty() ||
+                     cumulative_bytes_sent_ + d.size() > 3 * cumulative_bytes_received_)) {
+                    amplification_held_datagrams_.push_back(std::move(d));
+                    continue;
+                }
+                cumulative_bytes_sent_ += d.size();
+                datagrams.push_back(std::move(d));
+            }
+            if (!amplification_held_datagrams_.empty()) {
+                wavex::log::debug("[QUIC] Anti-amplification limit: holding {} datagram(s) (sent={}, recv={})",
+                                  amplification_held_datagrams_.size(), cumulative_bytes_sent_,
+                                  cumulative_bytes_received_);
+            }
+        } else {
+            for (const auto &d: datagrams) cumulative_bytes_sent_ += d.size();
+        }
+
         return datagrams;
     }
 
+    const ProtectionKeys *QuicConnection::one_rtt_send_keys() const noexcept {
+        if (one_rtt_keys_local_.valid) return &one_rtt_keys_local_;
+        // Mock / non-TLS unit-test mode only. On a TLS connection a short-header packet protected with
+        // Initial keys is readable by anyone and is rejected by every conforming peer.
+        if (!tls_ || !tls_->initialized) return &initial_keys_local_;
+        return nullptr;
+    }
+
+    bool QuicConnection::frame_allowed_in(const Frame &frame, const PacketType type) noexcept {
+        if (type == PacketType::OneRTT) return true;
+        if (type == PacketType::ZeroRTT) {
+            // RFC 9000 Table 3: no ACK, CRYPTO, NEW_TOKEN or HANDSHAKE_DONE in 0-RTT.
+            return !std::holds_alternative<AckFrame>(frame) &&
+                   !std::holds_alternative<CryptoFrame>(frame) &&
+                   !std::holds_alternative<NewTokenFrame>(frame) &&
+                   !std::holds_alternative<HandshakeDoneFrame>(frame);
+        }
+        // Initial / Handshake ("IH" in RFC 9000 Table 3)
+        if (std::holds_alternative<PaddingFrame>(frame) ||
+            std::holds_alternative<PingFrame>(frame) ||
+            std::holds_alternative<AckFrame>(frame) ||
+            std::holds_alternative<CryptoFrame>(frame)) {
+            return true;
+        }
+        if (const auto *ccf = std::get_if<ConnectionCloseFrame>(&frame)) {
+            return !ccf->is_application; // only the transport variant (0x1c)
+        }
+        return false;
+    }
+
     void QuicConnection::close(const TransportError err, const std::string_view reason) {
+        terminate(true, err, reason);
+    }
+
+    void QuicConnection::terminate(const bool send_close, const TransportError err, const std::string_view reason) {
         OutboundCallback cb;
         ClosedCallback closed_cb;
         ConnectionId lcid, pcid, orig_dcid;
@@ -1800,26 +2007,47 @@ namespace wavex::network::quic {
                 idle_timer_->cancel(ec);
             }
 
-            ConnectionCloseFrame ccf;
-            ccf.error_code = static_cast<uint64_t>(err);
-            // reason_phrase is a string_view; `reason` outlives this function, a temporary std::string would not.
-            ccf.reason_phrase = reason;
+            if (send_close) {
+                ConnectionCloseFrame ccf;
+                ccf.error_code = static_cast<uint64_t>(err);
+                // reason_phrase is a string_view; `reason` outlives this function, a temporary std::string would not.
+                ccf.reason_phrase = reason;
 
-            std::string payload;
-            serialize_frame(ccf, payload);
+                std::string payload;
+                serialize_frame(ccf, payload);
 
-            PacketHeader hdr;
-            hdr.is_long = false;
-            hdr.type = PacketType::OneRTT;
-            hdr.key_phase = (local_key_phase_ != 0);
-            hdr.dcid = peer_cid_;
-            hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
+                // Send CONNECTION_CLOSE at the highest level the peer can currently read
+                // (RFC 9000 §10.2.3): 1-RTT once available, otherwise Handshake, otherwise Initial.
+                PacketHeader hdr;
+                const ProtectionKeys *keys = one_rtt_send_keys();
+                if (keys) {
+                    hdr.is_long = false;
+                    hdr.type = PacketType::OneRTT;
+                    hdr.key_phase = (local_key_phase_ != 0);
+                } else {
+                    hdr.is_long = true;
+                    hdr.version = version_;
+                    hdr.scid = local_cid_;
+                    if (handshake_keys_local_.valid) {
+                        hdr.type = PacketType::Handshake;
+                        keys = &handshake_keys_local_;
+                    } else {
+                        hdr.type = PacketType::Initial;
+                        keys = &initial_keys_local_;
+                    }
+                }
+                hdr.dcid = peer_cid_;
+                hdr.packet_number = allocate_next_pn(hdr.type);
+                if (!is_server_ && hdr.type == PacketType::Initial) {
+                    pad_client_initial(hdr, payload);
+                }
 
-            std::string packet;
-            if (const auto &keys = one_rtt_keys_local_.valid ? one_rtt_keys_local_ : initial_keys_local_;
-                CryptoSuite::protect_packet(keys, hdr, payload, packet)) {
-                pending_outbound_datagrams_.push_back(std::move(packet));
+                std::string packet;
+                if (keys && keys->valid && CryptoSuite::protect_packet(*keys, hdr, payload, packet)) {
+                    pending_outbound_datagrams_.push_back(std::move(packet));
+                }
             }
+
             open_streams.reserve(streams_.size());
             for (auto &s: streams_ | std::views::values) {
                 if (s) open_streams.push_back(s);
@@ -1839,7 +2067,7 @@ namespace wavex::network::quic {
         for (auto &s: open_streams) {
             s->close();
         }
-        if (cb) cb();
+        if (cb && send_close) cb();
         if (closed_cb) closed_cb(lcid, pcid, orig_dcid);
     }
 

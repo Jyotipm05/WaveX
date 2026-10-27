@@ -570,7 +570,8 @@ void test_http3_session_unidirectional_routing_c7() {
     // Verify Control Stream frames parsed into connection_context
     assert(ctx->settings_received == true);
     assert(ctx->peer_qpack_max_table_capacity == 4096);
-    assert(ctx->max_field_section_size == 32768);
+    assert(ctx->peer_max_field_section_size == 32768);
+    assert(ctx->max_field_section_size == 65536); // our own receive limit is unchanged by the peer
     assert(ctx->goaway_received == true);
     assert(ctx->goaway_stream_id == 100);
 
