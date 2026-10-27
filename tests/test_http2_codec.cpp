@@ -505,6 +505,31 @@ void test_hpack_dynamic_table_persistence() {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
+void test_hpack_header_list_limit() {
+    std::cout << "\n[Test 12] HPACK decoder bounds the decoded header list\n";
+
+    // Each 0x82 (indexed ":method: GET") is 1 byte on the wire but 7 + 3 + 32 = 42 bytes of list size.
+    const std::string small_block(10, static_cast<char>(0x82));
+    const std::string bomb(2000, static_cast<char>(0x82)); // 2 KB on the wire, 84 000 decoded
+
+    const auto decode = [](const std::string &block, const std::size_t limit, std::size_t &fields) {
+        h2::hpack::dynamic_table dt;
+        const h2::hpack::decoder dec(dt, limit);
+        std::vector<std::pair<std::string, std::string> > out;
+        const bool ok = dec.decode_header_block(block, out);
+        fields = out.size();
+        return ok;
+    };
+
+    std::size_t n = 0;
+    check(decode(small_block, h2::kDefaultMaxHeaderListSize, n) && n == 10, "a small block decodes under the cap");
+    check(!decode(bomb, h2::kDefaultMaxHeaderListSize, n), "an expansion bomb is rejected at the default cap");
+    check(n < 2000, "...before the whole list is materialised");
+    check(decode(bomb, 0, n) && n == 2000, "limit 0 keeps the decoder unlimited (client side)");
+    check(!decode(small_block, 42 * 9, n), "a custom cap just below the list size rejects");
+    check(decode(small_block, 42 * 10, n), "a cap exactly at the list size accepts");
+}
+
 int main() {
     std::cout << "========================================================\n";
     std::cout << " WaveX HTTP/2 Protocol Codec Unit Tests (RFC 7540/7541)\n";
@@ -521,6 +546,7 @@ int main() {
     test_http2_request_response_types();
     test_symmetrical_codec_api();
     test_hpack_dynamic_table_persistence();
+    test_hpack_header_list_limit();
 
     std::cout << "\n--------------------------------------------------------\n";
     std::cout << "Tests Summary: " << tests_passed << " / " << tests_run << " passed.\n";

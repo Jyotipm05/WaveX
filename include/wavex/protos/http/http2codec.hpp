@@ -170,6 +170,9 @@ namespace wavex::protos::http {
         }
 
         // ─── HPACK (RFC 7541) Header Compression Engine ───────────────────────────
+        /// Default cap on a decoded request header list (RFC 7541 §4.1 sizes), matching the HTTP/3 default.
+        inline constexpr std::size_t kDefaultMaxHeaderListSize = 65536;
+
         namespace hpack {
             struct static_entry {
                 std::string_view name;
@@ -662,14 +665,28 @@ namespace wavex::protos::http {
              */
             class decoder {
             public:
-                explicit decoder(dynamic_table &dt) : dt_(dt) {
+                /// @param max_list_size Cap on the decoded header list, counted as RFC 7541 §4.1 entry sizes
+                ///        (name + value + 32 octets per field). 0 means unlimited.
+                explicit decoder(dynamic_table &dt, const std::size_t max_list_size = 0)
+                    : dt_(dt), max_list_size_(max_list_size) {
                 }
 
                 bool decode_header_block(
                     const std::string_view block,
                     std::vector<std::pair<std::string, std::string> > &out_headers) const {
                     std::size_t cursor = 0;
+                    // Bounds the decoded list *as it grows*: a tiny HPACK block can expand into a huge list
+                    // through indexed fields, so the check cannot wait until the block is fully decoded.
+                    std::size_t list_size = 0;
+                    std::size_t counted = out_headers.size(); // fields already present are not ours to count
+                    const auto within_limit = [&] {
+                        for (; counted < out_headers.size(); ++counted) {
+                            list_size += out_headers[counted].first.size() + out_headers[counted].second.size() + 32;
+                        }
+                        return max_list_size_ == 0 || list_size <= max_list_size_;
+                    };
                     while (cursor < block.size()) {
+                        if (!within_limit()) return false;
                         // Case 1: Indexed Header Field (starts with 1xxxxxxx)
                         if (const auto b = static_cast<uint8_t>(block[cursor]); (b & 0x80) != 0) {
                             uint64_t index = 0;
@@ -716,7 +733,7 @@ namespace wavex::protos::http {
                             out_headers.emplace_back(std::move(name), std::move(val));
                         }
                     }
-                    return true;
+                    return within_limit();
                 }
 
             private:
@@ -733,6 +750,7 @@ namespace wavex::protos::http {
                 }
 
                 dynamic_table &dt_;
+                std::size_t max_list_size_{0};
             };
         } // namespace hpack
 
@@ -1014,7 +1032,7 @@ namespace wavex::protos::http {
                 }
 
                 hpack::dynamic_table working_dt = dt;
-                const hpack::decoder dec(working_dt);
+                const hpack::decoder dec(working_dt, kDefaultMaxHeaderListSize);
 
                 std::vector<std::pair<std::string, std::string> > decoded_headers;
                 bool headers_received = false;
@@ -1178,7 +1196,7 @@ namespace wavex::protos::http {
                 res.body = {};
 
                 hpack::dynamic_table working_dt = dt;
-                const hpack::decoder dec(working_dt);
+                const hpack::decoder dec(working_dt, kDefaultMaxHeaderListSize);
 
                 std::vector<std::pair<std::string, std::string> > decoded_headers;
                 bool headers_received = false;

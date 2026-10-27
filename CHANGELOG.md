@@ -18,6 +18,7 @@ Tagged releases before 0.4.0 (`v0.1.0-alpha` to `v0.3.0-alpha`) are listed under
 - Tests for `ConnectionTracker` and for the configurable request header / query-parameter limits.
 - Tests for `Server::stop()` with idle keep-alive connections followed by in-process restart, and for elastic scale-down never retiring a worker that still runs connection coroutines.
 - Stall detector: the pool monitor flags a worker stuck inside one task longer than `ThreadPoolConfig::stall_threshold` (default 1 s, 0 disables), logs one warning per stalled task naming the worker, and exposes `ThreadPool::stall_count()`.
+- HTTP/2 server path bounds the decoded HPACK header list (64 KiB by RFC 7541 §4.1 sizes, `http2::kDefaultMaxHeaderListSize`) while decoding, so a small block of indexed fields cannot expand into an unbounded list; `hpack::decoder` takes an optional cap (0 = unlimited, used by the client).
 
 ### Changed
 - `ConnectionTracker` uses 16 lock stripes instead of one global mutex.
