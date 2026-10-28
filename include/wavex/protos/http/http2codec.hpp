@@ -671,9 +671,13 @@ namespace wavex::protos::http {
                     : dt_(dt), max_list_size_(max_list_size) {
                 }
 
+                /// True if the last decode_header_block() failed because the list cap was hit.
+                [[nodiscard]] bool limit_exceeded() const noexcept { return limit_exceeded_; }
+
                 bool decode_header_block(
                     const std::string_view block,
                     std::vector<std::pair<std::string, std::string> > &out_headers) const {
+                    limit_exceeded_ = false;
                     std::size_t cursor = 0;
                     // Bounds the decoded list *as it grows*: a tiny HPACK block can expand into a huge list
                     // through indexed fields, so the check cannot wait until the block is fully decoded.
@@ -683,7 +687,11 @@ namespace wavex::protos::http {
                         for (; counted < out_headers.size(); ++counted) {
                             list_size += out_headers[counted].first.size() + out_headers[counted].second.size() + 32;
                         }
-                        return max_list_size_ == 0 || list_size <= max_list_size_;
+                        if (max_list_size_ != 0 && list_size > max_list_size_) {
+                            limit_exceeded_ = true;
+                            return false;
+                        }
+                        return true;
                     };
                     while (cursor < block.size()) {
                         if (!within_limit()) return false;
@@ -751,6 +759,7 @@ namespace wavex::protos::http {
 
                 dynamic_table &dt_;
                 std::size_t max_list_size_{0};
+                mutable bool limit_exceeded_{false};
             };
         } // namespace hpack
 
@@ -972,7 +981,8 @@ namespace wavex::protos::http {
          */
         class parser {
         public:
-            enum class result { success, incomplete, error };
+            /// `headers_too_large`: the decoded request header list exceeded the cap (answer with 431, not a bare close).
+            enum class result { success, incomplete, error, headers_too_large };
 
             /**
              * @brief Parse a single HTTP/2 frame from a buffer.
@@ -1080,7 +1090,7 @@ namespace wavex::protos::http {
                             header_cursor, payload.size() - header_cursor - pad_len);
 
                         if (!dec.decode_header_block(header_block, decoded_headers)) {
-                            return result::error;
+                            return dec.limit_exceeded() ? result::headers_too_large : result::error;
                         }
 
                         headers_received = true;

@@ -13,6 +13,7 @@
 
 #include <iostream>
 #include <memory_resource>
+#include <vector>
 #include <optional>
 #include <type_traits>
 #include <string>
@@ -245,6 +246,22 @@ void test_connection_memory_pool() {
 
     arena.release();
     check(true, "arena with conn_pool releases cleanly");
+}
+
+// release() returns the pool's blocks to the heap and the pool stays usable (the idle-connection path).
+void test_connection_memory_pool_release_and_reuse() {
+    wavex::memory::ConnectionMemoryPool conn_pool;
+
+    for (int round = 0; round < 3; ++round) {
+        std::pmr::string a(512, 'x', conn_pool.resource());
+        std::pmr::vector<int> v(1000, round, conn_pool.resource());
+        check(a.size() == 512 && v.back() == round, "allocations succeed from the pool");
+        // Everything allocated from the pool is destroyed before release(), as the contract requires.
+    }
+    conn_pool.release();
+    std::pmr::string after(2048, 'y', conn_pool.resource());
+    check(after.size() == 2048 && after.front() == 'y', "the pool is usable again after release()");
+    // `after` must die before the pool releases at destruction; that is handled by scope order.
 }
 
 // ─── Test: Multi-worker thread termination & cross-thread resumption (Issue F2) ──
@@ -600,6 +617,7 @@ int main() {
     test_http3_request_arena_wiring();
     std::cout << "[START] test_connection_memory_pool" << std::endl;
     test_connection_memory_pool();
+    test_connection_memory_pool_release_and_reuse();
     std::cout << "[START] test_multi_worker_thread_safety_f2" << std::endl;
     test_multi_worker_thread_safety_f2();
     std::cout << "[START] test_decode_to_comprehensive_i03" << std::endl;

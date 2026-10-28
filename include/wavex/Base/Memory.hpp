@@ -23,7 +23,9 @@
  *     them first and then the arena, reclaiming all memory in O(1) and returning slabs
  *     to the ConnectionMemoryPool. An explicit arena.release() is only valid once every
  *     object allocated from the arena has been destroyed.
- *   - When the connection becomes idle, conn_pool.release() frees cached chunks.
+ *   - When the connection becomes idle (no request in flight), conn_pool.release() returns every
+ *     block the pool holds to the heap. It does not distinguish cached from live blocks, so it is
+ *     only valid while nothing allocated from the pool is still alive.
  *
  * string_view safety contract:
  *   - Views allocated into the arena (req.params, req.query, res.headers_) are
@@ -121,7 +123,10 @@ namespace wavex::memory {
         }
 
         /**
-         * @brief Release cached memory blocks back to upstream (called when connection terminates).
+         * @brief Return every block held by the pool to the upstream heap.
+         * @warning This frees live allocations too (std::pmr::unsynchronized_pool_resource::release()
+         *          semantics). Call it only when nothing allocated from resource() is still alive, e.g.
+         *          while the connection idles between requests. The pool stays usable afterwards.
          */
         void release() noexcept {
             pool_.release();

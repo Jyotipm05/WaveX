@@ -99,6 +99,7 @@ namespace wavex::protos {
      *  - keep_alive()                                   (Persistence decision per request)
      *  - prepare_response()                             (Protocol-specific response headers/state)
      *  - configure_alpn()                               (TLS ALPN selector registration)
+     *  - classify_parse_error()                         (optional: parse failure -> protocol_error, default bad_request)
      *  - exceeds_limits() / write_error() / set_default_status() / write_not_found() / request_label()
      *                                                   (the kernel never touches response fields)
      *  - make_transport_listener()                      (optional: an extra listener, e.g. QUIC/UDP)
@@ -302,6 +303,12 @@ struct wavex::protos::protocol_traits<wavex::protos::http::http2codec> {
     template<typename Response>
     static void write_error(Response &res, const protocol_error e) {
         detail::write_http_error(res, e);
+    }
+
+    /// Maps a failed parse to the error the client is told about (the kernel defaults to bad_request).
+    template<typename Result>
+    static protocol_error classify_parse_error(const Result r) noexcept {
+        return r == wavex::protos::http::http2codec::result::headers_too_large ? protocol_error::limits_exceeded : protocol_error::bad_request;
     }
 
     template<typename Response>

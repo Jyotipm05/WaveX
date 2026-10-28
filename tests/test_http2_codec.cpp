@@ -530,6 +530,43 @@ void test_hpack_header_list_limit() {
     check(decode(small_block, 42 * 10, n), "a cap exactly at the list size accepts");
 }
 
+void test_oversized_headers_report_431() {
+    std::cout << "\n[Test 13] Oversized request header list is reported as headers_too_large\n";
+
+    const auto frame = [](const std::string &block) {
+        h2::frame_header hdr;
+        hdr.length = static_cast<uint32_t>(block.size());
+        hdr.type = h2::frame_type::HEADERS;
+        hdr.flags = h2::flags::END_HEADERS | h2::flags::END_STREAM;
+        hdr.stream_id = 5;
+        std::array<uint8_t, h2::frame_header::HEADER_SIZE> bytes{};
+        h2::pack_frame_header(hdr, bytes);
+        return std::string(reinterpret_cast<const char *>(bytes.data()), bytes.size()) + block;
+    };
+
+    std::string ok_block;
+    ok_block.push_back(static_cast<char>(0x82)); // :method GET
+    ok_block.push_back(static_cast<char>(0x84)); // :path /
+    ok_block.push_back(static_cast<char>(0x86)); // :scheme http
+    const std::string bomb_block(2000, static_cast<char>(0x82));
+
+    h2::request ok_req;
+    std::size_t consumed = 0;
+    check(h2::parser::parse_request(frame(ok_block), ok_req, consumed) == h2::parser::result::success,
+          "a normal request still parses");
+
+    h2::request big_req;
+    const auto r = h2::parser::parse_request(frame(bomb_block), big_req, consumed);
+    check(r == h2::parser::result::headers_too_large, "an expansion bomb yields headers_too_large (not a bare error)");
+    check(big_req.stream_id == 5, "...with the failing stream id recorded, so the server can answer on it");
+
+    using wavex::protos::protocol_error;
+    using H2 = wavex::protos::protocol_traits<wavex::protos::http::http2codec>;
+    check(H2::classify_parse_error(r) == protocol_error::limits_exceeded, "traits map it to limits_exceeded (431)");
+    check(H2::classify_parse_error(h2::parser::result::error) == protocol_error::bad_request,
+          "other parse failures stay bad_request");
+}
+
 int main() {
     std::cout << "========================================================\n";
     std::cout << " WaveX HTTP/2 Protocol Codec Unit Tests (RFC 7540/7541)\n";
@@ -547,6 +584,7 @@ int main() {
     test_symmetrical_codec_api();
     test_hpack_dynamic_table_persistence();
     test_hpack_header_list_limit();
+    test_oversized_headers_report_431();
 
     std::cout << "\n--------------------------------------------------------\n";
     std::cout << "Tests Summary: " << tests_passed << " / " << tests_run << " passed.\n";

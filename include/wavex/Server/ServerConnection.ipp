@@ -365,7 +365,14 @@ namespace wavex::server {
 
                 if (p_res != CustomCodec::result::success) [[unlikely]] {
                     CustRes err_res(arena.resource());
-                    CustTraits::write_error(err_res, protos::protocol_error::bad_request);
+                    if constexpr (requires { err_res.stream_id(req.stream_id()); }) {
+                        err_res.stream_id(req.stream_id()); // multiplexed protocols answer on the failing stream
+                    }
+                    auto failure = protos::protocol_error::bad_request;
+                    if constexpr (requires { CustTraits::classify_parse_error(p_res); }) {
+                        failure = CustTraits::classify_parse_error(p_res);
+                    }
+                    CustTraits::write_error(err_res, failure);
                     std::pmr::string err_wire(arena.resource());
                     err_res.serialize_to(err_wire);
                     co_await asio::async_write(stream, asio::buffer(err_wire),
