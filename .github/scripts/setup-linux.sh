@@ -11,7 +11,9 @@ OPENSSL_PREFIX="${OPENSSL_PREFIX:-$HOME/openssl-${OPENSSL_VERSION}}"
 CMAKE_VERSION="4.4.4"
 
 sudo apt-get update -qq
-sudo apt-get install -y -qq --no-install-recommends g++-14 ninja-build ccache zlib1g-dev python3-pip
+# EXTRA_APT lets a job add its own compiler (e.g. "clang-20"); g++-14 stays installed for its libstdc++.
+# shellcheck disable=SC2086
+sudo apt-get install -y -qq --no-install-recommends g++-14 ninja-build ccache zlib1g-dev python3-pip ${EXTRA_APT:-}
 
 python3 -m pip install --user --break-system-packages "cmake==${CMAKE_VERSION}"
 echo "$HOME/.local/bin" >> "${GITHUB_PATH:-/dev/null}"

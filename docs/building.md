@@ -91,6 +91,10 @@ WaveX is a pure C++23 framework requiring a conforming modern C++23 compiler and
 
 ## Compiler-specific notes
 
+### Clang
+
+Clang is verified in CI as **Clang 20 with libstdc++** (header usage). Clang 18 and 19 on Linux fail against libstdc++ because they report `__cpp_concepts` as `201907`, which makes libstdc++ hide `std::expected` (WaveX uses it). With those versions, build against libc++ instead (`-stdlib=libc++`, not covered by CI), or use Clang 20+.
+
 ### MinGW GCC (Windows)
 
 When compiling WaveX under MinGW GCC on Windows, please observe the following compiler-specific behaviors and known upstream GCC/GNU issues:
