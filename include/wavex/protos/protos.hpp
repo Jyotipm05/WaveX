@@ -16,6 +16,8 @@ namespace wavex {
      * @brief Supported network protocols in the WaveX framework.
      */
     enum class protocol {
-        http /**< Hypertext Transfer Protocol (HTTP) */
+        http,        /**< Hypertext Transfer Protocol (HTTP/1.1, HTTP/2, HTTP/3) */
+        websocket,   /**< WebSocket (RFC 6455; over HTTP/3 per RFC 9220) */
+        webtransport /**< WebTransport over HTTP/3 */
     };
 }

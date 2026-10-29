@@ -11,9 +11,11 @@
 #endif
 
 #include <algorithm>
-#include <cstring>
 #include <system_error>
 #include <asio/system_executor.hpp>
+#if defined(__MINGW32__) || defined(__clang__) || defined(__GNUC__)
+#include <cstring>
+#endif
 
 namespace wavex::network::quic {
 
@@ -158,6 +160,11 @@ namespace wavex::network::quic {
 
         auto *dest = static_cast<uint8_t *>(buffer.data());
         return in_buffer_.read(dest, buffer.size());
+    }
+
+    void QuicStream::unread(const std::string_view data) {
+        std::lock_guard lock(mtx_);
+        in_buffer_.prepend(data);
     }
 
     void QuicStream::push_inbound(const std::string_view data, const bool fin) {

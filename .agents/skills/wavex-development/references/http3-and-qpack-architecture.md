@@ -92,3 +92,13 @@ Per RFC 9114 §4.2 and §4.3, malformed requests must be rejected immediately wi
   - **Type `0x00` (Control Stream)**: Parses peer `SETTINGS` (updating `peer_qpack_max_table_capacity`, `max_field_section_size`, `peer_qpack_blocked_streams`) and handles `GOAWAY`.
   - **Type `0x02` (QPACK Encoder Stream)**: Processes `apply_encoder_instruction` on `ctx->decode_table`.
   - **Type `0x03` (QPACK Decoder Stream)**: Drains stream acknowledgements.
+  - **Type `0x54` (WebTransport stream)**: Reads the session ID and hands the stream to `webtransport::dispatch_unidirectional_stream`.
+- The control stream parser also records the peer's `ENABLE_CONNECT_PROTOCOL`, `H3_DATAGRAM` (0x33 and the draft 0xffd277), `WEBTRANSPORT_MAX_SESSIONS` and draft-02 `ENABLE_WEBTRANSPORT` in `connection_context`.
+
+---
+
+## 6. Extended CONNECT & Tunnels (RFC 9220, RFC 9297)
+
+- `:protocol` is accepted only on `CONNECT`; an extended CONNECT must also carry `:scheme`, `:path` and `:authority`. The value is stored in `http3::request::protocol` and exposed as `HttpRequest::connect_protocol()`. `encoder::serialize_request` emits it (extension pseudo-headers precede regular fields).
+- After the HEADERS of any CONNECT the parser stops: the rest of the stream is a tunnel, and `bytes_consumed` ends at the HEADERS frame so the takeover receives the following DATA frames as `unread` bytes.
+- `http3::make_data_tunnel(AnyStream, leftover)` turns the stream into a byte stream: DATA payloads are concatenated, unknown frame types skipped, trailing HEADERS mean EOF, SETTINGS/GOAWAY/CANCEL_PUSH/MAX_PUSH_ID and reserved HTTP/2 types are a protocol error; each write becomes one DATA frame.

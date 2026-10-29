@@ -19,6 +19,7 @@
 #include <wavex/Base/Logger.hpp>
 #include <wavex/Network/QUIC/QuicServer.hpp>
 #include <wavex/protos/http/http3codec.hpp>
+#include <wavex/protos/webtransport/WebTransport.hpp>
 #include <wavex/Network/TransportListener.hpp>
 
 namespace wavex::network::quic {
@@ -63,8 +64,10 @@ namespace wavex::network::quic {
             quic->set_stream_handler(
                 [this](std::shared_ptr<QuicStream> stream) -> asio::awaitable<void> {
                     if (!stream) co_return;
-                    // Client-initiated bidirectional streams carry requests.
+                    // Client-initiated bidirectional streams carry requests, unless they open with the
+                    // WebTransport stream signal, in which case they belong to a WebTransport session.
                     if ((stream->stream_id() & 0x03) == 0x00) {
+                        if (co_await wavex::protos::webtransport::dispatch_bidirectional_stream(stream)) co_return;
                         host_.spawn_connection(std::move(stream));
                     }
                     co_return;

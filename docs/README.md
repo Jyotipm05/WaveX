@@ -15,6 +15,7 @@
 |:---------------------------------------------------------------------|:--------------------------------------------------------------------|
 | [Routing, middleware & responses](guides/routing-and-middleware.md)  | Routes, params, middleware, `StaticChain`, 404s, redirects, `QUERY` |
 | [HTTP/2 and HTTP/3](guides/http2-and-http3.md)                       | h2c, h2, HTTP/3 over QUIC                                           |
+| [WebSocket & WebTransport](guides/websocket-and-webtransport.md)     | RFC 6455, WebSocket over HTTP/3 (RFC 9220), WebTransport sessions   |
 | [TLS 1.3](guides/tls.md)                                             | `enable_tls`, `TlsConfig`, dev certificates                         |
 | [Keep-alive, shutdown & events](guides/connections-and-shutdown.md)  | Timeouts, quotas, draining, restart, `EventBus`                     |
 | [HTTP client](guides/http-client.md)                                 | `HttpClient`, ALPN, h2c, bodies                                     |

@@ -59,6 +59,11 @@ namespace wavex::network::quic {
         using ClosedCallback = std::function<void(const ConnectionId &local_cid, const ConnectionId &peer_cid,
                                                   const ConnectionId &orig_dcid)>;
         using ConnectedCallback = std::function<void()>;
+        /// Receives the payload of each RFC 9221 DATAGRAM frame, outside the connection lock.
+        using DatagramCallback = std::function<void(std::string)>;
+
+        /// Largest DATAGRAM frame this endpoint accepts (transport parameter max_datagram_frame_size, 0x20).
+        inline static constexpr uint64_t kDefaultMaxDatagramFrameSize = 65535;
 
         struct CryptoStreamReassembler {
             // ─── 1. Nested Types & Constants ───
@@ -128,10 +133,9 @@ namespace wavex::network::quic {
             [[nodiscard]] auto contains(const uint64_t pn) const noexcept -> bool {
                 if (!has_packets) return false;
                 if (evicted_below > 0 && pn < evicted_below) return true;
-                for (const auto &[lo, hi]: intervals) {
-                    if (pn >= lo && pn <= hi) return true;
-                }
-                return false;
+                return std::ranges::any_of(intervals, [pn](const auto &pair) {
+                    return pn >= pair.first && pn <= pair.second;
+                });
             }
 
             void reset() noexcept {
@@ -197,6 +201,8 @@ namespace wavex::network::quic {
         OutboundCallback on_outbound_{};
         ClosedCallback on_closed_{};
         ConnectedCallback on_connected_{};
+        DatagramCallback on_datagram_{};
+        std::vector<std::string> received_datagrams_{}; ///< collected under mtx_, delivered after unlocking
         asio::any_io_executor executor_{};
         std::string tls_cert_file_{};
         std::string tls_key_file_{};
@@ -221,6 +227,8 @@ namespace wavex::network::quic {
         uint64_t max_stream_data_{256 * 1024}; // 256 KB
         uint64_t max_field_section_size_{65536}; // 64 KB (RFC 9114 SETTINGS_MAX_FIELD_SECTION_SIZE)
         uint64_t max_datagram_size_{1200}; // MTU limit (RFC 9000 §14 default: 1200 bytes)
+        uint64_t local_max_datagram_frame_size_{kDefaultMaxDatagramFrameSize}; // RFC 9221 §3, 0 = disabled
+        uint64_t peer_max_datagram_frame_size_{0}; // RFC 9221 §3: 0 until the peer advertises support
         uint64_t data_sent_{0};
         uint64_t data_received_{0};
         uint64_t cumulative_bytes_received_{0};
@@ -299,6 +307,43 @@ namespace wavex::network::quic {
             std::scoped_lock lock(mtx_);
             on_closed_ = std::move(cb);
         }
+
+        /// Deliver received DATAGRAM frame payloads (RFC 9221) to `cb`.
+        void set_datagram_callback(DatagramCallback cb) {
+            std::scoped_lock lock(mtx_);
+            on_datagram_ = std::move(cb);
+        }
+
+        /**
+         * @brief Advertise DATAGRAM support with this max_datagram_frame_size (0 disables it).
+         *        Must be called before the handshake starts (it is a transport parameter).
+         */
+        void set_local_max_datagram_frame_size(const uint64_t size) noexcept {
+            std::scoped_lock lock(mtx_);
+            local_max_datagram_frame_size_ = size;
+        }
+
+        /// The peer's max_datagram_frame_size; 0 means it does not accept DATAGRAM frames.
+        [[nodiscard]] auto peer_max_datagram_frame_size() const noexcept -> uint64_t {
+            std::scoped_lock lock(mtx_);
+            return peer_max_datagram_frame_size_;
+        }
+
+        /// Override the peer's limit (tests and mock transports without a TLS handshake).
+        void set_peer_max_datagram_frame_size(const uint64_t size) noexcept {
+            std::scoped_lock lock(mtx_);
+            peer_max_datagram_frame_size_ = size;
+        }
+
+        /// Largest payload `send_datagram` accepts right now (0 if datagrams cannot be sent).
+        [[nodiscard]] auto max_datagram_payload() const noexcept -> std::size_t;
+
+        /**
+         * @brief Send `payload` in one RFC 9221 DATAGRAM frame. Unreliable: never retransmitted.
+         * @return false if the peer did not negotiate datagrams, 1-RTT keys are missing, the connection is
+         *         closed, or the payload does not fit in a single packet.
+         */
+        auto send_datagram(std::string_view payload) -> bool;
 
         void set_connected_callback(ConnectedCallback cb) {
             std::scoped_lock lock(mtx_);
@@ -468,7 +513,8 @@ namespace wavex::network::quic {
 
         auto on_tls_secret(uint32_t prot_level, int direction, const unsigned char *secret, size_t secret_len) -> int;
 
-        static auto on_tls_transport_params(const unsigned char *params, size_t params_len) -> int;
+        /// Record the peer's transport parameters this implementation acts on (currently max_datagram_frame_size).
+        auto on_tls_transport_params(const unsigned char *params, size_t params_len) -> int;
 
         static constexpr auto space_index(const PacketType type) noexcept -> std::size_t {
             switch (type) {

@@ -4,7 +4,7 @@
 
 | Component                  | Status      | Description                                                                                                                                              |
 |:---------------------------|:------------|:---------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `Base/Logger`              | ✅ Complete | Non-blocking async logger with pre-allocated `LogBuffer` pooling, priority headroom, and drop policies |
+| `Base/Logger`              | ✅ Complete | Non-blocking async logger with pre-allocated `LogBuffer` pooling, priority headroom, and drop policies                                                   |
 | `Base/Uri` / `Base/Url`    | ✅ Complete | RFC 3986 URI encode/decode & URL query string parser                                                                                                     |
 | `Base/MimeTypes`           | ✅ Complete | Fast file extension to MIME type mappings (`mime_type_from_ext`)                                                                                         |
 | `Base/Chainable`           | ✅ Complete | C++23 "Deducing `this`" static pipeline dispatch (`StaticChain`, `make_chain`, `KeepAlivePolicy`, `ConditionalChainable`)                                |
@@ -23,10 +23,14 @@
 | `protos/ProtocolTraits`    | ✅ Complete | Protocol session traits (`protocol_traits<Codec>`) for prefaces, keep-alive, response prep & ALPN                                                        |
 | `protos/http/http1codec`   | ✅ Complete | Zero-copy HTTP/1.x parser, encoder, response decoder, chunked framing, status text & stream pipelining                                                   |
 | `protos/http/http2codec`   | ✅ Complete | Full RFC 7540 binary framing, RFC 7541 HPACK encoder/decoder, stream multiplexing & SETTINGS negotiation                                                 |
+| `protos/http/http2session` | 🧪 Beta     | Multiplexed HTTP/2 server connection: concurrent streams, RFC 9113 flow control, CONTINUATION, GOAWAY, extended CONNECT tunnels (RFC 8441)               |
 | `protos/http/http3codec`   | 🧪 Beta     | Full RFC 9114 HTTP/3 binary framing, RFC 9204 QPACK encoder/decoder, VarInt streams & SETTINGS                                                           |
 | `protos/http/HttpRequest`  | ✅ Complete | HTTP/1.1, HTTP/2 & HTTP/3 with zero-copy stream parsing, keep-alive, multipart form parsing, decompressed body & file save                               |
 | `protos/http/HttpResponse` | ✅ Complete | HTTP/1.1, HTTP/2 & HTTP/3 with injected write sink for streaming, commitment & fluent builder API                                                        |
-| `Network/QUIC`             | 🧪 Beta     | Native RFC 9000 & 9001 QUIC UDP transport engine, packet framing, connection ID routing, TLS 1.3 QUIC method & `QuicStream`                              |
+| `protos/websocket`         | 🧪 Beta     | RFC 6455 frame codec, handshake, sessions with thread-safe send queue; HTTP/1.1 Upgrade, HTTP/2 (RFC 8441) and HTTP/3 (RFC 9220) extended CONNECT        |
+| `protos/webtransport`      | 🧪 Beta     | WebTransport over HTTP/3: sessions, bidirectional/unidirectional streams, HTTP datagrams (RFC 9297), capsules, stream demultiplexing                     |
+| `Network/AnyStream`        | ✅ Complete | Type-erased shared-ownership byte stream used for connection takeover after a protocol switch                                                            |
+| `Network/QUIC`             | 🧪 Beta     | Native RFC 9000 & 9001 QUIC UDP transport engine, packet framing, connection ID routing, TLS 1.3 QUIC method, `QuicStream` & RFC 9221 DATAGRAM frames    |
 | `Client/HttpClient`        | ✅ Complete | Coroutine HTTP/1.1 & HTTP/2 client with plain/TLS 1.3, multipart form upload, payload compression, and file saving                                       |
 | `Utils/TempFile`           | ✅ Complete | RAII temporary file management (`TempFileGuard`) with atomic move/cleanup and custom directory support                                                   |
 | `Utils/Compression`        | ✅ Complete | Zero-overhead Gzip & Deflate compression/decompression (`Compressor`, `CompressionFormat`) via CMake-controlled zlib integration                         |

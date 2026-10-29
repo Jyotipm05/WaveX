@@ -11,6 +11,7 @@
 module;
 
 #include <wavex/protos/http/http2codec.hpp>
+#include <wavex/protos/http/http2session.hpp>
 
 export module wavex:protos_http_http2codec;
 
@@ -28,5 +29,7 @@ export namespace wavex::protos::http {
         using http2::parser;
         using http2::encoder;
         using http2::decoder;
+        using http2::session_limits;
+        using http2::server_session;
     }
 }

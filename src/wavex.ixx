@@ -23,6 +23,9 @@ export import :chainable;
 export import :logger;
 export import :protos;
 export import :protos_http;
+export import :protos_websocket;
+export import :protos_webtransport;
+export import :network_any_stream;
 export import :middleware;
 export import :router;
 export import :http_router;
@@ -95,6 +98,44 @@ export namespace wavex::protos::http {
     using http::http3response;
 #endif
 }
+
+export namespace wavex::network {
+    using network::AnyStream;
+}
+
+export namespace wavex::protos::websocket {
+    using websocket::opcode;
+    using websocket::role;
+    using websocket::error;
+    using websocket::make_error_code;
+    using websocket::frame_header;
+    using websocket::parse_result;
+    using websocket::codec;
+    using websocket::compute_accept_key;
+    using websocket::is_valid_client_key;
+    using websocket::generate_client_key;
+    using websocket::header_contains_token;
+    using websocket::is_valid_utf8;
+    using websocket::options;
+    using websocket::message;
+    using websocket::connection;
+    using websocket::handler_fn;
+    using websocket::accept;
+}
+
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+export namespace wavex::protos::webtransport {
+    using webtransport::error;
+    using webtransport::make_error_code;
+    using webtransport::options;
+    using webtransport::stream;
+    using webtransport::session;
+    using webtransport::session_registry;
+    using webtransport::dispatch_bidirectional_stream;
+    using webtransport::handler_fn;
+    using webtransport::accept;
+}
+#endif
 
 export namespace wavex::engine {
     using engine::Router;

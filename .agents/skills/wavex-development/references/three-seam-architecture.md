@@ -74,3 +74,47 @@ When an application needs to serve HTTP/1.1 and HTTP/2 over TCP alongside HTTP/3
   protocol_traits<Codec>::prepare_response(req, res, keep_alive, timeout, remaining, alt_svc_port);
   ```
 - If `alt_svc_port > 0`, `protocol_traits<http2codec>` or `protocol_traits<http1codec>` appends the `Alt-Svc` header automatically.
+
+---
+
+## 5. Connection Takeover (Protocol Switch)
+
+WebSocket and WebTransport begin as an HTTP request and then own the connection (HTTP/1.1) or the request
+stream (HTTP/3). This is a fourth, optional policy hook, not a kernel feature:
+
+```
+handler ──► res.upgrade(fn)                         (websocket::accept / webtransport::accept)
+kernel  ──► write response
+        ──► protocol_traits<Codec>::wants_takeover(req, res)        (sync: res.has_upgrade() and
+              │                                                       101 on HTTP/1.x / 2xx on HTTP/3)
+              └─ yes ──► co_await protocol_traits<Codec>::take_over(stream_ptr, req, res, std::string unread)
+                           └─ co_await fn(network::AnyStream::wrap(stream_ptr, executor), unread)
+                         ──► kernel stops serving, tears the transport down
+```
+
+- `network::AnyStream` erases TCP / TLS / `QuicStream` (and adapters such as the HTTP/3 DATA tunnel) behind
+  `read_some` / `write` / `shutdown_send` / `cancel` / `close`, with `native<T>()` to recover the concrete type
+  (WebTransport needs the `QuicStream` and its connection).
+- The kernel's contract grew by nothing: it calls the hooks only `if constexpr` the policy defines them, and
+  the synchronous `wants_takeover` keeps coroutine frames off the path of ordinary requests.
+
+---
+
+## 6. Policy-Driven Connections (`serve_connection`)
+
+Some protocols cannot be served one request at a time. HTTP/2 multiplexes streams, applies flow control and
+keeps RFC 8441 tunnels open next to ordinary requests, so its policy drives the connection:
+
+```
+kernel ──► on_connection_start()            (strip the client preface)
+       ──► protocol_traits<Codec>::serve_connection(stream_ptr, buffered, services)   if defined
+             └─ http2::server_session: reader (frames, HPACK, flow control)
+                                       writer (single frame queue)
+                                       one task per stream ──► services.handle(req, res, sink)
+                                                                 = Server::process_request()
+       ──► otherwise: the sequential loop, which also calls Server::process_request()
+```
+
+- `Server::ConnectionServices<Codec, Router>` is the only thing the policy gets from the kernel; it is
+  protocol-neutral (memory, state, limits, idle tracking, the request pipeline).
+- The kernel still names no protocol; it only checks `if constexpr` for `serve_connection`.

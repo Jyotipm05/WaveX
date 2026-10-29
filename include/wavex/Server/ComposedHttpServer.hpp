@@ -22,9 +22,9 @@
 #include <utility>
 
 #include <wavex/Base/Logger.hpp>
-#include <wavex/Utils/FsUtils.hpp>
 #include <wavex/Network/QUIC.hpp>
 #include <wavex/protos/http/http3codec.hpp>
+#include <wavex/protos/webtransport/WebTransport.hpp>
 #include <wavex/Engine/HttpRouter.hpp>
 #include <wavex/Server/ServerAliases.hpp>
 #include <wavex/Server/TlsConfig.hpp>
@@ -186,6 +186,8 @@ namespace wavex::server {
             -> asio::awaitable<void> {
                     if (!stream) co_return;
                     if ((stream->stream_id() & 0x03) == 0x00) {
+                        // WebTransport streams (WT_STREAM signal) go to their session, not to the router.
+                        if (co_await protos::webtransport::dispatch_bidirectional_stream(stream)) co_return;
                         if (server_.pool().worker_count() == 0) {
                             server_.pool().start_pool();
                         }
@@ -364,6 +366,30 @@ namespace wavex::server {
                         co_return;
                     }
                 });
+            return *this;
+        }
+
+        /**
+         * @brief WebSocket endpoint on both routers: extended CONNECT over HTTP/2 (RFC 8441) and HTTP/3
+         *        (RFC 9220). `h` receives the protocol-neutral session; use `h2`/`h3` overloads for the request.
+         */
+        ComposedHttpServer &websocket(const std::string_view pattern,
+                                      std::function<asio::awaitable<void>(std::shared_ptr<protos::websocket::connection>)> h,
+                                      const protos::websocket::options &opts = {}) {
+            auto shared = std::make_shared<decltype(h)>(std::move(h));
+            h2_router_->websocket(pattern, [shared](Http2Router::RequestType &,
+                                                    std::shared_ptr<protos::websocket::connection> c)
+                              -> asio::awaitable<void> { co_await (*shared)(std::move(c)); }, opts);
+            h3_router_->websocket(pattern, [shared](Http3Router::RequestType &,
+                                                    std::shared_ptr<protos::websocket::connection> c)
+                              -> asio::awaitable<void> { co_await (*shared)(std::move(c)); }, opts);
+            return *this;
+        }
+
+        /// WebTransport endpoint (HTTP/3 extended CONNECT with `:protocol = webtransport`).
+        ComposedHttpServer &webtransport(const std::string_view pattern, Http3Router::WebTransportHandler h,
+                                         protos::webtransport::options opts = {}) {
+            h3_router_->webtransport(pattern, std::move(h), opts);
             return *this;
         }
 

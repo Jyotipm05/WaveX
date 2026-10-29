@@ -19,7 +19,9 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#if defined(__MINGW32__) || defined(__clang__) || defined(__GNUC__)
 #include <cstring>
+#endif
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -296,6 +298,15 @@ namespace wavex::network::quic {
                 token
             );
         }
+
+        /**
+         * @brief Return bytes already read to the front of the receive buffer.
+         *
+         * Lets a dispatcher peek at a stream's first bytes (e.g. the WebTransport stream signal, which shares
+         * the first varint of a request stream with the HTTP/3 frame type) and then hand the untouched stream
+         * to the regular request path. Only the stream's single reader may call it, with no read pending.
+         */
+        void unread(std::string_view data);
 
         // Internal plumbing
         void push_inbound(uint64_t offset, std::string_view data, bool fin);

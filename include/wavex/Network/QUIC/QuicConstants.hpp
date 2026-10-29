@@ -88,7 +88,9 @@ namespace wavex::network::quic {
         PathResponse = 0x1b,
         ConnectionCloseQuic = 0x1c,
         ConnectionCloseApp = 0x1d,
-        HandshakeDone = 0x1e
+        HandshakeDone = 0x1e,
+        Datagram = 0x30,           ///< RFC 9221, no length field
+        DatagramWithLength = 0x31  ///< RFC 9221
     };
 
     // ─── Connection States ────────────────────────────────────────────────

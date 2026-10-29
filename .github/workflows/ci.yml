@@ -64,7 +64,7 @@ jobs:
       - name: Test
         id: test
         if: steps.build.outcome == 'success'
-        # Strict on main or PRs targeting main; permissive (accepts both passed and failed) on all other branches
+        # Strict on main or PRs targeting main; permissive on other branches
         continue-on-error: ${{ github.ref_name != 'main' && github.base_ref != 'main' }}
         env:
           LD_LIBRARY_PATH: ${{ env.OPENSSL_PREFIX }}/lib
@@ -119,7 +119,11 @@ jobs:
             linux-clang20-${{ hashFiles('.github/scripts/setup-linux.sh') }}-
 
       - name: Toolchain (Clang 20, CMake 4, OpenSSL 3.5)
-        run: bash .github/scripts/setup-linux.sh
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-20 clang-tools-20 lld-20
+          sudo ln -sf /usr/bin/clang-scan-deps-20 /usr/bin/clang-scan-deps
+          bash .github/scripts/setup-linux.sh
 
       - name: Generate TLS test certificate
         run: |
@@ -134,7 +138,8 @@ jobs:
             -DWAVEX_TEST=ON -DWAVEX_USE_MODULE=OFF \
             -DOPENSSL_ROOT_DIR="$OPENSSL_PREFIX" -DOPENSSL_INCLUDE_DIR="$OPENSSL_PREFIX/include" \
             -DOPENSSL_CRYPTO_LIBRARY="$OPENSSL_PREFIX/lib/libcrypto.so" \
-            -DOPENSSL_SSL_LIBRARY="$OPENSSL_PREFIX/lib/libssl.so"
+            -DOPENSSL_SSL_LIBRARY="$OPENSSL_PREFIX/lib/libssl.so" \
+            -DCMAKE_CXX_COMPILER_CLANG_SCAN_DEPS=/usr/bin/clang-scan-deps-20
 
       - name: Build
         id: build
@@ -142,6 +147,7 @@ jobs:
         run: cmake --build build -j2
 
       - name: Test
+        id: test
         if: steps.build.outcome == 'success'
         continue-on-error: ${{ github.ref_name != 'main' && github.base_ref != 'main' }}
         env:

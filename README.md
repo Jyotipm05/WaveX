@@ -66,17 +66,18 @@ int main() {
 
 ## What's inside
 
-| Area                 | Highlights                                                                                                                                     | Guide                                                  |
-|:---------------------|:-----------------------------------------------------------------------------------------------------------------------------------------------|:-------------------------------------------------------|
-| Routing & middleware | Radix tree with `:id`, `{id:[0-9]+}` (RE2) and `*catch-all`; `QUERY` method; short-circuiting coroutine middleware; compile-time `StaticChain` | [Routing](docs/guides/routing-and-middleware.md)       |
-| Protocols            | HTTP/2 + HPACK, HTTP/3 + QPACK, QUIC (RFC 9000/9001), chunked encoding                                                                         | [HTTP/2 & HTTP/3](docs/guides/http2-and-http3.md)      |
-| Security             | TLS 1.3 only, ALPN negotiation, body-size limits with `413`                                                                                    | [TLS](docs/guides/tls.md)                              |
-| Connections          | Keep-alive and pipelining, inactivity timeouts, graceful shutdown, restartable servers, event bus                                              | [Connections](docs/guides/connections-and-shutdown.md) |
-| Client               | HTTP/1.1 + HTTP/2, ALPN, h2c, JSON/text/binary bodies                                                                                          | [Client](docs/guides/http-client.md)                   |
-| Files                | RFC 7578 multipart with disk spooling, Gzip/Deflate, async file I/O                                                                            | [Uploads](docs/guides/file-uploads-and-compression.md) |
-| Concurrency          | Work-stealing pool, `spawn_blocking`, elastic blocking pool                                                                                    | [Offloading](docs/guides/async-offloading.md)          |
-| Memory               | `RequestArena`, `ConnectionMemoryPool`, `FlatMap`, `string_view` contract                                                                      | [Memory](docs/guides/memory-and-lifetimes.md)          |
-| Tooling              | CLI parser, levelled logger, Postman dev servers                                                                                               | [Logging & CLI](docs/guides/logging-and-cli.md)        |
+| Area                 | Highlights                                                                                                                                     | Guide                                                                 |
+|:---------------------|:-----------------------------------------------------------------------------------------------------------------------------------------------|:----------------------------------------------------------------------|
+| Routing & middleware | Radix tree with `:id`, `{id:[0-9]+}` (RE2) and `*catch-all`; `QUERY` method; short-circuiting coroutine middleware; compile-time `StaticChain` | [Routing](docs/guides/routing-and-middleware.md)                      |
+| Protocols            | HTTP/2 + HPACK, HTTP/3 + QPACK, QUIC (RFC 9000/9001), chunked encoding                                                                         | [HTTP/2 & HTTP/3](docs/guides/http2-and-http3.md)                     |
+| Real-time            | WebSocket (RFC 6455) on HTTP/1.1, HTTP/2 (RFC 8441) and HTTP/3 (RFC 9220); WebTransport over HTTP/3 with streams and datagrams                 | [WebSocket & WebTransport](docs/guides/websocket-and-webtransport.md) |
+| Security             | TLS 1.3 only, ALPN negotiation, body-size limits with `413`                                                                                    | [TLS](docs/guides/tls.md)                                             |
+| Connections          | Keep-alive and pipelining, inactivity timeouts, graceful shutdown, restartable servers, event bus                                              | [Connections](docs/guides/connections-and-shutdown.md)                |
+| Client               | HTTP/1.1 + HTTP/2, ALPN, h2c, JSON/text/binary bodies                                                                                          | [Client](docs/guides/http-client.md)                                  |
+| Files                | RFC 7578 multipart with disk spooling, Gzip/Deflate, async file I/O                                                                            | [Uploads](docs/guides/file-uploads-and-compression.md)                |
+| Concurrency          | Work-stealing pool, `spawn_blocking`, elastic blocking pool                                                                                    | [Offloading](docs/guides/async-offloading.md)                         |
+| Memory               | `RequestArena`, `ConnectionMemoryPool`, `FlatMap`, `string_view` contract                                                                      | [Memory](docs/guides/memory-and-lifetimes.md)                         |
+| Tooling              | CLI parser, levelled logger, Postman dev servers                                                                                               | [Logging & CLI](docs/guides/logging-and-cli.md)                       |
 
 ## Get started
 

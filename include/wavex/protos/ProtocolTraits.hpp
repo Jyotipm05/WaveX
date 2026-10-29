@@ -14,12 +14,14 @@
 
 #pragma once
 
-#include <cstddef>
 #include <memory>
 #include <string>
 #include <string_view>
 #ifndef ASIO_HAS_CO_AWAIT
 #define ASIO_HAS_CO_AWAIT 1
+#endif
+#if defined(__MINGW32__) || defined(__clang__) || defined(__GNUC__)
+#include <cstddef>
 #endif
 #if defined(__MINGW32__) && !defined(ASIO_HAS_PTHREADS)
 #define ASIO_HAS_PTHREADS 1
@@ -27,9 +29,10 @@
 #include <asio/awaitable.hpp>
 #include <asio/as_tuple.hpp>
 #include <asio/use_awaitable.hpp>
-#include <asio/write.hpp>
 #include <asio/buffer.hpp>
 #include <asio/redirect_error.hpp>
+#include <asio/this_coro.hpp>
+#include <wavex/Network/AnyStream.hpp>
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
 #include <openssl/ssl.h>
@@ -87,6 +90,35 @@ namespace wavex::protos {
             }
             res.send(body);
         }
+
+        /**
+         * Shared by the HTTP/1.x and HTTP/3 specializations: whether the response hands the connection to a
+         * takeover handler installed with `res.upgrade(...)`. Only a response that really agreed to switch
+         * protocols qualifies — `101 Switching Protocols` on HTTP/1.1 (RFC 9110 §15.2.2), a 2xx answer to an
+         * (extended) CONNECT on HTTP/3 (RFC 9220, WebTransport). A handler left on any other response is
+         * ignored and the request finishes normally. Synchronous so that ordinary requests pay one branch.
+         */
+        template<typename Request, typename Response>
+        bool http_wants_takeover(const Request &req, const Response &res) noexcept {
+            if constexpr (requires { res.has_upgrade(); res.status_code(); req.version_major(); }) {
+                if (!res.has_upgrade()) [[likely]] return false;
+                const unsigned code = res.status_code();
+                return req.version_major() >= 2 ? (code >= 200 && code < 300) : (code == 101);
+            } else {
+                return false;
+            }
+        }
+
+        /// Run the takeover handler on the connection's own executor with the transport type-erased.
+        template<typename Stream, typename Request, typename Response>
+        asio::awaitable<void> http_take_over(std::shared_ptr<Stream> stream, Request &, Response &res,
+                                             std::string unread) {
+            auto takeover = res.take_upgrade();
+            if (!takeover) co_return;
+            auto executor = co_await asio::this_coro::executor;
+            co_await takeover(wavex::network::AnyStream::wrap(std::move(stream), std::move(executor)),
+                              std::move(unread));
+        }
     } // namespace detail
 
     /**
@@ -103,6 +135,8 @@ namespace wavex::protos {
      *  - exceeds_limits() / write_error() / set_default_status() / write_not_found() / request_label()
      *                                                   (the kernel never touches response fields)
      *  - make_transport_listener()                      (optional: an extra listener, e.g. QUIC/UDP)
+     *  - wants_takeover() / take_over()                 (optional: connection takeover after a protocol
+     *                                                    switch, e.g. WebSocket / WebTransport)
      */
     template<typename Codec>
     struct protocol_traits {
@@ -179,6 +213,27 @@ namespace wavex::protos {
             return {};
         }
 
+        /**
+         * @brief Asked once the response is on the wire: does the connection now belong to another protocol?
+         * Default: never.
+         */
+        template<typename Request, typename Response>
+        static bool wants_takeover(const Request &, const Response &) noexcept {
+            return false;
+        }
+
+        /**
+         * @brief Hand the connection over (only called when wants_takeover() said yes). The server stops
+         *        serving the connection afterwards and tears the transport down.
+         * @param stream The connection's transport (shared ownership).
+         * @param unread Bytes already received past the end of this request.
+         */
+        template<typename Stream, typename Request, typename Response>
+        static asio::awaitable<void> take_over([[maybe_unused]] std::shared_ptr<Stream> stream, Request &, Response &,
+                                               [[maybe_unused]]std::string unread) {
+            co_return;
+        }
+
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
         /// Register the ALPN selection callback for this protocol (server-side).
         static void configure_alpn(SSL_CTX *) {
@@ -239,10 +294,26 @@ struct wavex::protos::protocol_traits<wavex::protos::http::http1codec> {
         return req.should_keep_alive() && (request_count < max_requests);
     }
 
+    /// RFC 6455 / RFC 9110 §7.8: after `101 Switching Protocols` the connection belongs to the new protocol.
+    template<typename Request, typename Response>
+    static bool wants_takeover(const Request &req, const Response &res) noexcept {
+        return detail::http_wants_takeover(req, res);
+    }
+
+    template<typename Stream, typename Request, typename Response>
+    static asio::awaitable<void> take_over(std::shared_ptr<Stream> stream, Request &req, Response &res,
+                                           std::string unread) {
+        return detail::http_take_over(std::move(stream), req, res, std::move(unread));
+    }
+
     template<typename Request, typename Response>
     static void prepare_response(const Request &, Response &res, const bool keep,
                                  const unsigned timeout_sec, const unsigned remaining,
                                  const unsigned short alt_svc_port = 0) {
+        if constexpr (requires { res.status_code(); }) {
+            // A protocol switch carries its own `Connection: Upgrade`; keep-alive headers would contradict it.
+            if (res.status_code() == 101) return;
+        }
         if (keep) {
             res.set("Connection", "keep-alive");
             res.set("Keep-Alive",
@@ -281,6 +352,12 @@ struct wavex::protos::protocol_traits<wavex::protos::http::http1codec> {
 
 // ─── HTTP/2 Specialization ───────────────────────────────────────────────────
 #include <wavex/protos/http/http2codec.hpp>
+
+namespace wavex::protos::http::http2 {
+    // Defined in http2session.hpp (included at the end of this header).
+    template<typename Stream, typename Services>
+    class server_session;
+}
 
 template<>
 struct wavex::protos::protocol_traits<wavex::protos::http::http2codec> {
@@ -327,14 +404,14 @@ struct wavex::protos::protocol_traits<wavex::protos::http::http2codec> {
     }
 
     /**
-         * @brief RFC 7540 §3.5: validate client preface (24-byte PRI), reply with
-         *        server SETTINGS + SETTINGS ACK, and strip the preface from stream_buf
-         *        so the frame parser only receives raw frames.
+         * @brief RFC 9113 §3.4: validate the client preface (24-byte PRI) and strip it from stream_buf, so the
+         *        session only sees frames. The server's SETTINGS are sent by the session (serve_connection),
+         *        which also acknowledges the client's SETTINGS when they arrive.
          */
     template<typename Stream>
     static asio::awaitable<bool> on_connection_start(Stream &stream, std::string &stream_buf) {
         namespace h2 = wavex::protos::http::http2;
-        while (stream_buf.size() < h2::CONNECTION_PREFACE.size() + 9) {
+        while (stream_buf.size() < h2::CONNECTION_PREFACE.size()) {
             char buf[4096];
             auto [ec, n] = co_await stream.async_read_some(
                 asio::buffer(buf), asio::as_tuple(asio::use_awaitable));
@@ -342,22 +419,28 @@ struct wavex::protos::protocol_traits<wavex::protos::http::http2codec> {
             stream_buf.append(buf, n);
         }
         if (!stream_buf.starts_with(h2::CONNECTION_PREFACE)) co_return false;
-
-        const std::string server_settings = h2::encoder::serialize_settings({});
-        const std::string settings_ack = h2::encoder::serialize_settings_ack();
-        std::string preface_response;
-        preface_response.reserve(server_settings.size() + settings_ack.size());
-        preface_response += server_settings;
-        preface_response += settings_ack;
-
-        asio::error_code write_ec;
-        co_await asio::async_write(
-            stream, asio::buffer(preface_response),
-            asio::redirect_error(asio::use_awaitable, write_ec));
-        if (write_ec) co_return false;
-
         stream_buf.erase(0, h2::CONNECTION_PREFACE.size());
         co_return true;
+    }
+
+    /**
+     * @brief HTTP/2 drives its connection itself: streams are multiplexed, flow controlled and may stay open
+     *        as tunnels (RFC 8441), which the one-request-at-a-time loop cannot express. The server hands the
+     *        connection over after the preface; requests still go through the server's shared pipeline via
+     *        `services.handle()`.
+     */
+    template<typename Stream, typename Services>
+    static asio::awaitable<void> serve_connection(std::shared_ptr<Stream> stream, std::string buffered,
+                                                  Services &services) {
+        auto session = std::make_shared<http::http2::server_session<Stream, Services> >(
+            std::move(stream), std::move(buffered), services);
+        co_await session->run();
+    }
+
+    /// RFC 8441: a 2xx answer to an extended CONNECT turns the stream into a tunnel (used by the session).
+    template<typename Request, typename Response>
+    static bool wants_takeover(const Request &req, const Response &res) noexcept {
+        return detail::http_wants_takeover(req, res);
     }
 
     /// HTTP/2 connections are always persistent and multiplexed (RFC 7540 §8.1.2.2).
@@ -411,7 +494,6 @@ struct wavex::protos::protocol_traits<wavex::protos::http::http2codec> {
 // ─── HTTP/3 Specialization ───────────────────────────────────────────────────
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
 #include <wavex/protos/http/http3codec.hpp>
-#include <wavex/Network/QUIC/QuicConnection.hpp>
 #include <wavex/Network/QUIC/QuicListener.hpp>
 
 template<>
@@ -490,6 +572,18 @@ struct wavex::protos::protocol_traits<wavex::protos::http::http3codec> {
         co_return true;
     }
 
+    /// RFC 9220 / WebTransport: a 2xx answer to an extended CONNECT turns the request stream into a tunnel.
+    template<typename Request, typename Response>
+    static bool wants_takeover(const Request &req, const Response &res) noexcept {
+        return detail::http_wants_takeover(req, res);
+    }
+
+    template<typename Stream, typename Request, typename Response>
+    static asio::awaitable<void> take_over(std::shared_ptr<Stream> stream, Request &req, Response &res,
+                                           std::string unread) {
+        return detail::http_take_over(std::move(stream), req, res, std::move(unread));
+    }
+
     template<typename Request>
     static bool keep_alive(const Request &req, unsigned, unsigned) {
         if constexpr (requires { req.version_major(); }) {
@@ -559,3 +653,6 @@ struct wavex::protos::protocol_traits<wavex::protos::http::http3codec> {
     }
 }; // namespace wavex::protos
 #endif // WAVEX_HAS_SSL
+
+// The HTTP/2 session uses the helpers above; it is defined after them (see the forward declaration).
+#include <wavex/protos/http/http2session.hpp>

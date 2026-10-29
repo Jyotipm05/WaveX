@@ -28,6 +28,7 @@
 #include <wavex/protos/ProtocolTraits.hpp>
 #include <wavex/Network/TransportListener.hpp>
 #include <wavex/Base/Event.hpp>
+#include <wavex/Base/Memory.hpp>
 
 #include <asio/io_context.hpp>
 #include <asio/ip/tcp.hpp>
@@ -89,6 +90,73 @@ namespace wavex::server {
         static constexpr bool has_tcp_transport = requires {
             { traits::has_tcp_transport } -> std::convertible_to<bool>;
         } ? traits::has_tcp_transport : true;
+
+        /**
+         * @brief What the server offers a protocol policy that drives a connection itself
+         *        (`protocol_traits<Codec>::serve_connection`, e.g. multiplexed HTTP/2).
+         *
+         * Protocol-neutral: memory for request arenas, server state, configured limits, idle tracking for
+         * graceful shutdown, and `handle()`, the same request pipeline the sequential loop uses (routing,
+         * middlewares, error mapping, prepare_response). Lives on the connection coroutine's frame; the policy
+         * must finish using it before serve_connection returns.
+         */
+        template<typename CustomCodec, typename CustomRouter>
+        class ConnectionServices {
+        public:
+            // ─── 1. Nested Types ─────────────────────────────────────────────
+            using request_type = CustomRouter::RequestType;
+            using response_type = CustomRouter::ResponseType;
+
+        private:
+            // ─── 2. Member Variables ─────────────────────────────────────────
+            Server &server_;
+            CustomRouter &router_;
+            wavex::memory::ConnectionMemoryPool &pool_;
+            uint64_t conn_id_{0};
+
+        public:
+            // ─── 3. Constructors & Destructor ────────────────────────────────
+            ConnectionServices(Server &server, CustomRouter &router, wavex::memory::ConnectionMemoryPool &pool,
+                               const uint64_t conn_id) noexcept
+                : server_(server), router_(router), pool_(pool), conn_id_(conn_id) {
+            }
+
+            ConnectionServices(const ConnectionServices &) = delete;
+
+            ConnectionServices &operator=(const ConnectionServices &) = delete;
+
+            // ─── 4. Member Functions ─────────────────────────────────────────
+            /// Upstream for per-request arenas. The pool is unsynchronized: use it only from coroutines running
+            /// on the connection's executor (the HTTP/2 session spawns all its stream tasks there).
+            [[nodiscard]] std::pmr::memory_resource *memory() const noexcept { return pool_.resource(); }
+
+            /// False once the server is shutting down or stopped: take no new requests.
+            [[nodiscard]] bool accepting() const noexcept {
+                return server_.state_.load(std::memory_order_acquire) == ServerState::Running;
+            }
+
+            [[nodiscard]] std::chrono::milliseconds idle_timeout() const noexcept {
+                return std::chrono::duration_cast<std::chrono::milliseconds>(server_.keep_alive_timeout_);
+            }
+
+            /// Largest request body accepted (0 = unlimited).
+            [[nodiscard]] std::size_t max_request_size() const noexcept { return server_.max_request_size_; }
+
+            [[nodiscard]] protos::request_limits limits() const noexcept {
+                return protos::request_limits{server_.max_headers_, server_.max_query_params_};
+            }
+
+            /// Idle connections are cancelled first during graceful shutdown.
+            void mark_idle() const { server_.conn_tracker_.mark_idle(conn_id_); }
+            void mark_active() const { server_.conn_tracker_.mark_active(conn_id_); }
+
+            /// Run one parsed request through the server's pipeline; `sink` streams the response body.
+            template<typename Sink>
+            asio::awaitable<bool> handle(request_type &req, response_type &res, Sink sink) {
+                return server_.template process_request<CustomCodec>(
+                    req, res, router_, true, server_.max_keep_alive_requests_, std::move(sink));
+            }
+        };
 
     private:
         // ─── 2. Member Variables (Arranged for minimum padding) ──────────────
@@ -234,6 +302,16 @@ namespace wavex::server {
         template<typename CustomCodec, typename CustomRouter, typename Stream>
         asio::awaitable<void> handle_connection_impl(std::shared_ptr<Stream> stream_ptr,
                                                      CustomRouter &router);
+
+        /**
+         * Route and run one parsed request: resolve, middlewares, handler, error mapping and the policy's
+         * prepare_response(). Shared by the sequential connection loop and by protocols that drive the
+         * connection themselves (multiplexed HTTP/2). `sink` is the streaming write sink (or nullptr).
+         * @return whether the connection may stay open after this request.
+         */
+        template<typename CustomCodec, typename CustomRouter, typename CustReq, typename CustRes, typename Sink>
+        asio::awaitable<bool> process_request(CustReq &req, CustRes &res, CustomRouter &router, bool keep,
+                                              unsigned remaining, Sink sink);
 
         template<typename ReqT, typename ResT, typename MwVec, typename H>
         static asio::awaitable<void> run_chain(ReqT &req, ResT &res, const MwVec &mws,

@@ -2,9 +2,10 @@
 
 > [!IMPORTANT]
 > **Scope Invariant for AI Agents**:
-> **Do NOT implement GraphQL or WebSocket protocols right now.**
+> **Do NOT implement GraphQL right now.**
 > **HTTP/3 (RFC 9114 & RFC 9204) over QUIC (RFC 9000 & RFC 9001) is FULLY IMPLEMENTED and verified.**
-> These protocol designs are documented here so that any agent working on WaveX understands the architectural choices, maintains compatibility with future designs, and avoids re-introducing tight coupling in `Server.hpp` or `HttpResponse.hpp`.
+> **WebSocket (RFC 6455, and over HTTP/3 per RFC 9220) and WebTransport over HTTP/3 are IMPLEMENTED (Beta)**; see [websocket-takeover-http2-session.md](websocket-takeover-http2-session.md).
+> Documented so agents keep compatibility with these designs and avoid re-introducing tight coupling in `Server.hpp` or `HttpResponse.hpp`.
 
 ---
 
@@ -121,13 +122,8 @@ WaveX server architecture is built around three strictly decoupled seams:
   - Schema execution and query resolution run within the route handler, returning JSON results formatted through `res.json(...)`.
   - Can be hosted directly on `Server<graphql_codec>` or within standard HTTP routes via `router.post("/graphql", graphql_handler)`.
 
-### C. WebSockets Protocol (RFC 6455)
-- **Status**: Future design. Do NOT implement now.
-- **Layer**: Protocol upgrade over HTTP/1.1.
-- **Architecture**:
-  - Initiated via HTTP/1.1 `Upgrade: websocket` and `Sec-WebSocket-Key`.
-  - Server sends HTTP `101 Switching Protocols` using `res.status(101).set("Upgrade", "websocket")...`.
-  - Stream ownership or codec transitions to `websocket_codec` framing (FIN bit, Opcode, Masking key, Payload length).
+### C. WebSockets & D. WebTransport — Implemented (Beta)
+- Moved to [websocket-takeover-http2-session.md](websocket-takeover-http2-session.md) (§C, §D). Both ride the takeover seam (`HttpResponse::upgrade` + `protocol_traits::wants_takeover/take_over`) and never touch `Server` directly.
 
 ---
 
@@ -148,3 +144,10 @@ WaveX server architecture is built around three strictly decoupled seams:
    - Refactoring the server must never break client-side request construction, response parsing, or test coverage.
 6. **Never run CMake configure commands**:
    - Only run `cmake --build --preset fast-dev` and `ctest --preset run-tests`. Never run `cmake --preset ...` or `cmake -B ...`.
+7. **Protocol switches go through the policy, never through the kernel**:
+   - `ServerConnection.ipp` must not test for `101`, `Upgrade`, `CONNECT`, WebSocket or WebTransport. After writing the response it only asks `protocol_traits<Codec>::wants_takeover(req, res)` (when the policy defines it) and, on yes, awaits `take_over(stream_ptr, req, res, unread)` and stops serving the connection.
+
+---
+
+## 5. Connection Takeover & 6. Policy-Driven Connections
+- See [websocket-takeover-http2-session.md](websocket-takeover-http2-session.md) (§5 takeover contract, §6 `serve_connection` / multiplexed HTTP/2).

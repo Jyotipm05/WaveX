@@ -176,7 +176,10 @@ namespace wavex::client {
             std::string initial_wire;
             initial_wire.reserve(h2::CONNECTION_PREFACE.size() + 32);
             initial_wire += h2::CONNECTION_PREFACE;
-            initial_wire += h2::encoder::serialize_settings({});
+            // Open the receive windows fully: this client reads whole responses and never sends
+            // WINDOW_UPDATE, so a server honouring flow control would otherwise stall after 64 KiB.
+            initial_wire += h2::encoder::serialize_settings({{h2::settings_parameter::INITIAL_WINDOW_SIZE, 0x7FFFFFFF}});
+            initial_wire += h2::encoder::serialize_window_update(0, 0x7FFFFFFF - 65535);
 
             // 2. Build HEADERS frame for stream 1
             std::vector<std::pair<std::string, std::string> > filtered_headers;

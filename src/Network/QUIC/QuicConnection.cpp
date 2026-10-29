@@ -130,7 +130,7 @@ namespace wavex::network::quic {
         SSL * /*s*/, const unsigned char *params, const size_t params_len,
         void *arg) {
         if (!arg) return 0;
-        const auto *conn = static_cast<QuicConnection *>(arg);
+        auto *conn = static_cast<QuicConnection *>(arg);
         return conn->on_tls_transport_params(params, params_len);
     }
 
@@ -525,6 +525,9 @@ namespace wavex::network::quic {
         add_varint_param(0x08, 100); // initial_max_streams_bidi
         add_varint_param(0x09, 100); // initial_max_streams_uni
         add_varint_param(0x0e, 2); // active_connection_id_limit (RFC 9000 §18.2)
+        if (local_max_datagram_frame_size_ > 0) {
+            add_varint_param(0x20, local_max_datagram_frame_size_); // max_datagram_frame_size (RFC 9221 §3)
+        }
 
         return out;
     }
@@ -616,8 +619,76 @@ namespace wavex::network::quic {
     }
 
     int QuicConnection::on_tls_transport_params(
-        const unsigned char * /*params*/, size_t /*params_len*/) {
+        const unsigned char *params, const size_t params_len) {
+        if (!params) return 1;
+        const std::string_view tp(reinterpret_cast<const char *>(params), params_len);
+        std::size_t cursor = 0;
+        while (cursor < tp.size()) {
+            uint64_t id = 0;
+            uint64_t len = 0;
+            if (!VarInt::decode(tp, cursor, id) || !VarInt::decode(tp, cursor, len) || cursor + len > tp.size()) {
+                break; // malformed tail: keep what was understood
+            }
+            const std::string_view value = tp.substr(cursor, static_cast<std::size_t>(len));
+            cursor += static_cast<std::size_t>(len);
+            if (id == 0x20) {
+                // max_datagram_frame_size (RFC 9221 §3)
+                std::size_t v_cursor = 0;
+                if (uint64_t v = 0; VarInt::decode(value, v_cursor, v)) {
+                    std::lock_guard lock(mtx_);
+                    peer_max_datagram_frame_size_ = v;
+                }
+            }
+        }
         return 1;
+    }
+
+    std::size_t QuicConnection::max_datagram_payload() const noexcept {
+        std::lock_guard lock(mtx_);
+        if (peer_max_datagram_frame_size_ == 0) return 0;
+        // short header (1 + dcid + 4-byte PN) + AEAD tag + frame type + 2-byte length
+        const std::size_t overhead = 1 + peer_cid_.length() + 4 + 16 + 1 + 2;
+        const std::size_t mtu = static_cast<std::size_t>(max_datagram_size_);
+        if (mtu <= overhead) return 0;
+        const std::size_t by_mtu = mtu - overhead;
+        const std::size_t by_peer = peer_max_datagram_frame_size_ > 3
+                                        ? static_cast<std::size_t>(peer_max_datagram_frame_size_ - 3)
+                                        : 0;
+        return (std::min)(by_mtu, by_peer);
+    }
+
+    bool QuicConnection::send_datagram(const std::string_view payload) {
+        OutboundCallback cb; {
+            std::lock_guard lock(mtx_);
+            if (state_ == ConnectionState::Closed || peer_max_datagram_frame_size_ == 0) return false;
+            if (payload.size() > max_datagram_payload()) return false;
+            const ProtectionKeys *keys = one_rtt_send_keys();
+            if (!keys) return false;
+
+            DatagramFrame df;
+            df.data = payload;
+            std::string frame_bytes;
+            serialize_frame(df, frame_bytes);
+
+            PacketHeader hdr;
+            hdr.is_long = false;
+            hdr.type = PacketType::OneRTT;
+            hdr.key_phase = (local_key_phase_ != 0);
+            hdr.dcid = peer_cid_;
+            hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
+
+            std::string packet;
+            if (!CryptoSuite::protect_packet(*keys, hdr, frame_bytes, packet)) return false;
+            // Tracked for congestion control and ACK accounting; retransmit_frame() ignores DATAGRAM frames,
+            // so a lost datagram stays lost (RFC 9221 §5.2). The tracked copy must own its bytes.
+            df.owned_data = std::make_shared<const std::string>(payload);
+            df.data = *df.owned_data;
+            track_sent_packet(PacketType::OneRTT, hdr.packet_number, packet.size(), {df});
+            pending_outbound_datagrams_.push_back(std::move(packet));
+            cb = on_outbound_;
+        }
+        if (cb) cb();
+        return true;
     }
 
     void QuicConnection::queue_crypto_frame(std::string_view data) {
@@ -1198,6 +1269,8 @@ namespace wavex::network::quic {
     void QuicConnection::handle_datagram(const std::string_view datagram) {
         refresh_idle_timer();
         std::vector<std::shared_ptr<QuicStream> > created_streams;
+        std::vector<std::string> received_datagrams;
+        DatagramCallback datagram_cb;
         OutboundCallback outbound_cb;
         StreamCreatedCallback stream_created_cb; {
             std::lock_guard lock(mtx_);
@@ -1416,11 +1489,20 @@ namespace wavex::network::quic {
 
             outbound_cb = on_outbound_;
             stream_created_cb = on_stream_created_;
+            if (!received_datagrams_.empty()) {
+                datagram_cb = on_datagram_;
+                received_datagrams.swap(received_datagrams_);
+            }
         }
 
         if (stream_created_cb) {
             for (const auto &s: created_streams) {
                 stream_created_cb(s);
+            }
+        }
+        if (datagram_cb) {
+            for (auto &d: received_datagrams) {
+                datagram_cb(std::move(d));
             }
         }
         if (outbound_cb) outbound_cb();
@@ -1433,6 +1515,16 @@ namespace wavex::network::quic {
                 using T = std::decay_t<T0>;
                 if constexpr (std::is_same_v<T, PingFrame>) {
                     // PING frames are ack-eliciting; coalesced ACK is handled at packet/datagram level
+                } else if constexpr (std::is_same_v<T, DatagramFrame>) {
+                    // RFC 9221 §3: DATAGRAM frames are only acceptable if we advertised support for them.
+                    if (local_max_datagram_frame_size_ == 0 || frame.data.size() > local_max_datagram_frame_size_) {
+                        close(TransportError::ProtocolViolation, "unexpected DATAGRAM frame");
+                        return;
+                    }
+                    constexpr std::size_t kMaxQueuedDatagrams = 1024; // bound per received UDP datagram burst
+                    if (received_datagrams_.size() < kMaxQueuedDatagrams) {
+                        received_datagrams_.emplace_back(frame.data);
+                    }
                 } else if constexpr (std::is_same_v<T, AckFrame>) {
                     on_ack_received(pkt_type, frame);
                 } else if constexpr (std::is_same_v<T, StreamFrame>) {
@@ -1851,6 +1943,24 @@ namespace wavex::network::quic {
         // SETTINGS_QPACK_BLOCKED_STREAMS (Identifier 0x07) = 0
         VarInt::encode(0x07, settings_payload);
         VarInt::encode(0, settings_payload);
+
+        // SETTINGS_ENABLE_CONNECT_PROTOCOL (0x08) = 1: extended CONNECT is accepted (RFC 9220 §3, used by
+        // WebSocket over HTTP/3 and WebTransport).
+        VarInt::encode(0x08, settings_payload);
+        VarInt::encode(1, settings_payload);
+
+        if (local_max_datagram_frame_size_ > 0) {
+            // SETTINGS_H3_DATAGRAM (0x33) = 1 (RFC 9297 §2.1.1); only with QUIC DATAGRAM negotiated.
+            VarInt::encode(0x33, settings_payload);
+            VarInt::encode(1, settings_payload);
+        }
+
+        // WebTransport over HTTP/3: SETTINGS_WEBTRANSPORT_MAX_SESSIONS (draft-ietf-webtrans-http3) and the
+        // draft-02 SETTINGS_ENABLE_WEBTRANSPORT that Chromium-based clients still require.
+        VarInt::encode(0xc671706aULL, settings_payload);
+        VarInt::encode(16, settings_payload);
+        VarInt::encode(0x2b603742ULL, settings_payload);
+        VarInt::encode(1, settings_payload);
 
         // Frame Header: Frame Type (0x04) followed by Payload Length
         VarInt::encode(0x04, control_stream_data);

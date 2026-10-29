@@ -74,6 +74,19 @@ namespace wavex::utils {
             return {buffer_.data() + read_offset_, to_view};
         }
 
+        /// Put bytes back in front of the unread data (e.g. after peeking at a stream's first bytes).
+        void prepend(const std::string_view chunk) {
+            if (chunk.empty()) return;
+            if (read_offset_ >= chunk.size() && read_offset_ <= buffer_.size()) {
+                read_offset_ -= chunk.size();
+                std::memcpy(buffer_.data() + read_offset_, chunk.data(), chunk.size());
+                return;
+            }
+            buffer_.erase(0, (std::min)(read_offset_, buffer_.size()));
+            read_offset_ = 0;
+            buffer_.insert(0, chunk.data(), chunk.size());
+        }
+
         void consume(const std::size_t bytes) noexcept {
             if (bytes == 0) return;
             const std::size_t to_consume = (std::min)(bytes, size());

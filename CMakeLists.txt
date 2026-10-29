@@ -89,7 +89,10 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 cmake_policy(SET CMP0168 NEW)
 
+# /bigobj: the heavily templated headers (Server<Codec, Router> instantiations, HTTP/2 session, WebSocket,
+# WebTransport) overflow MSVC's default 65,536-section object limit (C1128), most visibly in Server.cpp.
 add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
+add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/bigobj>)
 
 option(WAVEX_TEST "Build tests for the wavex library" OFF)
 option(WAVEX_TEST_TSAN "Build tests with Thread Sanitizer (TSan) only" OFF)
@@ -243,6 +246,10 @@ add_library(wavex
         src/wavex.cpp
         src/protos/protos.cpp
         src/protos/http/http3codec.cpp
+        src/protos/http/http3tunnel.cpp
+        src/protos/http/http2session.cpp
+        src/protos/websocket/WebSocket.cpp
+        src/protos/webtransport/WebTransport.cpp
         src/Base/Logger.cpp
         src/Base/Uri.cpp
         src/Base/Url.cpp
@@ -345,6 +352,11 @@ target_sources(wavex
         include/wavex/protos/http/http3codec.hpp
         include/wavex/protos/http/HttpRequest.hpp
         include/wavex/protos/http/HttpResponse.hpp
+        include/wavex/protos/http/http3tunnel.hpp
+        include/wavex/protos/http/http2session.hpp
+        include/wavex/protos/websocket/WebSocket.hpp
+        include/wavex/protos/webtransport/WebTransport.hpp
+        include/wavex/Network/AnyStream.hpp
         include/wavex/Network/QUIC.hpp
         include/wavex/Network/QUIC/QUIC.hpp
         include/wavex/Network/QUIC/QuicConstants.hpp
@@ -402,6 +414,9 @@ if (WAVEX_USE_MODULE)
             src/protos/http/http3codec.ixx
             src/protos/http/HttpRequest.ixx
             src/protos/http/HttpResponse.ixx
+            src/protos/websocket/WebSocket.ixx
+            src/protos/webtransport/WebTransport.ixx
+            src/Network/AnyStream.ixx
             src/Engine/Router.ixx
             src/Engine/HttpRouter.ixx
             src/Server/Server.ixx
@@ -626,10 +641,13 @@ if (WAVEX_TEST)
     wavex_add_test(wavex_async_fs_tests tests/test_async_fs.cpp)
     wavex_add_test(wavex_flat_map_tests tests/test_flat_map.cpp)
     wavex_add_test(wavex_request_arena_tests tests/test_request_arena.cpp)
+    wavex_add_test(wavex_websocket_tests tests/test_websocket.cpp)
+    wavex_add_test(wavex_http2_session_tests tests/test_http2_session.cpp)
     if (WAVEX_HAS_SSL)
         wavex_add_test(wavex_quic_tests tests/test_quic.cpp)
         wavex_add_test(wavex_qpack_tests tests/test_qpack.cpp)
         wavex_add_test(wavex_http3_tests tests/test_http3.cpp)
+        wavex_add_test(wavex_webtransport_tests tests/test_webtransport.cpp)
     endif ()
 
     # Unified CLI-driven Postman Dev Servers (HTTP/1.1 and HTTP/2)

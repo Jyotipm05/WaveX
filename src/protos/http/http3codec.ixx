@@ -11,6 +11,7 @@
 module;
 
 #include <wavex/protos/http/http3codec.hpp>
+#include <wavex/protos/http/http3tunnel.hpp>
 
 export module wavex:protos_http_http3codec;
 
@@ -29,6 +30,10 @@ export namespace wavex::protos::http {
         using http3::request;
         using http3::response;
         using http3::connection_context;
+        using http3::WEBTRANSPORT_BIDI_SIGNAL;
+        using http3::make_data_tunnel;
+        using http3::encode_tunnel_data_frame;
+        using http3::session_handler;
         using http3::parser;
         using http3::encoder;
         using http3::decoder;

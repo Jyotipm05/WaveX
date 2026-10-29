@@ -80,3 +80,22 @@ int main() {
 ---
 
 **See also:** [TLS guide](tls.md) · [Dev servers & cURL](../dev-servers.md) · [Architecture](../architecture.md)
+
+## How the HTTP/2 server handles a connection
+
+After the client preface, `protocol_traits<http2codec>::serve_connection` hands the connection to a
+multiplexed session (`protos/http/http2session.hpp`) instead of the one-request-at-a-time loop used by
+HTTP/1.1:
+
+- Requests on different streams run concurrently on the connection's worker; a slow handler no longer delays
+  the other streams.
+- Flow control follows RFC 9113: response DATA respects the client's stream and connection windows and the
+  peer's maximum frame size; request bodies are credited back with WINDOW_UPDATE.
+- PING, SETTINGS (acknowledged when received), RST_STREAM, CONTINUATION, trailers and GOAWAY are handled; the
+  server advertises at most 100 concurrent streams and refuses more with `REFUSED_STREAM`.
+- Streaming responses (`write_chunk`, `send_file`) are framed as DATA frames of their own stream.
+- On `exit()`, idle connections get GOAWAY; streams in flight finish (or are closed at the deadline).
+- Extended CONNECT is enabled (`SETTINGS_ENABLE_CONNECT_PROTOCOL`), which carries
+  [WebSocket over HTTP/2](websocket-and-webtransport.md).
+
+Every request still goes through the same routing, middleware, limits and error handling as on HTTP/1.1.

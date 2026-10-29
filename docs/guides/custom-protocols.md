@@ -200,6 +200,23 @@ namespace wavex::protos {
         // Optional: an extra transport listener (e.g. QUIC/UDP) started and stopped with the server.
         // template<typename Host>
         // static std::unique_ptr<wavex::network::TransportListener> make_transport_listener(Host &host);
+
+        // Optional: take the connection over after a response (a protocol switch, as WebSocket does after
+        // 101). wants_takeover() is checked after every response; take_over() then owns the connection until
+        // it returns, after which the server closes it. `unread` holds the bytes received past the request.
+        // template<typename Request, typename Response>
+        // static bool wants_takeover(const Request &req, const Response &res) noexcept;
+        // template<typename Stream, typename Request, typename Response>
+        // static asio::awaitable<void> take_over(std::shared_ptr<Stream> stream, Request &req,
+        //                                        Response &res, std::string unread);
+
+        // Optional: drive the whole connection yourself (e.g. a multiplexed protocol, as HTTP/2 does).
+        // `services` gives memory for request arenas, server state, limits, idle tracking and
+        // `services.handle(req, res, sink)`, the server's routing pipeline. Do not return while any task you
+        // spawned can still use `services`.
+        // template<typename Stream, typename Services>
+        // static asio::awaitable<void> serve_connection(std::shared_ptr<Stream> stream, std::string buffered,
+        //                                               Services &services);
     };
 
 } // namespace wavex::protos

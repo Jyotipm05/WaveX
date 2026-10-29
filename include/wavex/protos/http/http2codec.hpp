@@ -86,7 +86,8 @@ namespace wavex::protos::http {
             MAX_CONCURRENT_STREAMS = 0x3,
             INITIAL_WINDOW_SIZE = 0x4,
             MAX_FRAME_SIZE = 0x5,
-            MAX_HEADER_LIST_SIZE = 0x6
+            MAX_HEADER_LIST_SIZE = 0x6,
+            ENABLE_CONNECT_PROTOCOL = 0x8 ///< RFC 8441 §3: extended CONNECT (WebSocket over HTTP/2)
         };
 
         // ─── Frame Header (9 octets, RFC 7540 §4.1) ───────────────────────────────
@@ -665,6 +666,7 @@ namespace wavex::protos::http {
              */
             class decoder {
             public:
+                /// @param dt dynamic table reference
                 /// @param max_list_size Cap on the decoded header list, counted as RFC 7541 §4.1 entry sizes
                 ///        (name + value + 32 octets per field). 0 means unlimited.
                 explicit decoder(dynamic_table &dt, const std::size_t max_list_size = 0)
@@ -799,6 +801,7 @@ namespace wavex::protos::http {
             std::string scheme_storage{};
             std::string authority_storage{};
             std::string body_storage{};
+            std::string protocol{}; ///< `:protocol` of an extended CONNECT (RFC 8441), empty otherwise
             std::vector<std::pair<std::string, std::string> > headers_storage{};
             uint32_t stream_id{1}; ///< HTTP/2 Stream Identifier
             method method_type{method::UNKNOWN};
@@ -820,6 +823,7 @@ namespace wavex::protos::http {
                   scheme_storage(other.scheme_storage),
                   authority_storage(other.authority_storage),
                   body_storage(other.body_storage),
+                  protocol(other.protocol),
                   headers_storage(other.headers_storage),
                   stream_id(other.stream_id),
                   method_type(other.method_type) {
@@ -835,6 +839,7 @@ namespace wavex::protos::http {
                   scheme_storage(std::move(other.scheme_storage)),
                   authority_storage(std::move(other.authority_storage)),
                   body_storage(std::move(other.body_storage)),
+                  protocol(std::move(other.protocol)),
                   headers_storage(std::move(other.headers_storage)),
                   stream_id(other.stream_id),
                   method_type(other.method_type) {
@@ -851,6 +856,7 @@ namespace wavex::protos::http {
                     scheme_storage = other.scheme_storage;
                     authority_storage = other.authority_storage;
                     body_storage = other.body_storage;
+                    protocol = other.protocol;
                     headers_storage = other.headers_storage;
                     stream_id = other.stream_id;
                     method_type = other.method_type;
@@ -869,6 +875,7 @@ namespace wavex::protos::http {
                     scheme_storage = std::move(other.scheme_storage);
                     authority_storage = std::move(other.authority_storage);
                     body_storage = std::move(other.body_storage);
+                    protocol = std::move(other.protocol);
                     headers_storage = std::move(other.headers_storage);
                     stream_id = other.stream_id;
                     method_type = other.method_type;
@@ -1034,6 +1041,7 @@ namespace wavex::protos::http {
                 req.scheme_storage.clear();
                 req.authority_storage.clear();
                 req.body_storage.clear();
+                req.protocol.clear();
                 req.body = {};
 
                 // 1. Consume connection preface if present
@@ -1135,9 +1143,18 @@ namespace wavex::protos::http {
                         req.scheme_storage = std::move(value);
                     } else if (name == ":authority") {
                         req.authority_storage = std::move(value);
+                    } else if (name == ":protocol") {
+                        req.protocol = std::move(value); // RFC 8441 §4, validated below
                     } else {
                         req.headers_storage.emplace_back(std::move(name), std::move(value));
                     }
+                }
+
+                // RFC 8441 §4: `:protocol` only on CONNECT, which then carries :scheme, :path and :authority.
+                if (!req.protocol.empty() &&
+                    (req.method_type != method::CONNECT || req.target_storage.empty() ||
+                     req.scheme_storage.empty() || req.authority_storage.empty())) {
+                    return result::error;
                 }
 
                 req.target = req.target_storage;
@@ -1339,6 +1356,29 @@ namespace wavex::protos::http {
             /**
              * @brief Serialize an HTTP/2 response directly into a sink (HEADERS [+ DATA]).
              */
+            /**
+             * @brief Serialize only the HEADERS frame of a response.
+             * @param res reference to response
+             * @param end_stream Set END_STREAM (no body follows). Streaming responses and tunnels pass false.
+             */
+            static std::string serialize_headers(const response &res, const bool end_stream) {
+                const std::string header_block = hpack::encoder::encode_response_headers(
+                    res.status_code, res.headers);
+                frame_header h_hdr;
+                h_hdr.length = static_cast<uint32_t>(header_block.size());
+                h_hdr.type = frame_type::HEADERS;
+                h_hdr.flags = end_stream ? static_cast<uint8_t>(flags::END_HEADERS | flags::END_STREAM)
+                                         : flags::END_HEADERS;
+                h_hdr.stream_id = res.stream_id;
+                std::array<uint8_t, frame_header::HEADER_SIZE> h_bytes{};
+                pack_frame_header(h_hdr, h_bytes);
+                std::string out;
+                out.reserve(h_bytes.size() + header_block.size());
+                out.append(reinterpret_cast<const char *>(h_bytes.data()), h_bytes.size());
+                out.append(header_block);
+                return out;
+            }
+
             template<base::StringSink Out>
             static void serialize_into(const response &res, Out &out) {
                 // 1. HPACK encode headers

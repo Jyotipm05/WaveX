@@ -62,4 +62,5 @@ int main() {
 
 - Add middleware, parameters and 404 handling: [Routing guide](guides/routing-and-middleware.md)
 - Serve HTTP/2 or HTTP/3: [HTTP/2 & HTTP/3](guides/http2-and-http3.md)
+- Add WebSocket or WebTransport endpoints: [WebSocket & WebTransport](guides/websocket-and-webtransport.md)
 - Understand request lifetimes: [Memory & lifetimes](guides/memory-and-lifetimes.md)

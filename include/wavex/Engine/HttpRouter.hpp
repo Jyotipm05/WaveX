@@ -20,6 +20,10 @@
 #include <wavex/protos/http/HttpResponse.hpp>
 #include <wavex/protos/http/http2codec.hpp>
 #include <wavex/protos/http/http3codec.hpp>
+#include <wavex/protos/websocket/WebSocket.hpp>
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+#include <wavex/protos/webtransport/WebTransport.hpp>
+#endif
 
 #undef DELETE
 
@@ -346,6 +350,95 @@ namespace wavex::engine {
         template<typename... Handlers>
         void query(const std::string_view pattern, StaticChain<Handlers...> chain) {
             route(protos::http::method::QUERY, pattern, std::move(chain));
+        }
+
+        // ---------------------------------------------------------------
+        //  WebSocket endpoints (RFC 6455 / RFC 9220)
+        // ---------------------------------------------------------------
+
+        /// Session handler: runs after the handshake; `req` stays valid until it returns.
+        using WebSocketHandler = std::function<asio::awaitable<void>(
+            typename Base::RequestType &, std::shared_ptr<protos::websocket::connection>)>;
+
+        /**
+         * @brief Register a WebSocket endpoint.
+         *
+         * On HTTP/1.x routers this answers `GET` + `Upgrade: websocket` with `101 Switching Protocols`; on the
+         * HTTP/2 and HTTP/3 routers it answers an extended CONNECT with `:protocol = websocket` (RFC 8441,
+         * RFC 9220). Requests that
+         * are not a valid handshake get 400 / 426. Route middlewares run before the handshake, so they can
+         * authenticate and refuse the upgrade.
+         */
+        void websocket(const std::string_view pattern, WebSocketHandler h, protos::websocket::options opts = {}) {
+            websocket(pattern, {}, std::move(h), std::move(opts));
+        }
+
+        void websocket(const std::string_view pattern, std::vector<MiddlewareFn> mws, WebSocketHandler h,
+                       protos::websocket::options opts = {}) {
+            auto session = std::make_shared<WebSocketHandler>(std::move(h));
+            route(websocket_method(), pattern, std::move(mws),
+                  [session, opts = std::move(opts)](typename Base::RequestType &req,
+                                                    typename Base::ResponseType &res) -> asio::awaitable<void> {
+                      protos::websocket::accept(
+                          req, res,
+                          [session, &req](std::shared_ptr<protos::websocket::connection> ws)
+                      -> asio::awaitable<void> {
+                              co_await (*session)(req, std::move(ws));
+                          },
+                          opts);
+                      co_return;
+                  });
+        }
+
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+        // ---------------------------------------------------------------
+        //  WebTransport endpoints (HTTP/3 only)
+        // ---------------------------------------------------------------
+
+        /// Session handler: runs once the CONNECT is accepted; `req` stays valid until it returns.
+        using WebTransportHandler = std::function<asio::awaitable<void>(
+            typename Base::RequestType &, std::shared_ptr<protos::webtransport::session>)>;
+
+        /**
+         * @brief Register a WebTransport endpoint: an extended CONNECT with `:protocol = webtransport` on
+         *        `pattern` is answered 200 and handed to `h` as a session. HTTP/3 routers only.
+         */
+        void webtransport(const std::string_view pattern, WebTransportHandler h,
+                          protos::webtransport::options opts = {})
+            requires std::is_same_v<Codec, protos::http::http3codec> {
+            webtransport(pattern, {}, std::move(h), std::move(opts));
+        }
+
+        void webtransport(const std::string_view pattern, std::vector<MiddlewareFn> mws, WebTransportHandler h,
+                          protos::webtransport::options opts = {})
+            requires std::is_same_v<Codec, protos::http::http3codec> {
+            auto session = std::make_shared<WebTransportHandler>(std::move(h));
+            route(protos::http::method::CONNECT, pattern, std::move(mws),
+                  [session, opts](typename Base::RequestType &req,
+                                  typename Base::ResponseType &res) -> asio::awaitable<void> {
+                      protos::webtransport::accept(
+                          req, res,
+                          [session, &req](std::shared_ptr<protos::webtransport::session> wt)
+                      -> asio::awaitable<void> {
+                              co_await (*session)(req, std::move(wt));
+                          },
+                          opts);
+                      co_return;
+                  });
+        }
+#endif
+
+        /// The request method a WebSocket handshake arrives with on this router's protocol.
+        [[nodiscard]] static constexpr protos::http::method websocket_method() noexcept {
+            if constexpr (std::is_same_v<Codec, protos::http::http2codec>) {
+                return protos::http::method::CONNECT;
+            }
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+            if constexpr (std::is_same_v<Codec, protos::http::http3codec>) {
+                return protos::http::method::CONNECT;
+            }
+#endif
+            return protos::http::method::GET;
         }
     };
 

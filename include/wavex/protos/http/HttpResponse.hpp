@@ -34,6 +34,7 @@
 #include <wavex/Base/Response.hpp>
 #include <wavex/Base/MimeTypes.hpp>
 #include <wavex/Base/StringSink.hpp>
+#include <wavex/Network/AnyStream.hpp>
 #include <wavex/protos/http/http1codec.hpp>
 
 namespace wavex::protos::http {
@@ -124,6 +125,33 @@ namespace wavex::protos::http {
         /// Check if headers or chunked stream have already been flushed to the wire
         [[nodiscard]] bool is_headers_sent() const noexcept { return is_headers_sent_; }
 
+        /**
+         * @brief Connection takeover handler (protocol switch).
+         *
+         * Receives the connection's transport, type-erased, and any bytes the client already sent past the
+         * end of this request. It runs after the response has been written, on the connection's coroutine,
+         * while the request and this response are still alive. When it returns the server closes the
+         * connection (HTTP/1.1) or the stream (HTTP/3). Installed by protocol helpers such as
+         * `websocket::accept` and `webtransport::accept`; the server consults it only through
+         * `protocol_traits<Codec>::wants_takeover` / `take_over`.
+         */
+        using upgrade_fn = std::function<asio::awaitable<void>(network::AnyStream, std::string)>;
+
+        /// Hand the connection to `fn` once this response is on the wire (e.g. after `101 Switching Protocols`).
+        HttpResponse &upgrade(upgrade_fn fn) {
+            upgrade_ = std::move(fn);
+            return *this;
+        }
+
+        /// Whether a takeover handler is installed.
+        [[nodiscard]] bool has_upgrade() const noexcept { return static_cast<bool>(upgrade_); }
+
+        /// Remove and return the takeover handler (the server calls this exactly once).
+        [[nodiscard]] upgrade_fn take_upgrade() noexcept { return std::exchange(upgrade_, nullptr); }
+
+        /// Drop a previously installed takeover handler (e.g. when a later middleware rejects the request).
+        void cancel_upgrade() noexcept { upgrade_ = nullptr; }
+
         HttpResponse() = default;
 
         explicit HttpResponse(std::pmr::memory_resource *mr) noexcept
@@ -144,6 +172,7 @@ namespace wavex::protos::http {
             : Response(other, mr),
               socket_(other.socket_),
               write_sink_(other.write_sink_),
+              upgrade_(other.upgrade_),
               stream_id_(other.stream_id_),
               status_text_(other.status_text_),
               buffer_owner_(other.buffer_owner_),
@@ -238,6 +267,7 @@ namespace wavex::protos::http {
                 base::Response::operator=(other);
                 socket_ = other.socket_;
                 write_sink_ = other.write_sink_;
+                upgrade_ = other.upgrade_;
                 stream_id_ = other.stream_id_;
                 status_text_ = other.status_text_;
                 buffer_owner_ = other.buffer_owner_;
@@ -287,6 +317,7 @@ namespace wavex::protos::http {
             : base::Response(std::move(other), mr),
               socket_(other.socket_),
               write_sink_(std::move(other.write_sink_)),
+              upgrade_(std::move(other.upgrade_)),
               stream_id_(other.stream_id_),
               status_text_(other.status_text_),
               buffer_owner_(std::move(other.buffer_owner_)),
@@ -316,6 +347,7 @@ namespace wavex::protos::http {
                 base::Response::operator=(std::move(other));
                 socket_ = other.socket_;
                 write_sink_ = std::move(other.write_sink_);
+                upgrade_ = std::move(other.upgrade_);
                 stream_id_ = other.stream_id_;
                 status_text_ = other.status_text_;
                 buffer_owner_ = std::move(other.buffer_owner_);
@@ -569,8 +601,12 @@ namespace wavex::protos::http {
             const std::chrono::milliseconds timeout = std::chrono::milliseconds(15000)) {
             if (is_headers_sent_) co_return std::expected<void, std::error_code>{};
 
-            this->set("Transfer-Encoding", "chunked");
-            this->set("Connection", "keep-alive");
+            // Chunked transfer coding and connection headers exist only in HTTP/1.x; HTTP/2 and HTTP/3
+            // stream the body in DATA frames and treat these headers as malformed (RFC 9113 §8.2.2).
+            if (version_major_ < 2) {
+                this->set("Transfer-Encoding", "chunked");
+                this->set("Connection", "keep-alive");
+            }
 
             const std::string head = serialize_headers_only();
             is_headers_sent_ = true;
@@ -592,7 +628,7 @@ namespace wavex::protos::http {
 
             if (data.empty()) co_return std::expected<void, std::error_code>{};
 
-            const std::string chunk_bytes = encoder_type::format_chunk(data);
+            const std::string chunk_bytes = frame_body_chunk(data);
             co_return co_await async_write_with_timeout(chunk_bytes, timeout);
         }
 
@@ -609,8 +645,9 @@ namespace wavex::protos::http {
                 }
             }
 
-            const std::string_view term = encoder_type::format_terminal_chunk();
-            auto res = co_await async_write_with_timeout(term, timeout);
+            const std::string term = terminal_chunk();
+            auto res = term.empty() ? std::expected<void, std::error_code>{}
+                                    : co_await async_write_with_timeout(term, timeout);
             is_sent_ = true;
             co_return res;
         }
@@ -665,9 +702,23 @@ namespace wavex::protos::http {
                 }
 
                 while (const std::size_t n = co_await read_next_chunk(st)) {
-                    if (auto res = co_await async_write_with_timeout(std::string_view(st->buf.data(), n), timeout);
-                        !res) {
+                    // HTTP/1.x sends the bytes as they are (Content-Length framing); HTTP/2 and HTTP/3 wrap
+                    // them in DATA frames of this stream.
+                    const std::string_view raw(st->buf.data(), n);
+                    std::string framed;
+                    if constexpr (!std::is_same_v<Codec, wavex::protos::http::http1codec>) {
+                        framed = frame_body_chunk(raw);
+                    }
+                    const std::string_view out = framed.empty() ? raw : std::string_view(framed);
+                    if (auto res = co_await async_write_with_timeout(out, timeout); !res) {
                         co_return res;
+                    }
+                }
+                if constexpr (!std::is_same_v<Codec, wavex::protos::http::http1codec>) {
+                    if (const std::string term = terminal_chunk(); !term.empty()) {
+                        if (auto res = co_await async_write_with_timeout(term, timeout); !res) {
+                            co_return res;
+                        }
                     }
                 }
                 is_sent_ = true;
@@ -684,6 +735,26 @@ namespace wavex::protos::http {
         }
 
     private:
+        /// One streamed body chunk in the codec's framing: chunked coding (HTTP/1.1) or a DATA frame on this
+        /// response's stream (HTTP/2, HTTP/3).
+        [[nodiscard]] std::string frame_body_chunk(const std::string_view data) const {
+            if constexpr (requires { encoder_type::serialize_data_frame(uint32_t{}, data, false); }) {
+                return encoder_type::serialize_data_frame(stream_id_, data, false);
+            } else {
+                return encoder_type::format_chunk(data);
+            }
+        }
+
+        /// End of a streamed body: `0\r\n\r\n` (HTTP/1.1), an empty END_STREAM DATA frame on this stream
+        /// (HTTP/2), nothing (HTTP/3 ends with the QUIC stream FIN).
+        [[nodiscard]] std::string terminal_chunk() const {
+            if constexpr (requires { encoder_type::serialize_data_frame(uint32_t{}, std::string_view{}, true); }) {
+                return encoder_type::serialize_data_frame(stream_id_, {}, true);
+            } else {
+                return std::string(encoder_type::format_terminal_chunk());
+            }
+        }
+
         /// File handle + staging buffer for send_file(); shared so offloaded reads outlive the coroutine.
         struct FileSendState {
             utils::BinaryFile file;
@@ -774,11 +845,17 @@ namespace wavex::protos::http {
                 }
             }
 
-            return encoder_type::serialize(res);
+            // HTTP/2: the body follows in DATA frames, so the HEADERS frame must not end the stream.
+            if constexpr (requires { encoder_type::serialize_headers(res, false); }) {
+                return encoder_type::serialize_headers(res, false);
+            } else {
+                return encoder_type::serialize(res);
+            }
         }
 
         asio::ip::tcp::socket *socket_ = nullptr;
         write_sink_fn write_sink_{nullptr};
+        upgrade_fn upgrade_{nullptr};
         uint32_t stream_id_{1};
         std::string_view status_text_{"OK"};
         std::string buffer_owner_;

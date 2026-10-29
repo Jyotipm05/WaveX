@@ -256,6 +256,7 @@ namespace wavex::protos::http {
     inline std::string_view status_text_for(const unsigned int code) noexcept {
         switch (code) {
             case 100: return "Continue";
+            case 101: return "Switching Protocols";
             case 200: return "OK";
             case 201: return "Created";
             case 204: return "No Content";
@@ -272,8 +273,10 @@ namespace wavex::protos::http {
             case 405: return "Method Not Allowed";
             case 408: return "Request Timeout";
             case 413: return "Payload Too Large";
+            case 426: return "Upgrade Required";
             case 429: return "Too Many Requests";
             case 500: return "Internal Server Error";
+            case 501: return "Not Implemented";
             case 502: return "Bad Gateway";
             case 503: return "Service Unavailable";
             default: return "Unknown";

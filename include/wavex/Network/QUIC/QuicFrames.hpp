@@ -123,6 +123,13 @@ namespace wavex::network::quic {
     struct HandshakeDoneFrame {
     };
 
+    /// RFC 9221 DATAGRAM frame (types 0x30/0x31): unreliable, never retransmitted, not flow controlled.
+    struct DatagramFrame {
+        // ─── 2. Member Variables ────
+        std::string_view data{};
+        std::shared_ptr<const std::string> owned_data{};
+    };
+
     // ─── Frame Variant ────────────────────────────────────────────────────
     using Frame = std::variant<
         PaddingFrame,
@@ -140,7 +147,8 @@ namespace wavex::network::quic {
         StreamDataBlockedFrame,
         StreamsBlockedFrame,
         ConnectionCloseFrame,
-        HandshakeDoneFrame
+        HandshakeDoneFrame,
+        DatagramFrame
     >;
 
     // ─── Serialization/Parsing Interface ──────────────────────────────────

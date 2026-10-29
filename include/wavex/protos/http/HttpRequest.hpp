@@ -360,6 +360,7 @@ namespace wavex::protos::http {
             const size_t num_params = route_params.size();
             std::array<ParamSlice, 32> inline_slices{};
             // heap_slices must outlive `slices`; declaring it inside the else-block left a dangling pointer.
+            // ReSharper disable once CppTooWideScope
             std::vector<ParamSlice> heap_slices;
             ParamSlice *slices = nullptr;
             if (num_params <= inline_slices.size()) {
@@ -490,6 +491,18 @@ namespace wavex::protos::http {
         // ── Accessors (Deducing-This Implementations) ──────────────────────────
 
         [[nodiscard]] http::method method_type() const { return parsed_.method_type; }
+
+        /**
+         * @brief The `:protocol` pseudo-header of an extended CONNECT (RFC 8441 §4 / RFC 9220), e.g.
+         *        "websocket" or "webtransport". Empty for every other request and for protocols without it.
+         */
+        [[nodiscard]] std::string_view connect_protocol() const noexcept {
+            if constexpr (requires { parsed_.protocol; }) {
+                return parsed_.protocol;
+            } else {
+                return {};
+            }
+        }
 
         [[nodiscard]] std::string_view target() const {
             return raw_target_owned_.empty() ? parsed_.target : std::string_view(raw_target_owned_);

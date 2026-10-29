@@ -29,6 +29,7 @@ trigger: always_on
 
 ## 4. Response Lifecycle & Streaming Sinks
 - `res.send(...)` only commits the response payload in memory; never write directly to sockets in `send_impl()`.
+- On HTTP/1.1 and HTTP/3 the connection loop writes `res.serialize()`; on HTTP/2 the session's stream task hands it to the connection's writer queue (with flow control). Streaming output is always framed by the response for its own stream (`frame_body_chunk`, `terminal_chunk`).
 - Streaming (`start_chunked`, `write_chunk`, `end_chunked`, `send_file`) writes via the injected `write_sink_fn`.
 - `is_sent_` short-circuits middlewares. `Server` writes `res.serialize()` only if `!res.is_headers_sent()`.
 
@@ -63,15 +64,24 @@ trigger: always_on
 - **Transport Parameter Lifetime**: `SSL_set_quic_tls_transport_params` does not copy its buffer. The backing `std::string` must remain alive across the entire connection lifecycle (`local_transport_params_` in `QuicConnection`).
 - **QPACK Prefix & Framing**: Outgoing HTTP/3 responses begin with a 2-byte QPACK prefix (`0x00 0x00`) followed by indexed static entries, wrapped in RFC 9000 VarInt frames (`HEADERS 0x01` + `DATA 0x00`), and terminated by QUIC stream FIN.
 
-## 10. Test Integrity
+## 10. Protocol Switches (WebSocket, WebTransport)
+- Connection takeover is a policy decision: `HttpResponse::upgrade(fn)` + `protocol_traits<Codec>::wants_takeover(req, res)` (synchronous) / `take_over(stream_ptr, req, res, unread)`. Never branch on `101` or `CONNECT` in `ServerConnection.ipp` (see future-protocols-architecture.md §5).
+- Upgraded protocols run on `network::AnyStream` (shared ownership, erased transport); never template session code on `tcp::socket` / `ssl::stream` / `QuicStream`.
+- WebSocket sends are queued and written by one writer coroutine on the connection executor; never `async_write` the socket from a thread other than the connection's.
+- Peeking at a QUIC stream's first bytes (WebTransport demux) must put them back with `QuicStream::unread()` before the stream reaches the HTTP/3 request path.
+- HTTP/2 connections are driven by `protocol_traits<http2codec>::serve_connection` (multiplexed session); per-request work goes through `ConnectionServices::handle()` = `Server::process_request()`. Keep one pipeline for all protocols.
+- New pseudo-headers (e.g. `:protocol`) are accepted only where the RFC allows them (`:protocol` only with `CONNECT`, which then also needs `:scheme`, `:path`, `:authority`).
+
+## 11. Test Integrity
 - NEVER modify test assertions, expected output, or fixtures when debugging test failures without explicit user consent. Root causes must be fixed in framework implementations.
 
-## 11. Associated Rules
+## 12. Associated Rules
 - [toolchain-and-build.md](toolchain-and-build.md) (Compilers, Winsock, CMake)
 - [class-struct-layout.md](class-struct-layout.md) (Member packing & layout)
 - [asio-socket-lifecycle.md](asio-socket-lifecycle.md) (Sockets, coroutines, buffers)
 - [optional-dependency-guards.md](optional-dependency-guards.md) (Dependency header guards)
 - [never-config-cmake.md](never-config-cmake.md) (CMake configure safety)
 - [future-protocols-architecture.md](future-protocols-architecture.md) (Protocol extensions)
+- [websocket-takeover-http2-session.md](websocket-takeover-http2-session.md) (WebSocket, WebTransport, takeover, HTTP/2 session)
 - [quic-transport-invariants.md](quic-transport-invariants.md) (QUIC transport & crypto)
 - [test-invariants.md](test-invariants.md) (Unit tests, stream isolation, CTest flushing)

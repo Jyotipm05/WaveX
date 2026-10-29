@@ -26,17 +26,44 @@
 #include <string_view>
 #include <vector>
 #include <deque>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <type_traits>
 #include <array>
 #include <string>
 #include <utility>
 #include <algorithm>
 #include <asio/as_tuple.hpp>
+#include <asio/awaitable.hpp>
 #include <asio/buffer.hpp>
 #include <asio/use_awaitable.hpp>
 #include <wavex/protos/http/Methods.hpp>
 #include <wavex/protos/http/http1codec.hpp>
 #include <wavex/Network/QUIC/VarInt.hpp>
 #include <wavex/Base/StringSink.hpp>
+
+namespace wavex::network::quic {
+    class QuicStream;
+}
+
+namespace wavex::protos::http::http3 {
+    struct connection_context;
+}
+
+namespace wavex::protos::webtransport {
+    class session_registry;
+
+    /**
+     * @brief Route a WebTransport unidirectional stream (stream type 0x54) to its session.
+     *
+     * Defined in src/protos/webtransport/WebTransport.cpp. `buffered` holds the bytes already read after
+     * the stream type (the session ID varint may still be incomplete).
+     */
+    asio::awaitable<void> dispatch_unidirectional_stream(
+        std::shared_ptr<network::quic::QuicStream> stream, std::string buffered,
+        std::shared_ptr<http::http3::connection_context> ctx);
+} // namespace wavex::protos::webtransport
 
 namespace wavex::protos::http {
     namespace http3 {
@@ -73,14 +100,24 @@ namespace wavex::protos::http {
             CONTROL = 0x00,
             PUSH = 0x01,
             QPACK_ENCODER = 0x02,
-            QPACK_DECODER = 0x03
+            QPACK_DECODER = 0x03,
+            WEBTRANSPORT_STREAM = 0x54 ///< draft-ietf-webtrans-http3 §4.1 (unidirectional)
         };
+
+        /// First varint of a client bidirectional stream that carries WebTransport data instead of a request
+        /// (WT_STREAM, draft-ietf-webtrans-http3 §4.2).
+        inline constexpr uint64_t WEBTRANSPORT_BIDI_SIGNAL = 0x41;
 
         // ─── Settings Parameters (RFC 9114 §7.2.4.1) ──────────────────────────────
         enum class settings_parameter : uint64_t {
             QPACK_MAX_TABLE_CAPACITY = 0x01,
             MAX_FIELD_SECTION_SIZE = 0x06,
-            QPACK_BLOCKED_STREAMS = 0x07
+            QPACK_BLOCKED_STREAMS = 0x07,
+            ENABLE_CONNECT_PROTOCOL = 0x08,                 ///< RFC 9220 §3 (extended CONNECT)
+            H3_DATAGRAM = 0x33,                             ///< RFC 9297 §2.1.1
+            WEBTRANSPORT_MAX_SESSIONS = 0xc671706aULL,      ///< draft-ietf-webtrans-http3
+            ENABLE_WEBTRANSPORT_DRAFT02 = 0x2b603742ULL,    ///< draft-ietf-webtrans-http3-02 (Chromium)
+            H3_DATAGRAM_DRAFT04 = 0xffd277ULL               ///< pre-RFC 9297 H3_DATAGRAM codepoint
         };
 
         // ─── HTTP/3 Error Codes (RFC 9114 §8.1) ───────────────────────────────────
@@ -365,14 +402,20 @@ namespace wavex::protos::http {
         struct connection_context {
             // ─── 2. Member Variables (SECOND - Minimal Padding) ────────────────
             qpack::dynamic_table decode_table{};
+            /// WebTransport sessions on this connection; created on first use, guarded by extension_mtx.
+            std::shared_ptr<webtransport::session_registry> webtransport{};
+            std::mutex extension_mtx{};
             uint64_t max_field_section_size{65536};
             uint64_t peer_max_field_section_size{(std::numeric_limits<uint64_t>::max)()};
             uint64_t peer_qpack_max_table_capacity{0};
             uint64_t peer_qpack_blocked_streams{0};
             uint64_t goaway_stream_id{0};
+            uint64_t peer_webtransport_max_sessions{0};
             bool settings_sent{false};
             bool settings_received{false};
             bool goaway_received{false};
+            bool peer_enable_connect_protocol{false};
+            bool peer_h3_datagram{false};
         };
 
         // ─── HTTP/3 Messages ───────────────────────────────────────────────────────
@@ -410,6 +453,7 @@ namespace wavex::protos::http {
             std::string scheme_storage{};
             std::string authority_storage{};
             std::string body_storage{};
+            std::string protocol{}; ///< `:protocol` of an extended CONNECT (RFC 9220), empty otherwise
             std::vector<std::pair<std::string, std::string> > headers_storage{};
             parser_state state_{};
             uint64_t stream_id{0};
@@ -432,6 +476,7 @@ namespace wavex::protos::http {
                   scheme_storage(other.scheme_storage),
                   authority_storage(other.authority_storage),
                   body_storage(other.body_storage),
+                  protocol(other.protocol),
                   headers_storage(other.headers_storage),
                   state_(other.state_),
                   stream_id(other.stream_id),
@@ -448,6 +493,7 @@ namespace wavex::protos::http {
                   scheme_storage(std::move(other.scheme_storage)),
                   authority_storage(std::move(other.authority_storage)),
                   body_storage(std::move(other.body_storage)),
+                  protocol(std::move(other.protocol)),
                   headers_storage(std::move(other.headers_storage)),
                   state_(other.state_),
                   stream_id(other.stream_id),
@@ -465,6 +511,7 @@ namespace wavex::protos::http {
                     scheme_storage = other.scheme_storage;
                     authority_storage = other.authority_storage;
                     body_storage = other.body_storage;
+                    protocol = other.protocol;
                     headers_storage = other.headers_storage;
                     state_ = other.state_;
                     stream_id = other.stream_id;
@@ -484,6 +531,7 @@ namespace wavex::protos::http {
                     scheme_storage = std::move(other.scheme_storage);
                     authority_storage = std::move(other.authority_storage);
                     body_storage = std::move(other.body_storage);
+                    protocol = std::move(other.protocol);
                     headers_storage = std::move(other.headers_storage);
                     state_ = other.state_;
                     stream_id = other.stream_id;
@@ -825,6 +873,17 @@ namespace wavex::protos::http {
                                 } else if (id == 0x07) {
                                     // SETTINGS_QPACK_BLOCKED_STREAMS
                                     ctx->peer_qpack_blocked_streams = val;
+                                } else if (id == static_cast<uint64_t>(settings_parameter::ENABLE_CONNECT_PROTOCOL)) {
+                                    ctx->peer_enable_connect_protocol = (val == 1);
+                                } else if (id == static_cast<uint64_t>(settings_parameter::H3_DATAGRAM) ||
+                                           id == static_cast<uint64_t>(settings_parameter::H3_DATAGRAM_DRAFT04)) {
+                                    ctx->peer_h3_datagram = ctx->peer_h3_datagram || (val == 1);
+                                } else if (id == static_cast<uint64_t>(settings_parameter::WEBTRANSPORT_MAX_SESSIONS)) {
+                                    ctx->peer_webtransport_max_sessions = val;
+                                } else if (id == static_cast<uint64_t>(settings_parameter::ENABLE_WEBTRANSPORT_DRAFT02)) {
+                                    if (val == 1 && ctx->peer_webtransport_max_sessions == 0) {
+                                        ctx->peer_webtransport_max_sessions = 1;
+                                    }
                                 }
                             }
                             ctx->settings_received = true;
@@ -861,6 +920,19 @@ namespace wavex::protos::http {
                             asio::buffer(buf), asio::as_tuple(asio::use_awaitable));
                         if (ec || n == 0) break;
                         stream_buf.append(buf, n);
+                    }
+                } else if (stream_type == static_cast<uint64_t>(http3::stream_type::WEBTRANSPORT_STREAM)) {
+                    // WebTransport unidirectional stream: belongs to a session, not to HTTP/3.
+                    if constexpr (std::is_same_v<Stream, network::quic::QuicStream>) {
+                        co_await webtransport::dispatch_unidirectional_stream(
+                            std::move(stream), std::move(stream_buf), ctx);
+                        co_return;
+                    } else {
+                        while (stream->is_open()) {
+                            auto [ec, n] = co_await stream->async_read_some(
+                                asio::buffer(buf), asio::as_tuple(asio::use_awaitable));
+                            if (ec || n == 0) break;
+                        }
                     }
                 } else {
                     // QPACK Decoder Stream (0x03), and unknown / GREASE stream types which RFC 9114 §6.2

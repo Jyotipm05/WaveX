@@ -96,6 +96,11 @@ namespace wavex::network::quic {
                 out.append(f.reason_phrase);
             } else if constexpr (std::is_same_v<T, HandshakeDoneFrame>) {
                 VarInt::encode(static_cast<uint64_t>(FrameType::HandshakeDone), out);
+            } else if constexpr (std::is_same_v<T, DatagramFrame>) {
+                // Always the length-prefixed form (0x31) so further frames may follow in the packet.
+                VarInt::encode(static_cast<uint64_t>(FrameType::DatagramWithLength), out);
+                VarInt::encode(f.data.size(), out);
+                out.append(f.data);
             }
         }, frame);
     }
@@ -295,15 +300,21 @@ namespace wavex::network::quic {
             } else if (raw_type == 0x1e) {
                 out_frames.emplace_back(HandshakeDoneFrame{});
             } else if (raw_type == 0x30) {
-                // DATAGRAM without length (RFC 9221)
+                // DATAGRAM without length (RFC 9221 §4): extends to the end of the packet
+                DatagramFrame df;
+                df.data = payload.substr(cursor);
+                out_frames.emplace_back(std::move(df));
                 cursor = payload.size();
             } else if (raw_type == 0x31) {
-                // DATAGRAM with length (RFC 9221)
+                // DATAGRAM with length (RFC 9221 §4)
                 uint64_t dlen = 0;
                 if (!VarInt::decode(payload, cursor, dlen))
                     PARSE_FAIL("DATAGRAM decode dlen");
                 if (cursor + dlen > payload.size())
                     PARSE_FAIL("DATAGRAM dlen exceeds payload bounds");
+                DatagramFrame df;
+                df.data = payload.substr(cursor, static_cast<std::size_t>(dlen));
+                out_frames.emplace_back(std::move(df));
                 cursor += dlen;
             } else {
                 // RFC 9000 §12.4: an unknown frame type is a FRAME_ENCODING_ERROR. Returning success here

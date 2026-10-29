@@ -351,6 +351,15 @@ namespace wavex::protos::http::http3 {
                 encode_literal_with_name_ref(fields, 0, true, authority); // 0 = :authority
             }
 
+            // 4b. Extension pseudo-headers (e.g. `:protocol` of an extended CONNECT, RFC 9220) must precede
+            //     the regular fields (RFC 9114 §4.3).
+            for (const auto &[pseudo_name, pseudo_value]: headers) {
+                if (pseudo_name.starts_with(':') && pseudo_name != ":method" && pseudo_name != ":scheme" &&
+                    pseudo_name != ":path" && pseudo_name != ":authority") {
+                    encode_literal_new_name(fields, pseudo_name, pseudo_value);
+                }
+            }
+
             // 5. General Headers
             for (const auto &[raw_name, value]: headers) {
                 if (raw_name.starts_with(':')) continue;
@@ -785,6 +794,7 @@ namespace wavex::protos::http::http3 {
             req.scheme_storage.clear();
             req.authority_storage.clear();
             req.body_storage.clear();
+            req.protocol.clear();
             req.body = {};
             req.state_.reset();
         }
@@ -878,6 +888,7 @@ namespace wavex::protos::http::http3 {
                 bool has_path = false;
                 bool has_scheme = false;
                 bool has_authority = false;
+                bool has_protocol = false;
                 bool seen_regular_header = false;
 
                 for (auto &[name, val]: decoded) {
@@ -921,6 +932,14 @@ namespace wavex::protos::http::http3 {
                             }
                             has_authority = true;
                             req.authority_storage = std::move(val);
+                        } else if (name == ":protocol") {
+                            // Extended CONNECT (RFC 8441 §4, RFC 9220 §3): validated against :method below.
+                            if (has_protocol || val.empty()) {
+                                req.state_.reset();
+                                return result::error;
+                            }
+                            has_protocol = true;
+                            req.protocol = std::move(val);
                         } else {
                             req.state_.reset();
                             return result::error;
@@ -959,6 +978,13 @@ namespace wavex::protos::http::http3 {
                     req.state_.reset();
                     return result::error;
                 }
+                // RFC 8441 §4 / RFC 9220 §3: `:protocol` only on CONNECT, and an extended CONNECT carries the
+                // full set of :scheme, :path and :authority.
+                if (has_protocol && (req.method_type != method::CONNECT || !has_scheme || !has_path ||
+                                     !has_authority)) {
+                    req.state_.reset();
+                    return result::error;
+                }
                 if (has_path && req.target_storage.empty() && req.method_type != method::CONNECT) {
                     req.state_.reset();
                     return result::error;
@@ -967,6 +993,11 @@ namespace wavex::protos::http::http3 {
                 req.state_.headers_received = true;
                 cursor += hdr_bytes + hdr.length;
                 req.state_.cursor = cursor;
+                // RFC 9114 §4.4: after a CONNECT the stream is a tunnel. Its DATA frames are not a request
+                // body; leave them unconsumed for whoever takes the stream over (WebSocket, WebTransport).
+                if (req.method_type == method::CONNECT) {
+                    break;
+                }
             } else if (hdr.type == static_cast<uint64_t>(frame_type::SETTINGS) ||
                        hdr.type == static_cast<uint64_t>(frame_type::CANCEL_PUSH) ||
                        hdr.type == static_cast<uint64_t>(frame_type::GOAWAY) ||
@@ -1258,12 +1289,18 @@ namespace wavex::protos::http::http3 {
     }
 
     std::string encoder::serialize_request(const request &req, const qpack::dynamic_table *dt) {
+        std::vector<header> extended;
+        if (!req.protocol.empty()) {
+            extended.reserve(req.headers.size() + 1);
+            extended.emplace_back(":protocol", req.protocol);
+            extended.insert(extended.end(), req.headers.begin(), req.headers.end());
+        }
         const std::string header_block = qpack::encoder::encode_request_headers(
             req.method_type,
             req.target,
             req.scheme,
             req.authority,
-            req.headers,
+            req.protocol.empty() ? req.headers : extended,
             dt
         );
 

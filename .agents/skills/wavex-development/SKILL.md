@@ -111,7 +111,21 @@ This skill provides essential domain context for developing, extending, and debu
     - `Multipart.hpp` (`wavex:utils_multipart`): Complete RFC 7578 multipart/form-data parser, builder, and disk
       spooler (`MultipartFormData`, `MultipartLimits`, `UploadedFile`, `FormField`).
 
-8. **Client Subsystem (`include/wavex/Client/`)**:
+8. **Real-Time Protocols (`include/wavex/protos/websocket/`, `include/wavex/protos/webtransport/`)**:
+    - `websocket/WebSocket.hpp`, `src/protos/websocket/WebSocket.cpp`: RFC 6455 `codec`, handshake helpers
+      (`compute_accept_key`, built-in SHA-1/base64), `connection` (session with queued thread-safe sends, auto-pong,
+      close handshake, UTF-8 validation) and `accept()`. `HttpRouter::websocket()` (GET on HTTP/1.x, extended
+      CONNECT on HTTP/3 per RFC 9220).
+    - `webtransport/WebTransport.hpp`, `src/protos/webtransport/WebTransport.cpp` (SSL builds): `session`, `stream`,
+      `session_registry`, capsules, `dispatch_bidirectional_stream()` / `dispatch_unidirectional_stream()`,
+      `accept()`. `Http3Router::webtransport()`, `ComposedHttpServer::webtransport()` / `websocket()`.
+    - `protos/http/http3tunnel.hpp`, `src/protos/http/http3tunnel.cpp`: DATA-frame tunnel over an extended CONNECT stream.
+    - `Network/AnyStream.hpp`: type-erased shared-ownership byte stream handed to protocol-switch handlers.
+    - `protos/http/http2session.hpp`, `src/protos/http/http2session.cpp`: multiplexed HTTP/2 server session (concurrent
+      streams, flow control, CONTINUATION, GOAWAY, RFC 8441 tunnels), entered through
+      `protocol_traits<http2codec>::serve_connection` with `Server::ConnectionServices`.
+
+9. **Client Subsystem (`include/wavex/Client/`)**:
     - `HttpClient.hpp`: Async coroutine client supporting HTTP/1.1 & HTTP/2, plain TCP & TLS 1.3, fluent query builders,
       JSON, binary bodies, multipart/form-data uploads (`add_field`, `add_file`, `add_file_from_path`), payload
       compression (`compress`), response decompression (`decompressed_body`), and response saving (`save_to_file`).
@@ -156,10 +170,12 @@ This skill provides essential domain context for developing, extending, and debu
     - Protocol advertisement headers (e.g. RFC 9114 `Alt-Svc: h3=":4433"; ma=86400`) must be injected exclusively via `protocol_traits<Codec>::prepare_response(...)`.
     - Multi-protocol concurrency (running HTTP/1.1 & HTTP/2 over TCP alongside HTTP/3 over QUIC on the same port) must be managed exclusively through `ComposedHttpServer`.
 
-8. **Future Protocols (GraphQL, WebSockets)**:
+8. **Future Protocols (GraphQL) & Protocol Switches**:
     - Refer to `.agents/rules/future-protocols-architecture.md` for architectural blueprints.
-    - Native HTTP/3 (RFC 9114, RFC 9204) over QUIC (RFC 9000, RFC 9001) is implemented (Beta; see `docs/components.md`).
-    - Maintain the 3-seam architecture so remaining future protocols (GraphQL, WebSockets) integrate seamlessly when scheduled.
+    - Native HTTP/3 (RFC 9114, RFC 9204) over QUIC (RFC 9000, RFC 9001), WebSocket (RFC 6455 / RFC 9220) and
+      WebTransport over HTTP/3 are implemented (Beta; see `docs/components.md`).
+    - Protocol switches use `res.upgrade(fn)` + `protocol_traits<Codec>::wants_takeover` / `take_over`; GraphQL remains
+      future work.
 
 9. **`string_view` Lifetime Safety Contract**:
     - `req.param(name)`, `req.query[key]`, and `res.get_body()` return `std::string_view` that is valid only within the
@@ -347,11 +363,16 @@ This skill provides essential domain context for developing, extending, and debu
     - Always invoke `OPENSSL_cleanse` on key buffers upon destruction or retirement during key phase transitions.
     - Short header packets must evaluate the Key Phase bit (`0x04`) and trigger HKDF key updates without dropping packets.
 
----
+46. **Protocol Takeover, WebSocket, WebTransport & HTTP/2 Session (items 46-53)**:
+    - Details in [references/takeover-websocket-http2-session.md](references/takeover-websocket-http2-session.md). Key rules: the kernel
+      never tests for `101`/`CONNECT`/protocol names (policy `wants_takeover`/`take_over` only); HTTP/2 is served by `http2::server_session`
+      via `serve_connection`, never the sequential loop; WebSocket writes go through one writer coroutine; streamed responses frame per codec.
+
 
 ## Detailed Reference Guides
 
 - [QUIC Transport & Reliability Architecture](references/quic-transport-and-reliability.md): Loss detection (RFC 9002), PTO timers, stream reassembly by offset, and handshake state machine gating.
 - [HTTP/3 & QPACK Architecture](references/http3-and-qpack-architecture.md): Binary framing, resumable request parsing, strict RFC 9114 validation, QPACK table indexing, and out-of-line compilation.
 - [3-Seam Architecture & Protocol Composition](references/three-seam-architecture.md): Transport, Codec, and Policy seams, protocol leakage prevention, and `ComposedHttpServer`.
+- [Takeover, WebSocket, WebTransport & HTTP/2 Session](references/takeover-websocket-http2-session.md): Policy-driven protocol switches, WebSocket write serialization, QUIC DATAGRAM/peek rules, multiplexed HTTP/2 session, per-codec response framing.
 - [Testing & Concurrency Gotchas](references/testing-and-debugging-gotchas.md): Asio timers in unit tests, mutex unlocking before `co_await`, and `weak_ptr` callback lifetime rules.
