@@ -96,6 +96,7 @@ add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/bigobj>)
 
 option(WAVEX_TEST "Build tests for the wavex library" OFF)
 option(WAVEX_TEST_TSAN "Build tests with Thread Sanitizer (TSan) only" OFF)
+option(WAVEX_TEST_PCH "Share one precompiled <wavex/wavex.hpp> across the tests (GCC/Clang, no modules)" ON)
 option(WAVEX_TEST_ASAN "Build tests with Address + UB + Leak Sanitizers (ASan+UBSan+LSan)" OFF)
 
 if (MSVC)
@@ -104,6 +105,12 @@ else ()
     set(WAVEX_USE_MODULE_DEFAULT OFF)
 endif ()
 option(WAVEX_USE_MODULE "Build and export C++20 modules for WaveX" ${WAVEX_USE_MODULE_DEFAULT})
+
+# Without modules there is nothing for CMake's per-file dependency scan to find. Leaving it on (the default for
+# C++20 and later) runs a scan step for every source file and, with Clang, hard-requires clang-scan-deps.
+if (NOT WAVEX_USE_MODULE)
+    set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
+endif ()
 
 # TSan and ASan/UBSan are mutually exclusive — the runtimes conflict.
 if (WAVEX_TEST_TSAN AND WAVEX_TEST_ASAN)
@@ -589,10 +596,24 @@ if (WAVEX_TEST)
     # Helper: register a test executable, linking against wavex.
     # Sanitizer flags are inherited transitively via PUBLIC on wavex above.
     # -----------------------------------------------------------------------
+    # Every test includes <wavex/wavex.hpp>; parsing it dominates each test's compile time. One precompiled
+    # copy is built by wavex_test_pch and reused by every test whose compile flags match (no per-test DEFINES).
+    # Skipped for modules and MSVC, where the flags/PCH rules differ and the modules are imported instead.
+    if (WAVEX_TEST_PCH AND NOT WAVEX_USE_MODULE AND NOT MSVC)
+        file(WRITE "${CMAKE_BINARY_DIR}/wavex_test_pch.cpp" "// precompiled header donor for the tests\n")
+        add_library(wavex_test_pch STATIC "${CMAKE_BINARY_DIR}/wavex_test_pch.cpp")
+        target_link_libraries(wavex_test_pch PRIVATE wavex)
+        target_compile_options(wavex_test_pch PRIVATE -UNDEBUG)
+        target_precompile_headers(wavex_test_pch PRIVATE <wavex/wavex.hpp>)
+    endif ()
+
     function(wavex_add_test test_name source)
         cmake_parse_arguments(ARG "" "" "DEFINES" ${ARGN})
         add_executable(${test_name} ${source})
         target_link_libraries(${test_name} PRIVATE wavex)
+        if (TARGET wavex_test_pch AND NOT ARG_DEFINES)
+            target_precompile_headers(${test_name} REUSE_FROM wavex_test_pch)
+        endif ()
         # The tests are plain assert()-based and some asserts wrap the call under test, so they must never be
         # compiled out: undo the -DNDEBUG that Release/RelWithDebInfo add.
         target_compile_options(${test_name} PRIVATE $<IF:$<CXX_COMPILER_ID:MSVC>,/UNDEBUG,-UNDEBUG>)

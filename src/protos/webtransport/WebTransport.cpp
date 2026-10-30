@@ -208,7 +208,10 @@ namespace wavex::protos::webtransport {
 
     // ─── Session ─────────────────────────────────────────────────────────────
     session::session(const uint64_t id, std::shared_ptr<QuicStream> connect_stream, network::AnyStream capsule_stream,
-                     std::shared_ptr<QuicConnection> conn, std::shared_ptr<session_registry> registry,
+                     // ReSharper disable once CppPassValueParameterByConstReference
+                     std::shared_ptr<QuicConnection> conn,
+                     // ReSharper disable once CppPassValueParameterByConstReference
+                     std::shared_ptr<session_registry> registry,
                      const options &opts)
         : connect_stream_(std::move(connect_stream)),
           conn_(conn),
@@ -269,10 +272,8 @@ namespace wavex::protos::webtransport {
         VarInt::encode(kBidiStreamSignal, header);
         VarInt::encode(id_, header);
         std::ignore = quic->write_outbound(header, false);
-        auto s = std::make_shared<stream>(std::move(quic), std::string{}, id_, true, false); {
-            std::lock_guard lock(mtx_);
-            streams_.push_back(s);
-        }
+        auto s = std::make_shared<stream>(std::move(quic), std::string{}, id_, true, false);
+        track_stream(s);
         return s;
     }
 
@@ -285,14 +286,12 @@ namespace wavex::protos::webtransport {
         VarInt::encode(kUniStreamType, header);
         VarInt::encode(id_, header);
         std::ignore = quic->write_outbound(header, false);
-        auto s = std::make_shared<stream>(std::move(quic), std::string{}, id_, false, false); {
-            std::lock_guard lock(mtx_);
-            streams_.push_back(s);
-        }
+        auto s = std::make_shared<stream>(std::move(quic), std::string{}, id_, false, false);
+        track_stream(s);
         return s;
     }
 
-    bool session::send_datagram(const std::string_view payload) {
+    bool session::send_datagram(const std::string_view payload) const {
         if (is_closed()) return false;
         const auto conn = conn_.lock();
         if (!conn) return false;
@@ -316,7 +315,7 @@ namespace wavex::protos::webtransport {
         terminate(code, reason, true);
     }
 
-    void session::drain() {
+    void session::drain() const {
         if (is_closed() || !connect_stream_) return;
         const std::string frame = http::http3::encode_tunnel_data_frame(capsule::encode(kCapsuleDrainSession, {}));
         std::ignore = connect_stream_->write_outbound(frame, false);
@@ -356,6 +355,23 @@ namespace wavex::protos::webtransport {
         if (const auto reg = registry_.lock()) reg->remove(id_);
     }
 
+    void session::track_stream(const std::shared_ptr<stream> &s) {
+        std::lock_guard lock(mtx_);
+        // Sweep dead entries only when the list has doubled since the last sweep: amortized O(1) per stream
+        // (sweeping on every insert made accepting n streams O(n^2)), and the list, whose expired weak_ptrs keep
+        // their stream's memory block alive, stays within twice the number of live streams.
+        if (streams_.size() >= streams_sweep_at_) {
+            std::erase_if(streams_, [](const std::weak_ptr<stream> &w) { return w.expired(); });
+            streams_sweep_at_ = (std::max)(kMinSweepThreshold, streams_.size() * 2);
+        }
+        streams_.push_back(s);
+    }
+
+    std::size_t session::tracked_stream_count() const {
+        std::lock_guard lock(mtx_);
+        return streams_.size();
+    }
+
     void session::deliver_stream(std::shared_ptr<QuicStream> quic, std::string pending, const bool bidirectional) {
         if (!quic) return;
         auto s = std::make_shared<stream>(quic, std::move(pending), id_, bidirectional, true);
@@ -363,12 +379,7 @@ namespace wavex::protos::webtransport {
             s->close();
             return;
         }
-        {
-            std::lock_guard lock(mtx_);
-            // Forget streams that are already gone so the list does not grow for the session's lifetime.
-            std::erase_if(streams_, [](const std::weak_ptr<stream> &w) { return w.expired(); });
-            streams_.push_back(s);
-        }
+        track_stream(s);
         auto &channel = bidirectional ? *incoming_bidi_ : *incoming_uni_;
         if (!channel.try_send(std::error_code{}, s)) {
             // Session closing, or the application stopped accepting: refuse the stream.
@@ -376,7 +387,7 @@ namespace wavex::protos::webtransport {
         }
     }
 
-    void session::deliver_datagram(std::string payload) {
+    void session::deliver_datagram(std::string payload) const {
         if (is_closed()) return;
         // Datagrams are unreliable: when the application falls behind, newer ones are dropped.
         std::ignore = datagrams_->try_send(std::error_code{}, std::move(payload));
@@ -520,7 +531,7 @@ namespace wavex::protos::webtransport {
         target->deliver_stream(std::move(quic), std::move(buffered), bidirectional);
     }
 
-    void session_registry::dispatch_datagram(std::string datagram) {
+    void session_registry::dispatch_datagram(std::string datagram) const {
         std::size_t cursor = 0;
         uint64_t quarter_id = 0;
         if (!VarInt::decode(datagram, cursor, quarter_id)) return;
@@ -539,15 +550,10 @@ namespace wavex::protos::webtransport {
 
     std::shared_ptr<http::http3::connection_context> http3_context_for(const std::shared_ptr<QuicConnection> &conn) {
         if (!conn) return nullptr;
-        // Several streams of one connection may get here at once; create the context exactly once.
-        static std::mutex creation_mtx;
-        std::lock_guard lock(creation_mtx);
-        auto ctx = std::static_pointer_cast<http::http3::connection_context>(conn->user_context());
-        if (!ctx) {
-            ctx = std::make_shared<http::http3::connection_context>();
-            conn->set_user_context(ctx);
-        }
-        return ctx;
+        // Several streams of one connection may get here at once; the connection creates the context exactly once
+        // under its own lock (no process-wide mutex shared by unrelated connections).
+        return std::static_pointer_cast<http::http3::connection_context>(conn->user_context_or_create(
+            [] { return std::make_shared<http::http3::connection_context>(); }));
     }
 
     // ─── Stream Demultiplexing ───────────────────────────────────────────────

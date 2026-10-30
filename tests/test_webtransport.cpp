@@ -336,6 +336,11 @@ void test_stream_demux_and_registry() {
     check(out_bidi && (out_bidi->id() & 0x03) == 0x01 && out_uni && (out_uni->id() & 0x03) == 0x03,
           "server-initiated bidirectional / unidirectional streams");
 
+    // Short-lived streams must not pile up in the session's bookkeeping (a dead weak_ptr still pins its block).
+    for (int i = 0; i < 300; ++i) std::ignore = sess->open_unidirectional_stream(); // each handle is dropped at once
+    check(sess->tracked_stream_count() <= 70, "dropped streams are swept, the tracking list stays bounded");
+    check(out_bidi->id() != 0 && out_uni->id() != 0, "live streams survive the sweeps");
+
     // Peer closes the session with a CLOSE capsule on the CONNECT stream.
     s0->push_inbound(h3::encode_tunnel_data_frame(wt::capsule::encode_close_session(42, "done")), false);
     std::shared_ptr<wt::stream> after_close = std::make_shared<wt::stream>(nullptr, "", 0, true, true);

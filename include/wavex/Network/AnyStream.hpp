@@ -84,6 +84,15 @@ namespace wavex::network {
         explicit AnyStream(std::shared_ptr<operations> ops) noexcept : ops_(std::move(ops)) {
         }
 
+    private:
+        /// Awaitable that completes immediately with `value` (the invalid-handle path).
+        template<typename T>
+        static asio::awaitable<T> failed(T value) {
+            co_return value;
+        }
+
+    public:
+
         ~AnyStream() = default;
 
         AnyStream(const AnyStream &) = default;
@@ -116,15 +125,18 @@ namespace wavex::network {
         [[nodiscard]] const std::shared_ptr<operations> &ops() const noexcept { return ops_; }
 
         /// Read at least one byte. `{eof, 0}` signals an orderly end of the peer's byte stream.
-        [[nodiscard]] asio::awaitable<read_result> read_some(const asio::mutable_buffer buffer) const {
-            if (!ops_ || !ops_->read_some) co_return read_result{asio::error::bad_descriptor, 0};
-            co_return co_await ops_->read_some(buffer);
+        /// Not a coroutine itself: the erased operation's awaitable is handed straight to the caller, so a read
+        /// costs one coroutine frame instead of two. The awaitable owns everything it needs (it does not refer
+        /// back to this handle), so the handle may be destroyed before the awaitable is awaited.
+        [[nodiscard]] asio::awaitable<read_result> read_some(const asio::mutable_buffer &buffer) const {
+            if (ops_ && ops_->read_some) return ops_->read_some(buffer);
+            return failed<read_result>(read_result{asio::error::bad_descriptor, 0});
         }
 
         /// Write the whole buffer. The caller must keep the bytes alive until the awaitable completes.
-        [[nodiscard]] asio::awaitable<std::error_code> write(const asio::const_buffer buffer) const {
-            if (!ops_ || !ops_->write) co_return std::error_code(asio::error::bad_descriptor);
-            co_return co_await ops_->write(buffer);
+        [[nodiscard]] asio::awaitable<std::error_code> write(const asio::const_buffer &buffer) const {
+            if (ops_ && ops_->write) return ops_->write(buffer);
+            return failed<std::error_code>(std::error_code(asio::error::bad_descriptor));
         }
 
         void shutdown_send() const {

@@ -399,6 +399,16 @@ namespace wavex::network::quic {
             user_context_ = std::move(ctx);
         }
 
+        /// Return the user context, creating it with `make()` if none is set yet. Check and set happen under the
+        /// connection's own lock, so concurrent callers on one connection agree on a single context without a
+        /// process-wide mutex.
+        template<typename Factory>
+        [[nodiscard]] auto user_context_or_create(Factory &&make) -> std::shared_ptr<void> {
+            std::scoped_lock lock(mtx_);
+            if (!user_context_) user_context_ = std::forward<Factory>(make)();
+            return user_context_;
+        }
+
         [[nodiscard]] auto user_context() const noexcept -> std::shared_ptr<void> {
             std::scoped_lock lock(mtx_);
             return user_context_;

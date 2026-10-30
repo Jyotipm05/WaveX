@@ -29,7 +29,9 @@
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
 
 #include <atomic>
+#if defined(__MINGW32__) || defined(__clang__) || defined(__GNUC__)
 #include <cstddef>
+#endif
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -191,6 +193,10 @@ namespace wavex::protos::webtransport {
         std::unique_ptr<datagram_channel> datagrams_;
         mutable std::mutex mtx_;               ///< guards close_reason_ and streams_
         std::vector<std::weak_ptr<stream> > streams_;
+        static constexpr std::size_t kMinSweepThreshold = 64;
+        std::size_t streams_sweep_at_{kMinSweepThreshold}; ///< size at which streams_ is next swept for dead entries
+
+        void track_stream(const std::shared_ptr<stream> &s);
         std::string close_reason_;
         std::string path_;
         std::string authority_;
@@ -239,7 +245,7 @@ namespace wavex::protos::webtransport {
         [[nodiscard]] asio::awaitable<std::optional<std::string> > receive_datagram();
 
         /// Send an unreliable datagram (false if it cannot be sent: too large, not negotiated, closed).
-        bool send_datagram(std::string_view payload);
+        bool send_datagram(std::string_view payload) const;
 
         /// Largest datagram payload send_datagram() accepts right now.
         [[nodiscard]] std::size_t max_datagram_size() const noexcept;
@@ -248,7 +254,7 @@ namespace wavex::protos::webtransport {
         void close(uint32_t code = 0, std::string_view reason = {});
 
         /// Ask the peer to wind the session down (DRAIN_WEBTRANSPORT_SESSION capsule).
-        void drain();
+        void drain() const;
 
         [[nodiscard]] bool is_closed() const noexcept { return closed_.load(std::memory_order_acquire); }
         [[nodiscard]] bool drain_requested() const noexcept { return drain_requested_.load(std::memory_order_acquire); }
@@ -257,6 +263,9 @@ namespace wavex::protos::webtransport {
         [[nodiscard]] uint32_t close_code() const noexcept { return close_code_.load(std::memory_order_acquire); }
 
         [[nodiscard]] std::string close_reason() const;
+
+        /// Streams the session still tracks for closing (live ones plus not-yet-swept dead entries). Diagnostics.
+        [[nodiscard]] std::size_t tracked_stream_count() const;
 
         [[nodiscard]] asio::any_io_executor get_executor() const noexcept { return executor_; }
 
@@ -267,7 +276,7 @@ namespace wavex::protos::webtransport {
         void deliver_stream(std::shared_ptr<network::quic::QuicStream> quic, std::string pending, bool bidirectional);
 
         /// Hand an incoming datagram payload to the application (any thread).
-        void deliver_datagram(std::string payload);
+        void deliver_datagram(std::string payload) const;
 
         /// Read capsules from the CONNECT stream until the session ends.
         [[nodiscard]] asio::awaitable<void> run_capsule_reader();
@@ -333,7 +342,7 @@ namespace wavex::protos::webtransport {
                              std::string buffered, bool bidirectional);
 
         /// Parse an HTTP datagram (quarter stream ID + payload, RFC 9297 §2.1) and deliver it.
-        void dispatch_datagram(std::string datagram);
+        void dispatch_datagram(std::string datagram) const;
     };
 
     /// The registry of the HTTP/3 connection context (created on first use).

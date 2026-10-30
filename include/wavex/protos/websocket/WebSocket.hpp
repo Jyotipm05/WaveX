@@ -29,7 +29,6 @@
 #include <cstddef>
 #endif
 #include <cstdint>
-#include <deque>
 #include <expected>
 #include <functional>
 #include <memory>
@@ -127,6 +126,11 @@ namespace wavex::protos::websocket {
         /// Decode a frame header from the front of `in`. Does not require the payload to be present.
         [[nodiscard]] static parse_result parse_header(std::string_view in, frame_header &hdr) noexcept;
 
+        /// Exact wire size of a frame with `payload` bytes (header + optional masking key + payload).
+        [[nodiscard]] static constexpr std::size_t frame_size(const std::size_t payload, const bool masked) noexcept {
+            return 2 + (payload < 126 ? 0 : payload <= 0xFFFF ? 2 : 8) + (masked ? 4 : 0) + payload;
+        }
+
         /// Append one encoded frame. `mask` is required for client-to-server frames (RFC 6455 §5.3).
         static void encode_frame(std::string &out, opcode op, std::string_view payload, bool fin = true,
                                  std::optional<uint32_t> mask = std::nullopt);
@@ -214,8 +218,18 @@ namespace wavex::protos::websocket {
         std::string message_;              ///< fragments of the message being reassembled
         std::string subprotocol_;
         std::string close_reason_;
+        /// Shared with a read-timeout timer handler, which may fire after the read that armed it has finished.
+        /// `generation` identifies the armed read; a handler from an earlier read finds it changed and does nothing.
+        struct timeout_state {
+            std::atomic<uint64_t> generation{0};
+            std::atomic<bool> fired{false};
+        };
+        std::shared_ptr<timeout_state> timeout_;   ///< created by the first read with options::read_timeout set
         mutable std::mutex write_mtx_;     ///< guards outbox_, buffered_, writer_active_, write_failed_
-        std::deque<std::string> outbox_;
+        /// Outgoing frames, appended in wire format. The writer swaps it with `writing_`, so the two buffers keep
+        /// their capacity and a send costs no allocation once they have grown (no per-frame string, no deque node).
+        std::string outbox_;
+        std::string writing_;              ///< bytes being written; touched only by the writer coroutine
         std::size_t rbuf_consumed_{0};
         std::size_t buffered_{0};
         std::atomic<uint16_t> close_code_{close_code::no_status};
@@ -309,7 +323,8 @@ namespace wavex::protos::websocket {
     private:
         bool enqueue(opcode op, std::string_view payload, bool is_close = false);
 
-        [[nodiscard]] asio::awaitable<void> drain();
+        /// The writer: runs on the connection executor until the outbox is empty. Owns `self` for its lifetime.
+        [[nodiscard]] static asio::awaitable<void> drain(std::shared_ptr<connection> self);
 
         /// Send a close with `code` (if none was sent) and stop reading; returns `err` for read().
         std::error_code fail(uint16_t code, error err);

@@ -26,6 +26,7 @@
 #include <asio/write.hpp>
 #include <asio/ip/address.hpp>
 #include <wavex/Network/QUIC.hpp>
+#include <wavex/Base/Logger.hpp>
 
 using namespace wavex::network::quic;
 namespace quic = wavex::network::quic;

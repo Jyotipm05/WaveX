@@ -425,7 +425,6 @@ namespace wavex::protos::websocket {
           message_(),
           subprotocol_(std::move(subprotocol)),
           close_reason_(),
-          outbox_(),
           role_(r) {
     }
 
@@ -465,19 +464,28 @@ namespace wavex::protos::websocket {
     }
 
     bool connection::enqueue(const opcode op, const std::string_view payload, const bool is_close) {
-        std::string frame;
         std::optional<uint32_t> mask;
         if (role_ == role::client) mask = random_u32(); // RFC 6455 §5.3: a fresh key per frame
-        codec::encode_frame(frame, op, payload, true, mask);
+        const std::size_t wire_size = codec::frame_size(payload.size(), mask.has_value());
+
+        // Small frames are encoded straight into the outbox under the lock. A large payload is encoded first so
+        // the lock (which every sender and the writer take) is not held across a multi-megabyte copy.
+        constexpr std::size_t kEncodeUnderLock = 16 * 1024;
+        std::string large;
+        if (payload.size() > kEncodeUnderLock) codec::encode_frame(large, op, payload, true, mask);
 
         bool start_writer = false; {
             std::lock_guard lock(write_mtx_);
             // Nothing may follow our close frame (RFC 6455 §5.5.1).
             if (write_failed_ || close_sent_.load(std::memory_order_relaxed)) return false;
-            if (!is_control(op) && buffered_ + frame.size() > opts_.max_buffered_amount) return false;
+            if (!is_control(op) && buffered_ + wire_size > opts_.max_buffered_amount) return false;
             if (is_close) close_sent_.store(true, std::memory_order_release);
-            buffered_ += frame.size();
-            outbox_.push_back(std::move(frame));
+            buffered_ += wire_size;
+            if (large.empty()) [[unlikely]] {
+                codec::encode_frame(outbox_, op, payload, true, mask);
+            } else [[likely]] {
+                outbox_.append(large);
+            }
             if (!writer_active_) {
                 writer_active_ = true;
                 start_writer = true;
@@ -486,44 +494,40 @@ namespace wavex::protos::websocket {
         if (start_writer) {
             // The writer runs on the connection's executor, so every transport write is serialized with the
             // reads of the session coroutine regardless of which thread queued the frame.
-            asio::co_spawn(executor_, [self = shared_from_this()]() -> asio::awaitable<void> {
-                co_await self->drain();
-            }, asio::detached);
+            asio::co_spawn(executor_, drain(shared_from_this()), asio::detached);
         }
         return true;
     }
 
-    asio::awaitable<void> connection::drain() {
-        constexpr std::size_t kBatchBytes = 64 * 1024;
+    asio::awaitable<void> connection::drain(std::shared_ptr<connection> self) {
+        connection &c = *self;
+        constexpr std::size_t kKeepCapacity = 1024 * 1024; // do not pin a huge buffer after one big message
         for (;;) {
-            std::string batch; {
-                std::lock_guard lock(write_mtx_);
-                if (outbox_.empty()) {
-                    writer_active_ = false;
+            {
+                std::lock_guard lock(c.write_mtx_);
+                if (c.outbox_.empty()) {
+                    c.writer_active_ = false;
                     co_return;
                 }
-                batch = std::move(outbox_.front());
-                outbox_.pop_front();
-                while (!outbox_.empty() && batch.size() + outbox_.front().size() <= kBatchBytes) {
-                    batch += outbox_.front();
-                    outbox_.pop_front();
-                }
+                c.writing_.swap(c.outbox_); // `writing_` was left empty, so the outbox restarts empty
             }
 
             std::error_code ec;
             try {
-                ec = co_await stream_.write(asio::buffer(batch));
+                ec = co_await c.stream_.write(asio::buffer(c.writing_));
             } catch (...) {
                 ec = std::make_error_code(std::errc::io_error);
             }
 
-            std::lock_guard lock(write_mtx_);
-            buffered_ -= (std::min)(buffered_, batch.size());
+            std::lock_guard lock(c.write_mtx_);
+            c.buffered_ -= (std::min)(c.buffered_, c.writing_.size());
+            c.writing_.clear();
+            if (c.writing_.capacity() > kKeepCapacity) std::string().swap(c.writing_);
             if (ec) {
-                write_failed_ = true;
-                outbox_.clear();
-                buffered_ = 0;
-                writer_active_ = false;
+                c.write_failed_ = true;
+                c.outbox_.clear();
+                c.buffered_ = 0;
+                c.writer_active_ = false;
                 co_return;
             }
         }
@@ -551,23 +555,31 @@ namespace wavex::protos::websocket {
         const std::size_t prev = rbuf_.size();
         rbuf_.resize(prev + kReadChunk);
 
-        // The flag is shared with the timer handler, which may still run after this frame is gone.
+        // Only a read with a timeout arms a timer. The state it shares with the handler is allocated once per
+        // connection (not per read) and the generation tells a late handler of an earlier read to stand down.
         std::optional<asio::steady_timer> timer;
-        auto timed_out = std::make_shared<bool>(false);
         if (timeout.count() > 0) {
+            if (!timeout_) timeout_ = std::make_shared<timeout_state>();
+            timeout_->fired.store(false, std::memory_order_relaxed);
+            const uint64_t gen = timeout_->generation.fetch_add(1, std::memory_order_acq_rel) + 1;
             timer.emplace(co_await asio::this_coro::executor, timeout);
-            timer->async_wait([timed_out, s = stream_](const std::error_code ec) {
-                if (!ec) {
-                    *timed_out = true;
+            timer->async_wait([state = timeout_, gen, s = stream_](const std::error_code ec) {
+                if (!ec && state->generation.load(std::memory_order_acquire) == gen) {
+                    state->fired.store(true, std::memory_order_release);
                     s.cancel();
                 }
             });
         }
         auto [ec, n] = co_await stream_.read_some(asio::buffer(rbuf_.data() + prev, kReadChunk));
-        if (timer) timer->cancel();
+        bool timed_out = false;
+        if (timer) {
+            timer->cancel();
+            timeout_->generation.fetch_add(1, std::memory_order_acq_rel); // disarm a handler that is already queued
+            timed_out = timeout_->fired.load(std::memory_order_acquire);
+        }
         rbuf_.resize(prev + n);
 
-        if (*timed_out) co_return make_error_code(error::read_timeout);
+        if (timed_out) co_return make_error_code(error::read_timeout);
         if (ec) co_return ec;
         if (n == 0) co_return std::error_code(asio::error::eof);
         co_return std::error_code{};
