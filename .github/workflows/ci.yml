@@ -24,6 +24,9 @@ jobs:
     name: Linux / GCC 14 / Debug
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    env:
+      # Distro RE2 instead of building RE2 + Abseil from source (see CMakeLists.txt).
+      EXTRA_APT: libre2-dev
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -104,7 +107,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      EXTRA_APT: clang-20
+      # libre2-dev: use the distro RE2 instead of building RE2 + Abseil from source (see CMakeLists.txt).
+      EXTRA_APT: clang-20 libre2-dev
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

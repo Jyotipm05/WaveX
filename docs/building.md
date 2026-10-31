@@ -94,7 +94,8 @@ WaveX is a pure C++23 framework requiring a conforming modern C++23 compiler and
 - `WAVEX_TEST_PCH` (default `ON`, GCC/Clang without modules): the tests share one precompiled `<wavex/wavex.hpp>`. Turn it off if a sanitizer or compiler flag change makes the precompiled header fail to load (`-Winvalid-pch`).
 - Without `WAVEX_USE_MODULE`, CMake's module dependency scan is skipped (`CMAKE_CXX_SCAN_FOR_MODULES OFF`), so no scan step runs per source file and Clang does not need `clang-scan-deps`.
 - Keep heavy code out of headers: anything non-template in a header is compiled again by every translation unit that includes it. `ComposedHttpServer::run()` is defined in `src/Server/ComposedHttpServer.cpp` for this reason.
-- Use `ccache` (`-DCMAKE_CXX_COMPILER_LAUNCHER=ccache`) and, for local builds, a fast linker (`-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=mold` or `lld`). The first configure also builds Abseil and RE2 (about 270 build steps); a warm ccache removes that cost.
+- Use `ccache` (`-DCMAKE_CXX_COMPILER_LAUNCHER=ccache`) and, for local builds, a fast linker (`-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=mold` or `lld`). Without a system RE2 the first configure also builds Abseil and RE2 (about 270 build steps); a warm ccache removes that cost.
+- Install the distro RE2 to skip those steps: `sudo apt install libre2-dev` (Ubuntu 24.04 ships RE2 2023-03-01, which does not need Abseil). CMake finds it through pkg-config when there is no CMake package, and a clean build drops from 369 to 101 steps. The GCC and Clang CI jobs do this. Sanitizer builds should keep building RE2 from source so it is instrumented too.
 
 ---
 

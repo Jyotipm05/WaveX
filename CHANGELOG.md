@@ -48,6 +48,7 @@ Tagged releases before 0.4.0 (`v0.1.0-alpha` to `v0.3.0-alpha`) are listed under
 - `CONTRIBUTING.md` prerequisites aligned with the supported toolchains (GCC 16+, Clang 18.1+, MSVC 19.44+, CMake 4.0+).
 
 ### Changed (performance)
+- CI build time: with the distro RE2 installed (`libre2-dev`), CMake uses it through pkg-config instead of building RE2 and Abseil from source, so a clean build is 101 steps instead of 369. The GCC and Clang CI jobs install it; sanitizer jobs still build RE2 themselves.
 - Worker fairness: a worker polls its `io_context` after at most 16 tasks or 250 µs of task time, so a task backlog can no longer starve the connection I/O that lives on the same worker (`test_worker_io_fairness`; neutral on the pure-I/O benchmark).
 - Accepted TCP sockets are registered with the reactor of the worker that serves them (`ThreadPool::lease_worker()` / `spawn_leased()`, `Server::adopt_on_worker`), instead of every socket's readiness being handled by the single master `io_context` thread. A lease reserves the worker (counts as a live coroutine) so it cannot be retired between accept and connection start. On POSIX the socket is re-registered with `release()`/`assign()`; on Windows IOCP it stays on the master context. Same-machine A/B on the 2 vCPU box (32 active + 1,000 idle, closed loop, 3 rounds): ~19k → ~30-32k requests/s, p50 ~1.55 ms → ~0.95 ms, p99 ~2.6-3.8 ms → ~1.6-2.0 ms.
 

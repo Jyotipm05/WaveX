@@ -188,6 +188,21 @@ endif ()
 # ---------------------------------------------------------------------------
 find_package(re2 CONFIG QUIET)
 
+# Debian/Ubuntu's libre2-dev ships only a pkg-config file (no CMake package). Use it when present: it skips building
+# RE2 (and Abseil) from source, which is most of a clean build. Not used for sanitizer builds that need an
+# instrumented RE2: they simply do not install the system package.
+if (NOT re2_FOUND AND NOT TARGET re2::re2)
+    find_package(PkgConfig QUIET)
+    if (PkgConfig_FOUND)
+        pkg_check_modules(WAVEX_RE2_PC QUIET IMPORTED_TARGET GLOBAL re2)
+        if (WAVEX_RE2_PC_FOUND)
+            add_library(re2::re2 ALIAS PkgConfig::WAVEX_RE2_PC)
+            set(re2_FOUND TRUE)
+            message(STATUS "re2 ${WAVEX_RE2_PC_VERSION} found via pkg-config — not building it from source")
+        endif ()
+    endif ()
+endif ()
+
 if (NOT re2_FOUND)
     message(STATUS "re2 not found via find_package — fetching from GitHub")
 
