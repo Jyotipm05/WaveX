@@ -29,6 +29,7 @@
 #define ASIO_HAS_CO_AWAIT 1
 #endif
 #include <asio/awaitable.hpp>
+#include <wavex/Base/Task.hpp>
 
 
 namespace wavex::utils {
@@ -96,12 +97,12 @@ namespace wavex::utils {
          * If the file is spooled on disk, this performs an atomic filesystem move/rename.
          * If the file is in-memory, it writes to disk offloaded to the background blocking pool.
          */
-        [[nodiscard]] asio::awaitable<bool> save_to_async(
+        [[nodiscard]] wavex::task<bool> save_to_async(
             std::string destination, bool overwrite = true) const;
 
         template<typename PathLike>
             requires (!std::is_convertible_v<PathLike, std::string>)
-        [[nodiscard]] asio::awaitable<bool> save_to_async(
+        [[nodiscard]] wavex::task<bool> save_to_async(
             const PathLike &destination, const bool overwrite = true) const {
             return save_to_async(fs_utils::to_u8_path_string(destination), overwrite);
         }
@@ -256,7 +257,7 @@ namespace wavex::utils {
          * @param limits Limits and spooling configuration.
          * @return Awaitable yielding parsed MultipartFormData containing fields and uploaded files.
          */
-        static asio::awaitable<MultipartFormData> parse_async(
+        static wavex::task<MultipartFormData> parse_async(
             std::string_view body,
             std::string_view content_type_header,
             MultipartLimits limits = {});

@@ -25,8 +25,8 @@
 
 namespace wavex::network::quic {
 
-    QuicClient::QuicClient(asio::io_context &io)
-        : io_(io), socket_(io) {
+    QuicClient::QuicClient(const wavex::executor &ex)
+        : ex_(ex), socket_(ex) {
         asio::error_code ec;
         socket_.open(asio::ip::udp::v4(), ec);
         socket_.bind(asio::ip::udp::endpoint(asio::ip::udp::v4(), 0), ec);
@@ -36,7 +36,7 @@ namespace wavex::network::quic {
         close();
     }
 
-    asio::awaitable<bool> QuicClient::connect(const std::string_view host, const uint16_t port) {
+    wavex::task<bool> QuicClient::connect(const std::string_view host, const uint16_t port) {
         wavex::log::info("[QuicClient] connect() called to {}:{}", host, port);
         asio::error_code ec;
         const auto addr = asio::ip::make_address(host, ec);
@@ -47,7 +47,7 @@ namespace wavex::network::quic {
         const ConnectionId initial_peer_cid = ConnectionId::random(8);
 
         connection_ = std::make_shared<QuicConnection>(client_cid, initial_peer_cid, server_endpoint_, false,
-                                                       io_.get_executor(), initial_peer_cid);
+                                                       ex_, initial_peer_cid);
         connection_->set_sni_hostname(std::string(host));
         connection_->set_verify_peer(verify_peer_);
         connection_->set_outbound_callback([this] {
@@ -59,7 +59,7 @@ namespace wavex::network::quic {
             if (!stream) return;
             // Server-initiated unidirectional stream (sid & 0x03 == 3) per RFC 9000 / RFC 9114
             if (const uint64_t sid = stream->stream_id(); (sid & 0x03) == 0x03) {
-                asio::co_spawn(io_, [stream]() -> asio::awaitable<void> {
+                asio::co_spawn(ex_, [stream]() -> wavex::task<void> {
                     char buf[1024];
                     while (stream->is_open()) {
                         auto [ec, n] = co_await stream->async_read_some(
@@ -94,7 +94,7 @@ namespace wavex::network::quic {
             co_return true;
         }
 
-        asio::steady_timer timer(io_);
+        asio::steady_timer timer(ex_);
         timer.expires_after(std::chrono::seconds(5));
 
         connection_->set_connected_callback([&timer] {
@@ -162,7 +162,7 @@ namespace wavex::network::quic {
     }
 
     void QuicClient::flush_outbound() {
-        if (io_.get_executor().running_in_this_thread()) {
+        if (wavex::running_in_this_thread(ex_)) {
             if (!connection_ || !socket_.is_open()) return;
             for (auto datagrams = connection_->poll_outgoing_datagrams(); auto &dgram: datagrams) {
                 if (dgram.empty()) continue;
@@ -179,7 +179,7 @@ namespace wavex::network::quic {
                 );
             }
         } else {
-            asio::post(io_, [this] {
+            asio::post(ex_, [this] {
                 flush_outbound();
             });
         }

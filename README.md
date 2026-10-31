@@ -33,12 +33,12 @@ WaveX is a C++23 backend framework for building HTTP servers and clients with `c
 int main() {
     auto &router = wavex::engine::HttpRouter::instance();
 
-    router.get("/", [](auto &, auto &res) -> asio::awaitable<void> {
+    router.get("/", [](auto &, auto &res) -> wavex::task<void> {
         res.status(200).send("Hello, World!");
         co_return;
     });
 
-    router.get("/hello/:name", [](auto &req, auto &res) -> asio::awaitable<void> {
+    router.get("/hello/:name", [](auto &req, auto &res) -> wavex::task<void> {
         res.status(200).json({{"hello", std::string(req.param("name").value_or("World"))}});
         co_return;
     });
@@ -51,7 +51,7 @@ int main() {
 ## Why WaveX
 
 - **One router, three protocols.** The same handler style serves HTTP/1.1, HTTP/2 (h2c and TLS) and HTTP/3 over a native QUIC stack.
-- **Coroutines all the way down.** Handlers, middleware, the client and file I/O are `asio::awaitable`s on a work-stealing worker pool.
+- **Coroutines all the way down.** Handlers, middleware, the client and file I/O are `wavex::task<T>` coroutines (an alias of `asio::awaitable<T>`) on a work-stealing worker pool.
 - **No virtuals on the hot path.** Requests, responses and middleware chains use C++23 *deducing this*, so dispatch is static and inlinable.
 - **Allocation-aware.** Per-request arenas, contiguous containers and zero-copy parsing keep the request path off the global heap.
 - **Extensible.** Plug your own wire protocol into the same runtime, TLS and QUIC transports through a three-seam design.

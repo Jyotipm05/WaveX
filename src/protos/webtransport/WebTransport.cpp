@@ -67,7 +67,7 @@ namespace wavex::protos::webtransport {
         }
 
         /// Read more bytes from a QUIC stream into `buf`. Returns false on EOF / error.
-        asio::awaitable<bool> read_more(const std::shared_ptr<QuicStream> &s, std::string &buf) {
+        wavex::task<bool> read_more(const std::shared_ptr<QuicStream> &s, std::string &buf) {
             char tmp[4096];
             auto [ec, n] = co_await s->async_read_some(asio::buffer(tmp), asio::as_tuple(asio::use_awaitable));
             if (n > 0) buf.append(tmp, n);
@@ -147,7 +147,7 @@ namespace wavex::protos::webtransport {
         return quic_ ? quic_->stream_id() : 0;
     }
 
-    asio::awaitable<std::pair<std::error_code, std::size_t> > stream::read_some(const asio::mutable_buffer buffer) {
+    wavex::task<std::pair<std::error_code, std::size_t> > stream::read_some(const asio::mutable_buffer buffer) {
         auto self = shared_from_this();
         if (!can_read() || !quic_) {
             co_return std::pair{make_error_code(error::stream_closed), std::size_t{0}};
@@ -168,7 +168,7 @@ namespace wavex::protos::webtransport {
         }
     }
 
-    asio::awaitable<std::pair<std::error_code, std::string> > stream::read_all(const std::size_t max_bytes) {
+    wavex::task<std::pair<std::error_code, std::string> > stream::read_all(const std::size_t max_bytes) {
         auto self = shared_from_this();
         std::string out;
         char buf[8192];
@@ -185,7 +185,7 @@ namespace wavex::protos::webtransport {
         }
     }
 
-    asio::awaitable<std::error_code> stream::write(const std::string_view data) {
+    wavex::task<std::error_code> stream::write(const std::string_view data) {
         auto self = shared_from_this();
         if (!can_write() || !quic_) co_return make_error_code(error::stream_closed);
         auto [ec, n] = co_await asio::async_write(*quic_, asio::buffer(data), asio::as_tuple(asio::use_awaitable));
@@ -242,21 +242,21 @@ namespace wavex::protos::webtransport {
         return close_reason_;
     }
 
-    asio::awaitable<std::shared_ptr<stream> > session::accept_bidirectional_stream() {
+    wavex::task<std::shared_ptr<stream> > session::accept_bidirectional_stream() {
         auto self = shared_from_this();
         auto [ec, s] = co_await incoming_bidi_->async_receive(asio::as_tuple(asio::use_awaitable));
         if (ec) co_return nullptr;
         co_return s;
     }
 
-    asio::awaitable<std::shared_ptr<stream> > session::accept_unidirectional_stream() {
+    wavex::task<std::shared_ptr<stream> > session::accept_unidirectional_stream() {
         auto self = shared_from_this();
         auto [ec, s] = co_await incoming_uni_->async_receive(asio::as_tuple(asio::use_awaitable));
         if (ec) co_return nullptr;
         co_return s;
     }
 
-    asio::awaitable<std::optional<std::string> > session::receive_datagram() {
+    wavex::task<std::optional<std::string> > session::receive_datagram() {
         auto self = shared_from_this();
         auto [ec, d] = co_await datagrams_->async_receive(asio::as_tuple(asio::use_awaitable));
         if (ec) co_return std::nullopt;
@@ -393,7 +393,7 @@ namespace wavex::protos::webtransport {
         std::ignore = datagrams_->try_send(std::error_code{}, std::move(payload));
     }
 
-    asio::awaitable<void> session::run_capsule_reader() {
+    wavex::task<void> session::run_capsule_reader() {
         auto self = shared_from_this();
         constexpr std::size_t kMaxBufferedCapsuleBytes = 1024 * 1024;
         std::string buf;
@@ -557,7 +557,7 @@ namespace wavex::protos::webtransport {
     }
 
     // ─── Stream Demultiplexing ───────────────────────────────────────────────
-    asio::awaitable<bool> dispatch_bidirectional_stream(std::shared_ptr<QuicStream> s) {
+    wavex::task<bool> dispatch_bidirectional_stream(std::shared_ptr<QuicStream> s) {
         if (!s) co_return false;
         std::string peeked;
         uint64_t first = 0;
@@ -593,7 +593,7 @@ namespace wavex::protos::webtransport {
         co_return true;
     }
 
-    asio::awaitable<void> dispatch_unidirectional_stream(std::shared_ptr<QuicStream> stream, std::string buffered,
+    wavex::task<void> dispatch_unidirectional_stream(std::shared_ptr<QuicStream> stream, std::string buffered,
                                                          std::shared_ptr<http::http3::connection_context> ctx) {
         if (!stream || !ctx) co_return;
         uint64_t session_id = 0;
@@ -607,7 +607,7 @@ namespace wavex::protos::webtransport {
     }
 
     // ─── Server Session ──────────────────────────────────────────────────────
-    asio::awaitable<void> detail::run_server_session(network::AnyStream connect_stream, std::string leftover,
+    wavex::task<void> detail::run_server_session(network::AnyStream connect_stream, std::string leftover,
                                                      options opts, request_info info, handler_fn handler) {
         const auto quic = connect_stream.native<QuicStream>();
         const auto conn = quic ? quic->connection() : nullptr;
@@ -625,7 +625,7 @@ namespace wavex::protos::webtransport {
         sess->set_request_info(std::move(info.path), std::move(info.authority), std::move(info.origin));
         registry->add(sess);
 
-        asio::co_spawn(sess->get_executor(), [sess]() -> asio::awaitable<void> {
+        asio::co_spawn(sess->get_executor(), [sess]() -> wavex::task<void> {
             co_await sess->run_capsule_reader();
         }, asio::detached);
 

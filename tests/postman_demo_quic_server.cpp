@@ -63,7 +63,7 @@ inline std::string get_lan_ip() {
     return "";
 }
 
-asio::awaitable<void> handle_quic_stream(std::shared_ptr<quic::basic_quic_socket> sock) {
+wavex::task<void> handle_quic_stream(std::shared_ptr<quic::basic_quic_socket> sock) {
     try {
         std::array<char, 4096> buffer{};
         while (sock->is_open()) {

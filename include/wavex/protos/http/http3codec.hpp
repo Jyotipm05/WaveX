@@ -36,6 +36,7 @@
 #include <algorithm>
 #include <asio/as_tuple.hpp>
 #include <asio/awaitable.hpp>
+#include <wavex/Base/Task.hpp>
 #include <asio/buffer.hpp>
 #include <asio/use_awaitable.hpp>
 #include <wavex/protos/http/Methods.hpp>
@@ -60,7 +61,7 @@ namespace wavex::protos::webtransport {
      * Defined in src/protos/webtransport/WebTransport.cpp. `buffered` holds the bytes already read after
      * the stream type (the session ID varint may still be incomplete).
      */
-    asio::awaitable<void> dispatch_unidirectional_stream(
+    wavex::task<void> dispatch_unidirectional_stream(
         std::shared_ptr<network::quic::QuicStream> stream, std::string buffered,
         std::shared_ptr<http::http3::connection_context> ctx);
 } // namespace wavex::protos::webtransport
@@ -803,7 +804,7 @@ namespace wavex::protos::http {
         class session_handler {
         public:
             template<typename Stream>
-            static asio::awaitable<void> handle_unidirectional_stream(
+            static wavex::task<void> handle_unidirectional_stream(
                 std::shared_ptr<Stream> stream,
                 const std::shared_ptr<connection_context> ctx) {
                 if (!stream || !ctx) co_return;

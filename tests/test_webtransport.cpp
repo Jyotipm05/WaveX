@@ -95,7 +95,7 @@ namespace {
     AnyStream make_scripted(const std::shared_ptr<scripted_stream> &s, asio::io_context &io) {
         auto ops = std::make_shared<AnyStream::operations>();
         ops->executor = io.get_executor();
-        ops->read_some = [s](const asio::mutable_buffer b) -> asio::awaitable<AnyStream::read_result> {
+        ops->read_some = [s](const asio::mutable_buffer b) -> wavex::task<AnyStream::read_result> {
             if (s->chunks.empty()) co_return AnyStream::read_result{asio::error::eof, 0};
             std::string &front = s->chunks.front();
             const std::size_t n = (std::min)(b.size(), front.size());
@@ -104,7 +104,7 @@ namespace {
             if (front.empty()) s->chunks.pop_front();
             co_return AnyStream::read_result{std::error_code{}, n};
         };
-        ops->write = [s](const asio::const_buffer b) -> asio::awaitable<std::error_code> {
+        ops->write = [s](const asio::const_buffer b) -> wavex::task<std::error_code> {
             s->written.append(static_cast<const char *>(b.data()), b.size());
             co_return std::error_code{};
         };
@@ -215,7 +215,7 @@ void test_data_tunnel() {
     std::string got;
     std::error_code end_ec;
     std::error_code write_ec;
-    run_coro(io, [&]() -> asio::awaitable<void> {
+    run_coro(io, [&]() -> wavex::task<void> {
         char buf[2];
         for (;;) {
             auto [ec, n] = co_await tunnel.read_some(asio::buffer(buf));
@@ -235,7 +235,7 @@ void test_data_tunnel() {
     bad->chunks.push_back(varint(0x04) + varint(0)); // SETTINGS on a request stream
     auto bad_tunnel = h3::make_data_tunnel(make_scripted(bad, io), {});
     std::error_code bad_ec;
-    run_coro(io, [&]() -> asio::awaitable<void> {
+    run_coro(io, [&]() -> wavex::task<void> {
         char buf[16];
         auto [ec, n] = co_await bad_tunnel.read_some(asio::buffer(buf));
         bad_ec = ec;
@@ -254,7 +254,7 @@ void test_websocket_over_tunnel() {
     auto conn = std::make_shared<ws::connection>(h3::make_data_tunnel(make_scripted(script, io), {}), "",
                                                  ws::options{}, ws::role::server);
     std::string got;
-    run_coro(io, [&]() -> asio::awaitable<void> {
+    run_coro(io, [&]() -> wavex::task<void> {
         if (auto m = co_await conn->read()) got = m->data;
         conn->send_text("reply");
     });
@@ -276,7 +276,7 @@ void test_stream_demux_and_registry() {
     const auto s4 = conn->get_or_create_stream(4);
     s4->push_inbound(varint(wt::kBidiStreamSignal) + varint(0) + "early", false);
     bool wt_stream = false;
-    run_coro(io, [&]() -> asio::awaitable<void> { wt_stream = co_await wt::dispatch_bidirectional_stream(s4); });
+    run_coro(io, [&]() -> wavex::task<void> { wt_stream = co_await wt::dispatch_bidirectional_stream(s4); });
     check(wt_stream && reg->pending_count() == 1, "WT_STREAM (0x41) recognised and buffered until the session exists");
 
     // A request stream is handed back untouched.
@@ -288,7 +288,7 @@ void test_stream_demux_and_registry() {
     const auto s8 = conn->get_or_create_stream(8);
     s8->push_inbound(get_wire, true);
     bool s8_is_wt = true;
-    run_coro(io, [&]() -> asio::awaitable<void> { s8_is_wt = co_await wt::dispatch_bidirectional_stream(s8); });
+    run_coro(io, [&]() -> wavex::task<void> { s8_is_wt = co_await wt::dispatch_bidirectional_stream(s8); });
     char buf[1024];
     std::error_code rec;
     const std::size_t n = s8->read_some(asio::buffer(buf), rec);
@@ -300,7 +300,7 @@ void test_stream_demux_and_registry() {
                                               conn, reg, wt::options{});
     reg->add(sess);
     std::string early;
-    run_coro(io, [&]() -> asio::awaitable<void> {
+    run_coro(io, [&]() -> wavex::task<void> {
         if (auto st = co_await sess->accept_bidirectional_stream()) {
             char b[64];
             auto [ec, k] = co_await st->read_some(asio::buffer(b));
@@ -314,7 +314,7 @@ void test_stream_demux_and_registry() {
     s2->push_inbound(varint(wt::kUniStreamType) + varint(0) + "uni-data", true);
     std::string uni;
     bool uni_is_incoming = false;
-    run_coro(io, [&]() -> asio::awaitable<void> {
+    run_coro(io, [&]() -> wavex::task<void> {
         co_await h3::session_handler::handle_unidirectional_stream(s2, ctx);
         if (auto st = co_await sess->accept_unidirectional_stream()) {
             uni_is_incoming = st->is_incoming() && !st->can_write();
@@ -328,7 +328,7 @@ void test_stream_demux_and_registry() {
     reg->dispatch_datagram(varint(0) + "dgram");
     reg->dispatch_datagram(varint(25) + "nobody"); // session 100 does not exist: dropped
     std::optional<std::string> dg;
-    run_coro(io, [&]() -> asio::awaitable<void> { dg = co_await sess->receive_datagram(); });
+    run_coro(io, [&]() -> wavex::task<void> { dg = co_await sess->receive_datagram(); });
     check(dg && *dg == "dgram", "datagram delivered by quarter stream ID");
 
     const auto out_bidi = sess->open_bidirectional_stream();
@@ -344,7 +344,7 @@ void test_stream_demux_and_registry() {
     // Peer closes the session with a CLOSE capsule on the CONNECT stream.
     s0->push_inbound(h3::encode_tunnel_data_frame(wt::capsule::encode_close_session(42, "done")), false);
     std::shared_ptr<wt::stream> after_close = std::make_shared<wt::stream>(nullptr, "", 0, true, true);
-    run_coro(io, [&]() -> asio::awaitable<void> {
+    run_coro(io, [&]() -> wavex::task<void> {
         co_await sess->run_capsule_reader();
         after_close = co_await sess->accept_bidirectional_stream();
     });
@@ -381,7 +381,7 @@ void test_server_integration() {
     auto handler_done = std::make_shared<std::promise<void> >();
 
     router.webtransport("/wt", [seen, handler_started, stream_read, handler_done](
-                        wavex::protos::http::Http3Request &req, std::shared_ptr<wt::session> s) -> asio::awaitable<void> {
+                        wavex::protos::http::Http3Request &req, std::shared_ptr<wt::session> s) -> wavex::task<void> {
                             seen->path = s->path();
                             seen->req_path = std::string(req.path());
                             seen->origin = s->origin();
@@ -399,7 +399,7 @@ void test_server_integration() {
 
     auto ws_message = std::make_shared<std::promise<std::string> >();
     router.websocket("/ws", [ws_message](wavex::protos::http::Http3Request &,
-                                         std::shared_ptr<ws::connection> c) -> asio::awaitable<void> {
+                                         std::shared_ptr<ws::connection> c) -> wavex::task<void> {
         auto m = co_await c->read();
         ws_message->set_value(m ? m->data : std::string("<error>"));
         while (co_await c->read()) {
@@ -435,7 +435,7 @@ void test_server_integration() {
     // A WebTransport stream arrives through the listener-side demultiplexer.
     const auto s4 = conn->get_or_create_stream(4);
     s4->push_inbound(varint(wt::kBidiStreamSignal) + varint(0) + "stream-payload", true);
-    asio::co_spawn(io, [s4]() -> asio::awaitable<void> {
+    asio::co_spawn(io, [s4]() -> wavex::task<void> {
         co_await wt::dispatch_bidirectional_stream(s4);
     }, asio::detached);
 

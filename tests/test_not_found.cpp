@@ -53,7 +53,7 @@ void test_router_default_not_found() {
     std::cout << "\n[Test 1] Router default 404 handler returns 'Not Found'" << std::endl;
 
     auto router = wavex::engine::Http1Router::make_instance();
-    router.get("/hello", [](auto &, auto &res) -> asio::awaitable<void> {
+    router.get("/hello", [](auto &, auto &res) -> wavex::task<void> {
         res.status(200).send("OK");
         co_return;
     });
@@ -143,7 +143,7 @@ void test_router_dynamic_coroutine_handler() {
 
     auto router = wavex::engine::Http1Router::make_instance();
     router.not_found([](wavex::protos::http::Http1Request &req,
-                        wavex::protos::http::Http1Response &res) -> asio::awaitable<void> {
+                        wavex::protos::http::Http1Response &res) -> wavex::task<void> {
         nlohmann::json j = {
             {"error", "Route Not Found"},
             {"requested_path", std::string(req.path())}
@@ -173,7 +173,7 @@ void test_server_default_404_integration() {
     std::cout << "\n[Test 5] Server integration: default 404 wire response" << std::endl;
 
     auto router = wavex::engine::Http1Router::make_instance();
-    router.get("/valid", [](auto &, auto &res) -> asio::awaitable<void> {
+    router.get("/valid", [](auto &, auto &res) -> wavex::task<void> {
         res.status(200).send("Valid Route");
         co_return;
     });
@@ -280,7 +280,7 @@ void test_server_keep_alive_on_404() {
     std::cout << "\n[Test 7] Server integration: keep-alive persistence across 404" << std::endl;
 
     auto router = wavex::engine::Http1Router::make_instance();
-    router.get("/valid", [](auto &, auto &res) -> asio::awaitable<void> {
+    router.get("/valid", [](auto &, auto &res) -> wavex::task<void> {
         res.status(200).send("Valid");
         co_return;
     });

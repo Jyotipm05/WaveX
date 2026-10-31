@@ -21,6 +21,7 @@
 #endif
 
 #include <asio/awaitable.hpp>
+#include <wavex/Base/Task.hpp>
 #include <asio/async_result.hpp>
 #include <asio/use_awaitable.hpp>
 #include <asio/associated_executor.hpp>
@@ -61,7 +62,7 @@ namespace wavex {
         };
 
         template<typename Fn, typename R>
-        asio::awaitable<R> spawn_blocking_impl(Fn fn, server::BlockingThreadPool &pool) {
+        wavex::task<R> spawn_blocking_impl(Fn fn, server::BlockingThreadPool &pool) {
             auto state = std::make_shared<SpawnBlockingState<Fn, R> >(std::move(fn));
 
             co_await asio::async_initiate<const asio::use_awaitable_t<> &, void(std::exception_ptr)>(
@@ -99,7 +100,7 @@ namespace wavex {
         }
 
         template<typename Fn>
-        asio::awaitable<void> spawn_blocking_void_impl(Fn fn, server::BlockingThreadPool &pool) {
+        wavex::task<void> spawn_blocking_void_impl(Fn fn, server::BlockingThreadPool &pool) {
             auto state = std::make_shared<SpawnBlockingVoidState<Fn> >(std::move(fn));
 
             co_await asio::async_initiate<const asio::use_awaitable_t<> &, void(std::exception_ptr)>(
@@ -148,7 +149,7 @@ namespace wavex {
      * @return asio::awaitable yielding the return value of fn() or re-throwing any exception thrown by fn().
      *
      * @example
-     * asio::awaitable<void> handler(Request& req, Response& res) {
+     * wavex::task<void> handler(Request& req, Response& res) {
      *     auto hash = co_await wavex::spawn_blocking([&] {
      *         return compute_heavy_hash(req.body());
      *     });

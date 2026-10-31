@@ -25,6 +25,7 @@
 #include <type_traits>
 
 #include <asio/awaitable.hpp>
+#include <wavex/Base/Task.hpp>
 #include <nlohmann/json.hpp>
 
 
@@ -394,12 +395,12 @@ namespace wavex::client {
          * @param options Connection & protocol options.
          * @return Coroutine awaitable producing ClientResponse.
          */
-        static asio::awaitable<ClientResponse> send(const ClientRequest &req, const ClientOptions &options = {});
+        static wavex::task<ClientResponse> send(const ClientRequest &req, const ClientOptions &options = {});
 
         /**
          * @brief Backward-compatible send overload for Http1Request.
          */
-        static asio::awaitable<Http1Response> send(const Http1Request req, const ClientOptions &options = {}) {
+        static wavex::task<Http1Response> send(const Http1Request req, const ClientOptions &options = {}) {
             const ClientRequest c_req(req);
             const ClientResponse c_res = co_await send(c_req, options);
             co_return static_cast<Http1Response>(c_res);
@@ -408,7 +409,7 @@ namespace wavex::client {
         /**
          * @brief Send overload for Http2Request.
          */
-        static asio::awaitable<Http2Response> send(const Http2Request req, const ClientOptions &options = {}) {
+        static wavex::task<Http2Response> send(const Http2Request req, const ClientOptions &options = {}) {
             const ClientRequest c_req(req);
             ClientOptions opts = options;
             if (opts.version == HttpVersion::Auto) {
@@ -420,7 +421,7 @@ namespace wavex::client {
 
         // ─── GET ─────────────────────────────────────────────────────────────
         template<typename ResponseType = ClientResponse>
-        static asio::awaitable<ResponseType> get(const std::string_view url, const ClientOptions &options = {}) {
+        static wavex::task<ResponseType> get(const std::string_view url, const ClientOptions &options = {}) {
             const ClientRequest req(method::GET, url);
             ClientResponse c_res = co_await send(req, options);
             if constexpr (std::is_same_v<ResponseType, ClientResponse>) {
@@ -431,7 +432,7 @@ namespace wavex::client {
         }
 
         template<typename ResponseType = ClientResponse>
-        static asio::awaitable<ResponseType> get(const std::string_view url, const QueryParams &params,
+        static wavex::task<ResponseType> get(const std::string_view url, const QueryParams &params,
                                                  const ClientOptions &options = {}) {
             ClientRequest req(method::GET, url);
             req.queries(params);
@@ -445,7 +446,7 @@ namespace wavex::client {
 
         // ─── POST ────────────────────────────────────────────────────────────
         template<typename ResponseType = ClientResponse>
-        static asio::awaitable<ResponseType> post(const std::string_view url, const std::string_view body,
+        static wavex::task<ResponseType> post(const std::string_view url, const std::string_view body,
                                                   const std::string_view content_type = "text/plain",
                                                   const ClientOptions &options = {}) {
             ClientRequest req(method::POST, url);
@@ -461,7 +462,7 @@ namespace wavex::client {
 
         template<typename ResponseType = ClientResponse, typename JsonBody>
             requires (std::is_same_v<std::remove_cvref_t<JsonBody>, nlohmann::json>)
-        static asio::awaitable<ResponseType> post(const std::string_view url, JsonBody &&json_body,
+        static wavex::task<ResponseType> post(const std::string_view url, JsonBody &&json_body,
                                                   const ClientOptions &options = {}) {
             ClientRequest req(method::POST, url);
             req.json(std::forward<JsonBody>(json_body));
@@ -475,7 +476,7 @@ namespace wavex::client {
 
         // ─── PUT ─────────────────────────────────────────────────────────────
         template<typename ResponseType = ClientResponse>
-        static asio::awaitable<ResponseType> put(const std::string_view url, const std::string_view body,
+        static wavex::task<ResponseType> put(const std::string_view url, const std::string_view body,
                                                  const std::string_view content_type = "text/plain",
                                                  const ClientOptions &options = {}) {
             ClientRequest req(method::PUT, url);
@@ -491,7 +492,7 @@ namespace wavex::client {
 
         template<typename ResponseType = ClientResponse, typename JsonBody>
             requires (std::is_same_v<std::remove_cvref_t<JsonBody>, nlohmann::json>)
-        static asio::awaitable<ResponseType> put(const std::string_view url, JsonBody &&json_body,
+        static wavex::task<ResponseType> put(const std::string_view url, JsonBody &&json_body,
                                                  const ClientOptions &options = {}) {
             ClientRequest req(method::PUT, url);
             req.json(std::forward<JsonBody>(json_body));
@@ -505,7 +506,7 @@ namespace wavex::client {
 
         // ─── DELETE ──────────────────────────────────────────────────────────
         template<typename ResponseType = ClientResponse>
-        static asio::awaitable<ResponseType> del(const std::string_view url, const ClientOptions &options = {}) {
+        static wavex::task<ResponseType> del(const std::string_view url, const ClientOptions &options = {}) {
             const ClientRequest req(method::DELETE, url);
             ClientResponse c_res = co_await send(req, options);
             if constexpr (std::is_same_v<ResponseType, ClientResponse>) {
@@ -517,7 +518,7 @@ namespace wavex::client {
 
         // ─── PATCH ───────────────────────────────────────────────────────────
         template<typename ResponseType = ClientResponse>
-        static asio::awaitable<ResponseType> patch(const std::string_view url, const std::string_view body,
+        static wavex::task<ResponseType> patch(const std::string_view url, const std::string_view body,
                                                    const std::string_view content_type = "text/plain",
                                                    const ClientOptions &options = {}) {
             ClientRequest req(method::PATCH, url);
@@ -532,7 +533,7 @@ namespace wavex::client {
 
         // ─── GENERIC REQUEST ─────────────────────────────────────────────────
         template<typename ResponseType = ClientResponse>
-        static asio::awaitable<ResponseType> request(
+        static wavex::task<ResponseType> request(
             const method m,
             const std::string_view url,
             const std::string_view body = "",

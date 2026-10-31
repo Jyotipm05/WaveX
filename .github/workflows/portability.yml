@@ -28,8 +28,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # vcpkg builds OpenSSL, RE2 and Abseil from source on a cold cache (tens of minutes), so keep its binary cache.
-      - name: Cache vcpkg binaries
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore vcpkg binaries
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .vcpkg-cache
           key: windows-msvc-vcpkg-${{ hashFiles('vcpkg.json') }}
@@ -41,10 +41,12 @@ jobs:
           New-Item -ItemType Directory -Force -Path .vcpkg-cache, ssl | Out-Null
           openssl req -x509 -newkey rsa:2048 -nodes -keyout ssl/test.key -out ssl/test.crt -days 2 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
 
+      # No -G: CMake picks the newest Visual Studio on the runner (the image moves between VS 2022 and VS 2026, and a
+      # hard-coded generator name fails with "could not find any instance of Visual Studio").
       # Modules are off here: the goal is "does it compile and pass on MSVC", not module build time.
       - name: Configure
         run: >
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          cmake -S . -B build -A x64
           -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
           -DWAVEX_TEST=ON -DWAVEX_USE_MODULE=OFF
 
@@ -53,6 +55,14 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build -C Debug --output-on-failure --timeout 120 -j2
+
+      # Save even when the build or tests fail: a cold vcpkg install of OpenSSL, RE2 and Abseil takes ~13 minutes.
+      - name: Save vcpkg binaries
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .vcpkg-cache
+          key: windows-msvc-vcpkg-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}
 
   macos-llvm:
     name: macOS / Homebrew LLVM / Debug
@@ -65,6 +75,13 @@ jobs:
       - name: Toolchain
         run: |
           brew install llvm openssl@3 re2 ninja
+          # The pinned Asio (1.32) does not build against OpenSSL 4 (opaque ASN1_STRING, const accessors), and the
+          # re2/abseil include path is /opt/homebrew/include, so a linked OpenSSL 4 would shadow openssl@3.
+          for f in $(brew list --formula | grep '^openssl' | grep -v '^openssl@3$' || true); do
+            echo "unlinking $f"; brew unlink "$f" || true
+          done
+          O3="$(brew --prefix openssl@3)"
+          grep -E "OPENSSL_VERSION_(STR|TEXT)" "$O3/include/openssl/opensslv.h" | head -2
           mkdir -p ssl
           "$(brew --prefix openssl@3)/bin/openssl" req -x509 -newkey rsa:2048 -nodes -days 2 \
             -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
@@ -74,11 +91,14 @@ jobs:
       - name: Configure
         run: |
           LLVM="$(brew --prefix llvm)"
+          O3="$(brew --prefix openssl@3)"
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS_DEBUG=-g1 \
             -DCMAKE_CXX_COMPILER="$LLVM/bin/clang++" \
             -DCMAKE_CXX_FLAGS="-stdlib=libc++ -nostdinc++ -isystem $LLVM/include/c++/v1" \
             -DCMAKE_EXE_LINKER_FLAGS="-L$LLVM/lib/c++ -Wl,-rpath,$LLVM/lib/c++" \
-            -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" -DCMAKE_PREFIX_PATH="$(brew --prefix)" \
+            -DOPENSSL_ROOT_DIR="$O3" -DOPENSSL_INCLUDE_DIR="$O3/include" \
+            -DOPENSSL_CRYPTO_LIBRARY="$O3/lib/libcrypto.dylib" -DOPENSSL_SSL_LIBRARY="$O3/lib/libssl.dylib" \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix)" \
             -DWAVEX_TEST=ON -DWAVEX_USE_MODULE=OFF
 
       - name: Build

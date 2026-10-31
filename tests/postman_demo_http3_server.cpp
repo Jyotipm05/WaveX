@@ -74,7 +74,7 @@ inline std::string get_lan_ip() {
 
 // Global Logger Middleware for HTTP/2 and HTTP/3
 template<typename Req, typename Res>
-asio::awaitable<void> logger_middleware(const Req &req, const Res &res, base::Next next) {
+wavex::task<void> logger_middleware(const Req &req, const Res &res, base::Next next) {
     std::cout << "[" << (req.version_major() == 3 ? "HTTP3" : "HTTP2")
               << "-LOG] Incoming request (stream " << req.stream_id() << "): " << req.path() << "\n";
     co_await next();
@@ -85,7 +85,7 @@ asio::awaitable<void> logger_middleware(const Req &req, const Res &res, base::Ne
 
 // Auth Middleware (Postman header required: Authorization: Bearer secret123)
 template<typename Req, typename Res>
-asio::awaitable<void> auth_middleware(const Req &req, Res &res, base::Next next) {
+wavex::task<void> auth_middleware(const Req &req, Res &res, base::Next next) {
     const auto auth_header = req.header("Authorization");
     if (!auth_header || *auth_header != "Bearer secret123") {
         std::cout << "[AUTH] Unauthorized attempt on " << req.path() << "\n";
@@ -225,14 +225,14 @@ int main(int argc, char *argv[]) {
         r.use(logger_middleware<Req, Res>);
 
         // 1. Root Welcome endpoint
-        r.get("/", [proto](const Req &, Res &res) -> asio::awaitable<void> {
+        r.get("/", [proto](const Req &, Res &res) -> wavex::task<void> {
             res.status(200).send("Welcome to WaveX Composed " + proto + " (RFC 9114 / RFC 9204 / RFC 9000) Dev Server!");
             std::cout.flush();
             co_return;
         });
 
         // 2. Structured JSON Status endpoint
-        r.get("/api/json", [is_tls, is_lan, port, proto](const Req &req, Res &res) -> asio::awaitable<void> {
+        r.get("/api/json", [is_tls, is_lan, port, proto](const Req &req, Res &res) -> wavex::task<void> {
             res.status(200).json({
                 {"server", "WaveX Composed Server"},
                 {"version", wx_version},
@@ -256,7 +256,7 @@ int main(int argc, char *argv[]) {
         });
 
         // 3. POST Echo endpoint (processes JSON body)
-        r.post("/api/echo", [proto](const Req &req, Res &res) -> asio::awaitable<void> {
+        r.post("/api/echo", [proto](const Req &req, Res &res) -> wavex::task<void> {
             const std::string raw(req.body());
             nlohmann::json parsed_body;
 
@@ -282,7 +282,7 @@ int main(int argc, char *argv[]) {
         });
 
         // 4. JSON Query endpoint - Domain to IP DNS Resolver (Supports both POST and QUERY methods)
-        auto dns_query_handler = [proto](const Req &req, Res &res) -> asio::awaitable<void> {
+        auto dns_query_handler = [proto](const Req &req, Res &res) -> wavex::task<void> {
             const std::string raw(req.body());
             std::string domain;
 
@@ -368,7 +368,7 @@ int main(int argc, char *argv[]) {
 
         // 5. Protected route with Auth Middleware
         r.get("/api/protected", {auth_middleware<Req, Res>},
-              [proto](const Req &req, Res &res) -> asio::awaitable<void> {
+              [proto](const Req &req, Res &res) -> wavex::task<void> {
                   res.status(200).json({
                       {"status", "granted"},
                       {"protocol", proto},
@@ -379,7 +379,7 @@ int main(int argc, char *argv[]) {
               });
 
         // 6. Dynamic path parameter
-        r.get("/users/:id", [proto](const Req &req, Res &res) -> asio::awaitable<void> {
+        r.get("/users/:id", [proto](const Req &req, Res &res) -> wavex::task<void> {
             res.status(200).json({
                 {"endpoint", "user_details"},
                 {"protocol", proto},
@@ -390,7 +390,7 @@ int main(int argc, char *argv[]) {
         });
 
         // 7. Wildcard endpoint (*filepath matches any nested subpaths under /files/)
-        r.get("/files/*filepath", [proto](const Req &req, Res &res) -> asio::awaitable<void> {
+        r.get("/files/*filepath", [proto](const Req &req, Res &res) -> wavex::task<void> {
             res.status(200).json({
                 {"endpoint", "wildcard_file_handler"},
                 {"protocol", proto},

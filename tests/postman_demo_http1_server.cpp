@@ -79,14 +79,14 @@ inline std::string get_lan_ip() {
 }
 
 // Global Logger Middleware
-asio::awaitable<void> logger_middleware(const HttpRequest &req, const HttpResponse &res, base::Next next) {
+wavex::task<void> logger_middleware(const HttpRequest &req, const HttpResponse &res, base::Next next) {
     std::cout << "[HTTP1-LOG] Incoming request: " << req.path() << "\n";
     co_await next();
     std::cout << "[HTTP1-LOG] Response status: " << res.status_code() << " for " << req.path() << "\n";
 }
 
 // Auth Middleware (Postman header required: Authorization: Bearer secret123)
-asio::awaitable<void> auth_middleware(const HttpRequest &req, HttpResponse &res, base::Next next) {
+wavex::task<void> auth_middleware(const HttpRequest &req, HttpResponse &res, base::Next next) {
     const auto auth_header = req.header("Authorization");
     if (!auth_header || *auth_header != "Bearer secret123") {
         std::cout << "[HTTP1-AUTH] Unauthorized attempt on " << req.path() << "\n";
@@ -184,13 +184,13 @@ int main(int argc, char *argv[]) {
     auto &router = HttpRouter::instance();
 
     // 1. Root route - Plain text
-    router.get("/", [is_tls](HttpRequest &, HttpResponse &res) -> asio::awaitable<void> {
+    router.get("/", [is_tls](HttpRequest &, HttpResponse &res) -> wavex::task<void> {
         res.status(200).send("Welcome to WaveX HTTP/1.1 " + std::string(is_tls ? "(TLS 1.3) " : "") + "Server!");
         co_return;
     });
 
     // 2. JSON endpoint
-    router.get("/api/json", [is_tls](HttpRequest &, HttpResponse &res) -> asio::awaitable<void> {
+    router.get("/api/json", [is_tls](HttpRequest &, HttpResponse &res) -> wavex::task<void> {
         res.status(200).json({
             {"status", "success"},
             {"framework", "WaveX"},
@@ -211,7 +211,7 @@ int main(int argc, char *argv[]) {
     });
 
     // 3. POST Echo endpoint (processes JSON body)
-    router.post("/api/echo", [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
+    router.post("/api/echo", [](const HttpRequest &req, HttpResponse &res) -> wavex::task<void> {
         const std::string raw(req.body());
         nlohmann::json parsed_body;
 
@@ -236,7 +236,7 @@ int main(int argc, char *argv[]) {
     });
 
     // 4. JSON Query endpoint - Domain to IP DNS Resolver (Supports both POST and QUERY methods)
-    auto dns_query_handler = [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
+    auto dns_query_handler = [](const HttpRequest &req, HttpResponse &res) -> wavex::task<void> {
         const std::string raw(req.body());
         std::string domain;
 
@@ -327,7 +327,7 @@ int main(int argc, char *argv[]) {
     router.query("/api/dns", dns_query_handler);
 
     // 5. Protected route with Auth Middleware
-    router.get("/api/protected", {auth_middleware}, [](HttpRequest &, HttpResponse &res) -> asio::awaitable<void> {
+    router.get("/api/protected", {auth_middleware}, [](HttpRequest &, HttpResponse &res) -> wavex::task<void> {
         res.status(200).json({
             {"status", "granted"},
             {"secret_data", "Super secret HTTP/1.1 information accessible only with valid auth header!"}
@@ -336,7 +336,7 @@ int main(int argc, char *argv[]) {
     });
 
     // 6. Dynamic path parameter
-    router.get("/users/:id", [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
+    router.get("/users/:id", [](const HttpRequest &req, HttpResponse &res) -> wavex::task<void> {
         res.status(200).json({
             {"endpoint", "user_details"},
             {"path", std::string(req.path())}
@@ -345,7 +345,7 @@ int main(int argc, char *argv[]) {
     });
 
     // 6. Wildcard endpoint (*filepath matches any nested subpaths under /files/)
-    router.get("/files/*filepath", [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
+    router.get("/files/*filepath", [](const HttpRequest &req, HttpResponse &res) -> wavex::task<void> {
         res.status(200).json({
             {"endpoint", "wildcard_file_handler"},
             {"matched_path", std::string(req.path())},

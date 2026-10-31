@@ -37,7 +37,7 @@ This rule governs test assertions, mock stream lifetimes, Asio `io_context` isol
 - **Mandatory Pattern in Stream Tests**:
   1. Always wrap coroutines passed to `asio::co_spawn` in an explicit capturing lambda closure:
      ```cpp
-     asio::co_spawn(io, [stream, ctx]() -> asio::awaitable<void> {
+     asio::co_spawn(io, [stream, ctx]() -> wavex::task<void> {
          co_await h3::session_handler::handle_unidirectional_stream(stream, ctx);
      }, asio::detached);
      ```

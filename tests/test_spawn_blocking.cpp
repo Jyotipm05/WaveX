@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <asio/awaitable.hpp>
+#include <wavex/Base/Task.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/io_context.hpp>
@@ -51,7 +52,7 @@ void test_spawn_blocking_coroutine() {
     int computed_result = 0;
     bool exception_caught = false;
 
-    auto test_coro = [&]() -> asio::awaitable<void> {
+    auto test_coro = [&]() -> wavex::task<void> {
         io_thread_id = std::this_thread::get_id();
 
         // 1. Offload heavy computation

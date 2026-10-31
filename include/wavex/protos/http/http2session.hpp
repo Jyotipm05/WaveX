@@ -26,7 +26,7 @@
  *
  * `Services` is supplied by the server (Server::ConnectionServices) and provides:
  *   request_type / response_type, memory(), accepting(), idle_timeout(), max_request_size(), limits(),
- *   mark_idle(), mark_active(), handle(req, res, sink) -> asio::awaitable<bool>.
+ *   mark_idle(), mark_active(), handle(req, res, sink) -> wavex::task<bool>.
  */
 
 #pragma once
@@ -181,7 +181,7 @@ namespace wavex::protos::http::http2 {
         // ─── 4. Member Functions ────────────────────────────────────────────
 
         /// Serve the connection until it closes; returns only once every stream task has finished.
-        asio::awaitable<void> run() {
+        wavex::task<void> run() {
             auto self = this->shared_from_this();
             executor_ = co_await asio::this_coro::executor;
             progress_ = std::make_unique<asio::steady_timer>(executor_, asio::steady_timer::time_point::max());
@@ -215,13 +215,13 @@ namespace wavex::protos::http::http2 {
             outbox_.push_back(std::move(frame));
             if (!writer_active_) {
                 writer_active_ = true;
-                asio::co_spawn(executor_, [self = this->shared_from_this()]() -> asio::awaitable<void> {
+                asio::co_spawn(executor_, [self = this->shared_from_this()]() -> wavex::task<void> {
                     co_await self->write_loop();
                 }, asio::detached);
             }
         }
 
-        asio::awaitable<void> write_loop() {
+        wavex::task<void> write_loop() {
             constexpr std::size_t kBatchBytes = 64 * 1024;
             while (!outbox_.empty() && !dead_) {
                 std::string batch = std::move(outbox_.front());
@@ -248,7 +248,7 @@ namespace wavex::protos::http::http2 {
 
         /// Wait on `event` until `pred()` holds, the connection dies, or `deadline` passes.
         template<typename Pred>
-        asio::awaitable<bool> wait_until(asio::steady_timer &event, Pred pred,
+        wavex::task<bool> wait_until(asio::steady_timer &event, Pred pred,
                                          const std::chrono::steady_clock::time_point deadline) {
             while (!pred()) {
                 if (dead_ || std::chrono::steady_clock::now() >= deadline) co_return pred();
@@ -272,7 +272,7 @@ namespace wavex::protos::http::http2 {
         }
 
         // ─── Reader ─────────────────────────────────────────────────────────
-        asio::awaitable<bool> read_more() {
+        wavex::task<bool> read_more() {
             // Compact the consumed prefix before growing the buffer.
             if (rbuf_offset_ > 0) {
                 rbuf_.erase(0, rbuf_offset_);
@@ -606,7 +606,7 @@ namespace wavex::protos::http::http2 {
             st.dispatched = true;
             ++active_tasks_;
             auto shared = streams_.at(st.id);
-            asio::co_spawn(executor_, [self = this->shared_from_this(), shared]() -> asio::awaitable<void> {
+            asio::co_spawn(executor_, [self = this->shared_from_this(), shared]() -> wavex::task<void> {
                 co_await self->run_stream(shared);
             }, asio::detached);
         }
@@ -618,7 +618,7 @@ namespace wavex::protos::http::http2 {
             st.rejected = true; // any further DATA on this stream is dropped
             ++active_tasks_;
             auto shared = streams_.at(st.id);
-            asio::co_spawn(executor_, [self = this->shared_from_this(), shared, err]() -> asio::awaitable<void> {
+            asio::co_spawn(executor_, [self = this->shared_from_this(), shared, err]() -> wavex::task<void> {
                 co_await self->run_error(shared, err);
             }, asio::detached);
         }
@@ -634,7 +634,7 @@ namespace wavex::protos::http::http2 {
             notify_progress();
         }
 
-        asio::awaitable<void> run_error(std::shared_ptr<stream_state> st, const wavex::protos::protocol_error err) {
+        wavex::task<void> run_error(std::shared_ptr<stream_state> st, const wavex::protos::protocol_error err) {
             auto self = this->shared_from_this();
             try {
                 Response res(services_.memory());
@@ -649,7 +649,7 @@ namespace wavex::protos::http::http2 {
             finish_task(st);
         }
 
-        asio::awaitable<void> run_stream(std::shared_ptr<stream_state> st) {
+        wavex::task<void> run_stream(std::shared_ptr<stream_state> st) {
             auto self = this->shared_from_this();
             try {
                 co_await serve_stream(st);
@@ -660,7 +660,7 @@ namespace wavex::protos::http::http2 {
             finish_task(st);
         }
 
-        asio::awaitable<void> serve_stream(const std::shared_ptr<stream_state> &st) {
+        wavex::task<void> serve_stream(const std::shared_ptr<stream_state> &st) {
             // Arena first, so the request and response (allocated from it) are destroyed before it.
             wavex::memory::RequestArena arena(services_.memory());
             Request req(arena.resource());
@@ -697,7 +697,7 @@ namespace wavex::protos::http::http2 {
             auto weak = this->weak_from_this();
             co_await services_.handle(req, res,
                                       [weak, st](const std::string_view data, const std::chrono::milliseconds timeout)
-                                  -> asio::awaitable<write_result> {
+                                  -> wavex::task<write_result> {
                                           // Copy before the first suspension: `data` is the caller's buffer.
                                           std::string bytes(data);
                                           auto s = weak.lock();
@@ -730,7 +730,7 @@ namespace wavex::protos::http::http2 {
             }
         }
 
-        asio::awaitable<void> send_response(const std::shared_ptr<stream_state> &st, Response &res,
+        wavex::task<void> send_response(const std::shared_ptr<stream_state> &st, Response &res,
                                             const bool keep_open) {
             std::pmr::string wire(services_.memory());
             res.serialize_to(wire);
@@ -746,7 +746,7 @@ namespace wavex::protos::http::http2 {
          * @brief Queue frames produced for stream `st` (by the codec or a streaming response), honouring the
          *        peer's flow-control windows and maximum frame size. Frames are re-addressed to `st`.
          */
-        asio::awaitable<write_result> send_frames(std::shared_ptr<stream_state> st, std::string bytes,
+        wavex::task<write_result> send_frames(std::shared_ptr<stream_state> st, std::string bytes,
                                                   const std::chrono::milliseconds timeout) {
             auto self = this->shared_from_this();
             const auto deadline = std::chrono::steady_clock::now() +
@@ -800,7 +800,7 @@ namespace wavex::protos::http::http2 {
         }
 
         // ─── Tunnel (extended CONNECT stream as a byte stream) ──────────────
-        static asio::awaitable<network::AnyStream::read_result> tunnel_read(
+        static wavex::task<network::AnyStream::read_result> tunnel_read(
             std::shared_ptr<server_session> self, std::shared_ptr<stream_state> st, const asio::mutable_buffer out) {
             for (;;) {
                 if (!st->tunnel_in.empty()) {
@@ -827,7 +827,7 @@ namespace wavex::protos::http::http2 {
             }
         }
 
-        static asio::awaitable<std::error_code> tunnel_write(std::shared_ptr<server_session> self,
+        static wavex::task<std::error_code> tunnel_write(std::shared_ptr<server_session> self,
                                                              std::shared_ptr<stream_state> st,
                                                              const asio::const_buffer in) {
             if (st->local_closed) co_return std::make_error_code(std::errc::broken_pipe);
@@ -841,12 +841,12 @@ namespace wavex::protos::http::http2 {
             auto ops = std::make_shared<network::AnyStream::operations>();
             ops->executor = executor_;
             std::weak_ptr<server_session> weak = this->shared_from_this();
-            ops->read_some = [weak, st](const asio::mutable_buffer b) -> asio::awaitable<network::AnyStream::read_result> {
+            ops->read_some = [weak, st](const asio::mutable_buffer b) -> wavex::task<network::AnyStream::read_result> {
                 auto self = weak.lock();
                 if (!self) co_return network::AnyStream::read_result{asio::error::connection_reset, 0};
                 co_return co_await tunnel_read(std::move(self), st, b);
             };
-            ops->write = [weak, st](const asio::const_buffer b) -> asio::awaitable<std::error_code> {
+            ops->write = [weak, st](const asio::const_buffer b) -> wavex::task<std::error_code> {
                 auto self = weak.lock();
                 if (!self) co_return std::error_code(asio::error::connection_reset);
                 co_return co_await tunnel_write(std::move(self), st, b);
@@ -873,7 +873,7 @@ namespace wavex::protos::http::http2 {
         }
 
         // ─── Shutdown ───────────────────────────────────────────────────────
-        asio::awaitable<void> shutdown() {
+        wavex::task<void> shutdown() {
             // Tell the stream tasks the connection is going away, then wait for them: they allocate from the
             // connection's memory pool, which must outlive them.
             if (!dead_) mark_dead_after_flush();

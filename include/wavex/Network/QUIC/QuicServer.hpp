@@ -17,7 +17,9 @@
 #include <unordered_map>
 
 #include <asio/awaitable.hpp>
+#include <wavex/Base/Task.hpp>
 #include <asio/io_context.hpp>
+#include <wavex/Base/Executor.hpp>
 #include <asio/ip/udp.hpp>
 
 #include <wavex/Network/QUIC/ConnectionId.hpp>
@@ -32,14 +34,14 @@ namespace wavex::network::quic {
     class QuicServer {
     public:
         // ─── 1. Nested Types & Definitions (TOP) ───────────────────────────
-        using StreamHandler = std::function<asio::awaitable<void>(std::shared_ptr<QuicStream>)>;
-        using UniStreamHandler = std::function<asio::awaitable<void>(std::shared_ptr<QuicStream>)>;
+        using StreamHandler = std::function<wavex::task<void>(std::shared_ptr<QuicStream>)>;
+        using UniStreamHandler = std::function<wavex::task<void>(std::shared_ptr<QuicStream>)>;
         /// RFC 9000 §14.1: minimum UDP payload of a datagram carrying a client Initial packet.
         static constexpr std::size_t kMinInitialDatagramSize = 1200;
 
     private:
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
-        asio::io_context &io_;
+        wavex::executor ex_;
         SSL_CTX *shared_ssl_ctx_{nullptr};
         asio::ip::udp::socket socket_;
         asio::ip::udp::endpoint sender_endpoint_{};
@@ -58,9 +60,16 @@ namespace wavex::network::quic {
 
     public:
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
-        QuicServer(asio::io_context &io, uint16_t port);
+        /// Runs on `ex` (any executor, e.g. an io_context's, a strand, or the server's own); the io_context
+        /// overloads are the same thing for the common case.
+        QuicServer(const wavex::executor &ex, uint16_t port);
 
-        QuicServer(asio::io_context &io, std::string_view host, uint16_t port);
+        QuicServer(const wavex::executor &ex, std::string_view host, uint16_t port);
+
+        QuicServer(asio::io_context &io, uint16_t port) : QuicServer(wavex::executor_of(io), port) {}
+
+        QuicServer(asio::io_context &io, std::string_view host, uint16_t port)
+            : QuicServer(wavex::executor_of(io), host, port) {}
 
         ~QuicServer();
 

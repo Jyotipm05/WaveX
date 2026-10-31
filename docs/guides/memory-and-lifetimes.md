@@ -76,7 +76,7 @@ The per-connection read buffer (`stream_buf`) is shrunk with `shrink_to_fit()` w
 
 ```c++
 // Example: In-turn zero-copy vs escaping
-router.get("/users/:id", [](auto &req, auto &res) -> asio::awaitable<void> {
+router.get("/users/:id", [](auto &req, auto &res) -> wavex::task<void> {
     // 1. In-turn: zero-copy validation
     std::string_view id_view = req.param("id").value_or("");
     int user_id = 0;

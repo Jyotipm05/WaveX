@@ -46,7 +46,7 @@ namespace wavex::client {
         }
 
         template<typename Stream>
-        asio::awaitable<ClientResponse> execute_http1_exchange(
+        wavex::task<ClientResponse> execute_http1_exchange(
             Stream &stream,
             const std::string &host_header,
             const ClientRequest &req,
@@ -161,7 +161,7 @@ namespace wavex::client {
         }
 
         template<typename Stream>
-        asio::awaitable<ClientResponse> execute_http2_exchange(
+        wavex::task<ClientResponse> execute_http2_exchange(
             Stream &stream,
             const std::string &scheme,
             const std::string &host_header,
@@ -395,7 +395,7 @@ namespace wavex::client {
         }
     } // anonymous namespace
 
-    asio::awaitable<ClientResponse> HttpClient::send(const ClientRequest &req, const ClientOptions &options) {
+    wavex::task<ClientResponse> HttpClient::send(const ClientRequest &req, const ClientOptions &options) {
         ClientResponse res;
 
         // 1. Target URL parsing

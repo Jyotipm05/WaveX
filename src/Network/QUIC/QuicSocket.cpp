@@ -800,7 +800,7 @@ namespace wavex::network::quic {
                                     const uint64_t sid = stream->stream_id();
                                     // Client-initiated unidirectional stream (sid & 0x03 == 2)
                                     if ((sid & 0x03) == 0x02) {
-                                        asio::co_spawn(executor_, [stream]() -> asio::awaitable<void> {
+                                        asio::co_spawn(executor_, [stream]() -> wavex::task<void> {
                                             char buf[1024];
                                             while (stream->is_open()) {
                                                 auto [ec, n] = co_await stream->async_read_some(

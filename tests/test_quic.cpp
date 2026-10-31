@@ -268,7 +268,7 @@ static void test_quic_stream_async() {
     std::string received_data;
 
     // Launch async coroutine reader
-    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+    asio::co_spawn(io, [&]() -> wavex::task<void> {
         char buf[128];
         auto [ec, n] = co_await stream->async_read_some(
             asio::buffer(buf), asio::as_tuple(asio::use_awaitable));
@@ -591,8 +591,11 @@ static void test_udp_basic_loopback() {
     std::cout << "  [PASS] Basic UDP loopback passed." << std::endl;
 }
 
-static void test_quic_server_client_loopback() {
-    std::cout << "[Test QUIC] QuicServer and QuicClient UDP integration loopback..." << std::endl;
+// `use_strand` runs the server and the client on strands (type-erased executors that are not plain io_context
+// executors), covering the executor seam: QuicServer/QuicClient must work on any wavex::executor.
+static void test_quic_server_client_loopback(const bool use_strand = false, const uint16_t bind_port = 8445) {
+    std::cout << "[Test QUIC] QuicServer and QuicClient UDP integration loopback"
+              << (use_strand ? " (strand executors)..." : "...") << std::endl;
 
     asio::io_context server_io;
     asio::io_context client_io;
@@ -602,7 +605,9 @@ static void test_quic_server_client_loopback() {
     const std::string cert_path = (project_root / "ssl" / "test.crt").string();
     const std::string key_path = (project_root / "ssl" / "test.key").string();
 
-    QuicServer server(server_io, "127.0.0.1", 8445);
+    const wavex::executor server_ex = use_strand ? wavex::executor(asio::make_strand(server_io)) : wavex::executor_of(server_io);
+    const wavex::executor client_ex = use_strand ? wavex::executor(asio::make_strand(client_io)) : wavex::executor_of(client_io);
+    QuicServer server(server_ex, "127.0.0.1", bind_port);
     server.set_tls_credentials(cert_path, key_path);
     const uint16_t port = server.local_port();
     assert(port > 0);
@@ -610,7 +615,7 @@ static void test_quic_server_client_loopback() {
 
     std::string server_received_msg;
 
-    server.set_stream_handler([&](std::shared_ptr<QuicStream> stream) -> asio::awaitable<void> {
+    server.set_stream_handler([&](std::shared_ptr<QuicStream> stream) -> wavex::task<void> {
         [[maybe_unused]] bool server_received_stream = true;
         char buf[256];
         auto [ec, n] = co_await stream->async_read_some(asio::buffer(buf), asio::as_tuple(asio::use_awaitable));
@@ -648,12 +653,12 @@ static void test_quic_server_client_loopback() {
     });
 
     // Client connects
-    QuicClient client(client_io);
+    QuicClient client(client_ex);
     client.set_verify_peer(false); // ssl/test.crt is self-signed
     bool connected = false;
     std::string client_received_echo;
 
-    asio::co_spawn(client_io, [&]() -> asio::awaitable<void> {
+    asio::co_spawn(client_io, [&]() -> wavex::task<void> {
         connected = co_await client.connect("127.0.0.1", port);
         assert(connected);
 
@@ -955,7 +960,7 @@ static void test_quic_socket_acceptor_coroutine() {
     assert(port > 0);
 
     bool server_finished = false;
-    asio::co_spawn(server_io, [&]() -> asio::awaitable<void> {
+    asio::co_spawn(server_io, [&]() -> wavex::task<void> {
         quic::socket sock(server_io);
         co_await acceptor.async_accept(sock, asio::use_awaitable);
 
@@ -980,7 +985,7 @@ static void test_quic_socket_acceptor_coroutine() {
     bool client_finished = false;
     std::string client_result;
 
-    asio::co_spawn(client_io, [&]() -> asio::awaitable<void> {
+    asio::co_spawn(client_io, [&]() -> wavex::task<void> {
         quic::socket client(client_io);
         quic::endpoint server_ep(asio::ip::make_address("127.0.0.1"), port);
         co_await client.async_connect(server_ep, asio::use_awaitable);
@@ -1645,7 +1650,7 @@ static void test_quic_tls_ctx_move_and_accept_stream() {
         uint64_t accepted_sid = 0;
 
         // Coroutine suspends waiting on accept_stream() (A10: lock must be released before suspension)
-        asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        asio::co_spawn(io, [&]() -> wavex::task<void> {
             auto stream = co_await conn->accept_stream();
             assert(stream != nullptr);
             accepted_sid = stream->stream_id();
@@ -1666,7 +1671,7 @@ static void test_quic_tls_ctx_move_and_accept_stream() {
         // A second accept_stream() should suspend waiting for a NEW stream and NOT immediately return stream 4
         io.restart();
         bool second_stream_accepted = false;
-        asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        asio::co_spawn(io, [&]() -> wavex::task<void> {
             auto stream = co_await conn->accept_stream();
             second_stream_accepted = true;
             io.stop();
@@ -1843,7 +1848,7 @@ static void test_quic_stream_limits_and_coroutine_termination() {
         bool coroutine_completed = false;
         std::error_code read_ec;
 
-        asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        asio::co_spawn(io, [&]() -> wavex::task<void> {
             char buf[64];
             auto [ec, n] = co_await stream->async_read_some(
                 asio::buffer(buf), asio::as_tuple(asio::use_awaitable));
@@ -2355,6 +2360,7 @@ int main() {
         test_quic_critical_mtu_flow_control_anti_amplification();
         test_udp_basic_loopback();
         test_quic_server_client_loopback();
+        test_quic_server_client_loopback(true, 8446);
         test_quic_protocol();
         test_quic_socket_acceptor_tcp_syntax();
         test_quic_socket_acceptor_coroutine();

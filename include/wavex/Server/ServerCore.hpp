@@ -31,8 +31,10 @@
 #include <wavex/Base/Memory.hpp>
 
 #include <asio/io_context.hpp>
+#include <wavex/Base/Executor.hpp>
 #include <asio/ip/tcp.hpp>
 #include <asio/awaitable.hpp>
+#include <wavex/Base/Task.hpp>
 #include <asio/signal_set.hpp>
 #include <asio/steady_timer.hpp>
 
@@ -81,7 +83,7 @@ namespace wavex::server {
         using traits = protos::protocol_traits<Codec>;
         using RequestType = RouterType::RequestType;
         using ResponseType = RouterType::ResponseType;
-        using NotFoundHandler = std::function<asio::awaitable<void>(RequestType &, ResponseType &)>;
+        using NotFoundHandler = std::function<wavex::task<void>(RequestType &, ResponseType &)>;
 
         static constexpr bool has_quic_transport = requires {
             { traits::has_quic_transport } -> std::convertible_to<bool>;
@@ -152,7 +154,7 @@ namespace wavex::server {
 
             /// Run one parsed request through the server's pipeline; `sink` streams the response body.
             template<typename Sink>
-            asio::awaitable<bool> handle(request_type &req, response_type &res, Sink sink) {
+            wavex::task<bool> handle(request_type &req, response_type &res, Sink sink) {
                 return server_.template process_request<CustomCodec>(
                     req, res, router_, true, server_.max_keep_alive_requests_, std::move(sink));
             }
@@ -235,7 +237,7 @@ namespace wavex::server {
 
         // Connection handling (ServerConnection.ipp)
         template<typename Stream>
-        asio::awaitable<void> handle_connection(std::shared_ptr<Stream> stream_ptr);
+        wavex::task<void> handle_connection(std::shared_ptr<Stream> stream_ptr);
 
         template<typename Stream>
         void spawn_connection(std::shared_ptr<Stream> stream_ptr);
@@ -272,6 +274,8 @@ namespace wavex::server {
         [[nodiscard]] std::size_t active_connections() const noexcept;
         [[nodiscard]] ThreadPool &pool() noexcept;
         [[nodiscard]] asio::io_context &io_context() noexcept;
+        /// The server's master executor (same context as `io_context()`), as the type the transports are written against.
+        [[nodiscard]] wavex::executor executor() noexcept;
         [[nodiscard]] bool is_acceptor_open() const noexcept;
 
         // Memory management (ServerConfig.ipp)
@@ -290,17 +294,17 @@ namespace wavex::server {
         void init_ssl();
 #endif
 
-        asio::awaitable<void> accept_loop();
-        static asio::ip::tcp::socket adopt_on_worker(asio::ip::tcp::socket &&accepted, asio::io_context &worker_io);
+        wavex::task<void> accept_loop();
+        static asio::ip::tcp::socket adopt_on_worker(asio::ip::tcp::socket &&accepted, const wavex::executor &worker);
 
         template<typename Stream>
         static decltype(auto) get_stream_socket(Stream &s) noexcept;
 
         template<typename Stream>
-        static asio::awaitable<void> drain_and_abort(Stream &s);
+        static wavex::task<void> drain_and_abort(Stream &s);
 
         template<typename CustomCodec, typename CustomRouter, typename Stream>
-        asio::awaitable<void> handle_connection_impl(std::shared_ptr<Stream> stream_ptr,
+        wavex::task<void> handle_connection_impl(std::shared_ptr<Stream> stream_ptr,
                                                      CustomRouter &router);
 
         /**
@@ -310,11 +314,11 @@ namespace wavex::server {
          * @return whether the connection may stay open after this request.
          */
         template<typename CustomCodec, typename CustomRouter, typename CustReq, typename CustRes, typename Sink>
-        asio::awaitable<bool> process_request(CustReq &req, CustRes &res, CustomRouter &router, bool keep,
+        wavex::task<bool> process_request(CustReq &req, CustRes &res, CustomRouter &router, bool keep,
                                               unsigned remaining, Sink sink);
 
         template<typename ReqT, typename ResT, typename MwVec, typename H>
-        static asio::awaitable<void> run_chain(ReqT &req, ResT &res, const MwVec &mws,
+        static wavex::task<void> run_chain(ReqT &req, ResT &res, const MwVec &mws,
                                                const H &handler);
     };
 

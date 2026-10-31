@@ -5,6 +5,7 @@
 #include <vector>
 
 #include <asio/awaitable.hpp>
+#include <wavex/Base/Task.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/io_context.hpp>
@@ -26,7 +27,7 @@ void test_async_fs_operations() {
 
     bool all_passed = false;
 
-    auto test_coro = [&]() -> asio::awaitable<void> {
+    auto test_coro = [&]() -> wavex::task<void> {
         // 1. write_file
         const std::string original_data = "WaveX AsyncFs High-Performance File I/O\nLine 2";
         auto write_res = co_await wavex::fs::write_file(test_file, original_data);
@@ -101,7 +102,7 @@ void test_async_fs_utf8_operations() {
 
     bool all_passed = false;
 
-    auto test_coro = [&]() -> asio::awaitable<void> {
+    auto test_coro = [&]() -> wavex::task<void> {
         // 1. write_file with UTF-8 path string
         const std::string original_data = "WaveX AsyncFs UTF-8 Payload: こんにちは世界 🚀";
         auto write_res = co_await wavex::fs::write_file(u8_file, original_data);

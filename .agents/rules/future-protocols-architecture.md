@@ -31,7 +31,7 @@ WaveX server architecture is built around three strictly decoupled seams:
 ```
 
 ### Seam 1: Transport Seam (`AsyncStream`)
-- Handled uniformly via `template<typename Stream> asio::awaitable<void> handle_connection(std::shared_ptr<Stream> stream_ptr)`.
+- Handled uniformly via `template<typename Stream> wavex::task<void> handle_connection(std::shared_ptr<Stream> stream_ptr)`.
 - Stream concept requires `stream.async_read_some(...)` and `stream.async_write_some(...)`.
 - Worker-pool TLS handshake is guarded with C++20 requires:
   ```cpp
@@ -82,7 +82,7 @@ WaveX server architecture is built around three strictly decoupled seams:
   ```
 - **Streaming Sink**: All streaming operations in `HttpResponse` write through `write_sink_fn`:
   ```cpp
-  using write_sink_fn = std::function<asio::awaitable<std::expected<void, std::error_code>>(
+  using write_sink_fn = std::function<wavex::task<std::expected<void, std::error_code>>(
       std::string_view, std::chrono::milliseconds)>;
   ```
   `Server` binds `write_sink_` to the active `Stream` before executing route handlers, making chunked streaming and file transfers 100% transport-agnostic (working identically over Plain TCP, TLS 1.3, and QUIC streams).

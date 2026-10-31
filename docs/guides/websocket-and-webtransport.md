@@ -28,7 +28,7 @@ int main() {
     auto router = wavex::engine::Http1Router::make_instance();
 
     router.websocket("/echo", [](Http1Request &req, std::shared_ptr<ws::connection> conn)
-        -> asio::awaitable<void> {
+        -> wavex::task<void> {
         while (auto msg = co_await conn->read()) {   // text or binary, fragments reassembled
             conn->send(*msg);                        // queued; safe from any thread
         }
@@ -64,7 +64,7 @@ worker threads) safe:
 std::mutex room_mtx;
 std::vector<std::weak_ptr<ws::connection>> room;
 
-router.websocket("/chat", [&](Http1Request &, std::shared_ptr<ws::connection> conn) -> asio::awaitable<void> {
+router.websocket("/chat", [&](Http1Request &, std::shared_ptr<ws::connection> conn) -> wavex::task<void> {
     { std::lock_guard lock(room_mtx); room.push_back(conn); }
     while (auto msg = co_await conn->read()) {
         std::lock_guard lock(room_mtx);
@@ -97,7 +97,7 @@ using wavex::protos::http::Http3Request;
 
 wavex::engine::Http3Router router;
 router.webtransport("/wt", [](Http3Request &req, std::shared_ptr<wt::session> session)
-    -> asio::awaitable<void> {
+    -> wavex::task<void> {
     // Echo every bidirectional stream the browser opens.
     while (auto stream = co_await session->accept_bidirectional_stream()) {
         auto [ec, data] = co_await stream->read_all();
@@ -126,7 +126,7 @@ draft-02 `SETTINGS_ENABLE_WEBTRANSPORT` that Chromium-based browsers still requi
 the `sec-webtransport-http3-draft: draft02` response header.
 
 On `ComposedHttpServer` use `server.webtransport("/wt", handler)` (HTTP/3) and
-`server.websocket("/ws", [](std::shared_ptr<ws::connection> conn) -> asio::awaitable<void> { ... })`, which
+`server.websocket("/ws", [](std::shared_ptr<ws::connection> conn) -> wavex::task<void> { ... })`, which
 registers the endpoint on both the HTTP/2 and the HTTP/3 router.
 
 ### Limits and caveats

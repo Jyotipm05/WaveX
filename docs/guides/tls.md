@@ -13,7 +13,7 @@ Enable strict TLS 1.3 HTTPS server encryption using `server.enable_tls()` with c
 int main() {
     auto &router = wavex::engine::HttpRouter::instance();
 
-    router.get("/secure", [](auto &, auto &res) -> asio::awaitable<void> {
+    router.get("/secure", [](auto &, auto &res) -> wavex::task<void> {
         res.status(200).json({{"encrypted", true}, {"protocol", "TLS 1.3"}});
         co_return;
     });

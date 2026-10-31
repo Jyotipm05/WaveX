@@ -16,6 +16,8 @@
 #include <wavex/Version.hpp>
 #include <wavex/Base/Logger.hpp>
 #include <wavex/Base/Chainable.hpp>
+#include <wavex/Base/Executor.hpp>
+#include <wavex/Base/Task.hpp>
 #include <wavex/Base/MimeTypes.hpp>
 #include <wavex/Base/Event.hpp>
 #include <wavex/protos/protos.hpp>

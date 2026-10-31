@@ -202,30 +202,30 @@ int main() {
     std::cout << "==================================================" << std::endl;
 
     auto router = wavex::engine::Http2Router::make_instance();
-    router.get("/fast", [](Http2Request &, Http2Response &res) -> asio::awaitable<void> {
+    router.get("/fast", [](Http2Request &, Http2Response &res) -> wavex::task<void> {
         res.status(200).send("fast");
         co_return;
     });
-    router.get("/slow", [](Http2Request &, Http2Response &res) -> asio::awaitable<void> {
+    router.get("/slow", [](Http2Request &, Http2Response &res) -> wavex::task<void> {
         asio::steady_timer t(co_await asio::this_coro::executor, std::chrono::milliseconds(400));
         co_await t.async_wait(asio::use_awaitable);
         res.status(200).send("slow");
     });
-    router.get("/big", [](Http2Request &, Http2Response &res) -> asio::awaitable<void> {
+    router.get("/big", [](Http2Request &, Http2Response &res) -> wavex::task<void> {
         res.status(200).send(std::string(100000, 'b'));
         co_return;
     });
-    router.post("/echo", [](Http2Request &req, Http2Response &res) -> asio::awaitable<void> {
+    router.post("/echo", [](Http2Request &req, Http2Response &res) -> wavex::task<void> {
         res.status(200).send(std::string(req.body()));
         co_return;
     });
-    router.get("/stream", [](Http2Request &, Http2Response &res) -> asio::awaitable<void> {
+    router.get("/stream", [](Http2Request &, Http2Response &res) -> wavex::task<void> {
         res.status(200);
         std::ignore = co_await res.write_chunk("part1-");
         std::ignore = co_await res.write_chunk("part2");
         std::ignore = co_await res.end_chunked();
     });
-    router.websocket("/ws", [](Http2Request &, std::shared_ptr<ws::connection> c) -> asio::awaitable<void> {
+    router.websocket("/ws", [](Http2Request &, std::shared_ptr<ws::connection> c) -> wavex::task<void> {
         while (auto m = co_await c->read()) c->send(*m);
     });
 
@@ -416,7 +416,7 @@ int main() {
         std::cout << "\n[Test H2] HttpClient interoperability" << std::endl;
         asio::io_context io;
         std::string body;
-        asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        asio::co_spawn(io, [&]() -> wavex::task<void> {
             const wavex::client::ClientOptions opts{.version = wavex::client::HttpVersion::Http2};
             auto r = co_await wavex::client::HttpClient::get("http://127.0.0.1:" + std::to_string(kPort) + "/big", opts);
             body = std::string(r.get_body());

@@ -18,6 +18,7 @@
 #include <wavex/Utils/FsUtils.hpp>
 #include <wavex/Utils/BinaryFile.hpp>
 #include <asio/awaitable.hpp>
+#include <wavex/Base/Task.hpp>
 #include <string>
 #include <vector>
 #include <expected>
@@ -25,7 +26,7 @@
 #include <utility>
 
 namespace wavex::fs {
-    asio::awaitable<std::expected<std::string, std::error_code> > read_file(std::string path) {
+    wavex::task<std::expected<std::string, std::error_code> > read_file(std::string path) {
         auto res = co_await spawn_blocking(
             [p = std::move(path)]() -> std::expected<std::string, std::error_code> {
                 if (std::error_code ec; !utils::fs_utils::exists(p, ec) || ec) {
@@ -41,7 +42,7 @@ namespace wavex::fs {
         co_return res;
     }
 
-    asio::awaitable<std::expected<std::vector<char>, std::error_code> > read_bytes(std::string path) {
+    wavex::task<std::expected<std::vector<char>, std::error_code> > read_bytes(std::string path) {
         auto res = co_await spawn_blocking(
             [p = std::move(path)]() -> std::expected<std::vector<char>, std::error_code> {
                 if (std::error_code ec; !utils::fs_utils::exists(p, ec) || ec) {
@@ -58,7 +59,7 @@ namespace wavex::fs {
         co_return res;
     }
 
-    asio::awaitable<std::expected<void, std::error_code> > write_file(std::string path, std::string content) {
+    wavex::task<std::expected<void, std::error_code> > write_file(std::string path, std::string content) {
         auto res = co_await spawn_blocking(
             [p = std::move(path), data = std::move(content)]() -> std::expected<void, std::error_code> {
                 if (!utils::BinaryFile::write_all(p, data, false)) {
@@ -69,7 +70,7 @@ namespace wavex::fs {
         co_return res;
     }
 
-    asio::awaitable<std::expected<void, std::error_code> > append_file(std::string path, std::string content) {
+    wavex::task<std::expected<void, std::error_code> > append_file(std::string path, std::string content) {
         auto res = co_await spawn_blocking(
             [p = std::move(path), data = std::move(content)]() -> std::expected<void, std::error_code> {
                 if (!utils::BinaryFile::write_all(p, data, true)) {
@@ -80,7 +81,7 @@ namespace wavex::fs {
         co_return res;
     }
 
-    asio::awaitable<std::expected<void, std::error_code> > copy_file(std::string from, std::string to, bool overwrite) {
+    wavex::task<std::expected<void, std::error_code> > copy_file(std::string from, std::string to, bool overwrite) {
         auto res = co_await spawn_blocking(
             [f = std::move(from), t = std::move(to), overwrite]() -> std::expected<void, std::error_code> {
                 std::error_code ec;
@@ -93,7 +94,7 @@ namespace wavex::fs {
         co_return res;
     }
 
-    asio::awaitable<std::expected<bool, std::error_code> > remove(std::string path) {
+    wavex::task<std::expected<bool, std::error_code> > remove(std::string path) {
         auto res = co_await spawn_blocking([p = std::move(path)]() -> std::expected<bool, std::error_code> {
             std::error_code ec;
             const bool removed = utils::fs_utils::remove(p, ec);

@@ -170,7 +170,7 @@ namespace wavex::protos {
 
         // Called immediately on socket connect (for preface exchange/handshake)
         template<typename Stream>
-        static asio::awaitable<bool> on_connection_start(Stream &, std::string &) {
+        static wavex::task<bool> on_connection_start(Stream &, std::string &) {
             co_return true;
         }
 
@@ -207,7 +207,7 @@ namespace wavex::protos {
         // template<typename Request, typename Response>
         // static bool wants_takeover(const Request &req, const Response &res) noexcept;
         // template<typename Stream, typename Request, typename Response>
-        // static asio::awaitable<void> take_over(std::shared_ptr<Stream> stream, Request &req,
+        // static wavex::task<void> take_over(std::shared_ptr<Stream> stream, Request &req,
         //                                        Response &res, std::string unread);
 
         // Optional: drive the whole connection yourself (e.g. a multiplexed protocol, as HTTP/2 does).
@@ -215,7 +215,7 @@ namespace wavex::protos {
         // `services.handle(req, res, sink)`, the server's routing pipeline. Do not return while any task you
         // spawned can still use `services`.
         // template<typename Stream, typename Services>
-        // static asio::awaitable<void> serve_connection(std::shared_ptr<Stream> stream, std::string buffered,
+        // static wavex::task<void> serve_connection(std::shared_ptr<Stream> stream, std::string buffered,
         //                                               Services &services);
     };
 
@@ -233,7 +233,7 @@ You can use the general `wavex::engine::Router<MyCodec>` or build a domain-speci
 
 class MyRouter : public wavex::engine::Router<MyCodec> {
 public:
-    using Handler = std::function<asio::awaitable<void>(MyRequest &, MyResponse &)>;
+    using Handler = std::function<wavex::task<void>(MyRequest &, MyResponse &)>;
 
     static MyRouter &instance() {
         static MyRouter r;
@@ -264,13 +264,13 @@ int main() {
     auto &router = MyRouter::instance();
 
     // 1. PING command -> replies PONG
-    router.command("PING", [](MyRequest &, MyResponse &res) -> asio::awaitable<void> {
+    router.command("PING", [](MyRequest &, MyResponse &res) -> wavex::task<void> {
         res.reply("PONG");
         co_return;
     });
 
     // 2. SET command (argument: "key=value")
-    router.command("SET", [](MyRequest &req, MyResponse &res) -> asio::awaitable<void> {
+    router.command("SET", [](MyRequest &req, MyResponse &res) -> wavex::task<void> {
         auto arg = req.argument();
         auto eq = arg.find('=');
         if (eq == std::string_view::npos) {
@@ -285,7 +285,7 @@ int main() {
     });
 
     // 3. GET command (argument: "key")
-    router.command("GET", [](MyRequest &req, MyResponse &res) -> asio::awaitable<void> {
+    router.command("GET", [](MyRequest &req, MyResponse &res) -> wavex::task<void> {
         std::string key(req.argument());
         if (auto it = g_kv_store.find(key); it != g_kv_store.end()) {
             res.reply(it->second);

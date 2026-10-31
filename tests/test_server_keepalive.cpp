@@ -132,7 +132,7 @@ void test_middleware_keep_alive() {
 
     wavex::protos::http::Http1Response res;
     bool next_called = false;
-    wavex::base::Next next = [&next_called]() -> asio::awaitable<void> {
+    wavex::base::Next next = [&next_called]() -> wavex::task<void> {
         next_called = true;
         co_return;
     };
@@ -164,13 +164,13 @@ void test_server_persistent_connection() {
 
     auto router = wavex::engine::Http1Router::make_instance();
     router.get("/hello", [](wavex::protos::http::Http1Request &,
-                            wavex::protos::http::Http1Response &res) -> asio::awaitable<void> {
+                            wavex::protos::http::Http1Response &res) -> wavex::task<void> {
         res.status(200).send("Hello KeepAlive");
         co_return;
     });
 
     router.get("/counter", [](wavex::protos::http::Http1Request &,
-                              wavex::protos::http::Http1Response &res) -> asio::awaitable<void> {
+                              wavex::protos::http::Http1Response &res) -> wavex::task<void> {
         static int counter = 0;
         counter++;
         res.status(200).send(std::to_string(counter));
@@ -263,13 +263,13 @@ void test_server_204_keepalive() {
 
     auto router = wavex::engine::Http1Router::make_instance();
     router.post("/delete-item", [](wavex::protos::http::Http1Request &,
-                                   wavex::protos::http::Http1Response &res) -> asio::awaitable<void> {
+                                   wavex::protos::http::Http1Response &res) -> wavex::task<void> {
         res.status(204).send("");
         co_return;
     });
 
     router.get("/status", [](wavex::protos::http::Http1Request &,
-                             wavex::protos::http::Http1Response &res) -> asio::awaitable<void> {
+                             wavex::protos::http::Http1Response &res) -> wavex::task<void> {
         res.status(200).send("OK Status");
         co_return;
     });

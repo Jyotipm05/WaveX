@@ -27,6 +27,7 @@
 #define ASIO_HAS_PTHREADS 1
 #endif
 #include <asio/awaitable.hpp>
+#include <wavex/Base/Task.hpp>
 
 namespace wavex {
     /**
@@ -122,13 +123,13 @@ namespace wavex {
         }
 
         template<typename... Args>
-        asio::awaitable<bool> process_all_async(Args &&... args) {
+        wavex::task<bool> process_all_async(Args &&... args) {
             co_return co_await process_all_async_impl<0>(args...);
         }
 
     private:
         template<std::size_t Index, typename... Args>
-        asio::awaitable<bool> process_all_async_impl(Args &... args) {
+        wavex::task<bool> process_all_async_impl(Args &... args) {
             if constexpr (Index < sizeof...(Handlers)) {
                 auto &h = std::get<Index>(handlers_);
                 using Ret = std::remove_cvref_t<decltype(unwrap(h).handle(args...))>;
@@ -204,7 +205,7 @@ namespace wavex {
                 if constexpr (std::same_as<Ret, bool>) {
                     return true;
                 } else if constexpr (awaitable_traits<Ret>::is_awaitable) {
-                    auto bypass = []() -> asio::awaitable<bool> { co_return true; };
+                    auto bypass = []() -> wavex::task<bool> { co_return true; };
                     return bypass();
                 } else {
                     return;

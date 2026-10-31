@@ -36,7 +36,7 @@ curl -k https://127.0.0.1:8443/api/json
 
 int main() {
     auto &router = wavex::engine::HttpRouter::instance();
-    router.get("/api/hello", [](auto &, auto &res) -> asio::awaitable<void> {
+    router.get("/api/hello", [](auto &, auto &res) -> wavex::task<void> {
         res.status(200).json({{"message", "Hello, World!"}, {"framework", "WaveX"}});
         co_return;
     });

@@ -53,6 +53,7 @@
 #include <wavex/Base/MiddleWare.hpp>
 #include <wavex/Base/Chainable.hpp>
 #include <asio/awaitable.hpp>
+#include <wavex/Base/Task.hpp>
 
 namespace re2 {
     class RE2;
@@ -129,10 +130,10 @@ namespace wavex::engine {
         using ResponseType = Proto::response;
 
         /// Handler signature for this router's protocol
-        using Handler = std::function<asio::awaitable<void>(RequestType &, ResponseType &)>;
+        using Handler = std::function<wavex::task<void>(RequestType &, ResponseType &)>;
 
         /// 404 Not Found handler signature
-        using NotFoundHandler = std::function<asio::awaitable<void>(RequestType &, ResponseType &)>;
+        using NotFoundHandler = std::function<wavex::task<void>(RequestType &, ResponseType &)>;
 
         /// Middleware function signature for this router's protocol
         using MiddlewareFn = base::GenericMiddlewareFn<RequestType, ResponseType>;
@@ -245,7 +246,7 @@ namespace wavex::engine {
         // Cache of compiled RE2 constraints keyed by pattern text.
         std::unordered_map<std::string, std::shared_ptr<re2::RE2> > regex_cache_{};
         NotFoundHandler not_found_handler_{
-            [](RequestType &, ResponseType &res) -> asio::awaitable<void> {
+            [](RequestType &, ResponseType &res) -> wavex::task<void> {
                 res.status(404).send("Not Found");
                 co_return;
             }
@@ -353,7 +354,7 @@ namespace wavex::engine {
         template<typename... Handlers>
         void route(MethodType m, const std::string_view pattern, StaticChain<Handlers...> chain) {
             route(m, pattern, [c = std::move(chain)](RequestType &req,
-                                                     ResponseType &res) mutable -> asio::awaitable<void> {
+                                                     ResponseType &res) mutable -> wavex::task<void> {
                 co_await c.process_all_async(req, res);
             });
         }
@@ -393,7 +394,7 @@ namespace wavex::engine {
         template<typename... Handlers>
         void use(StaticChain<Handlers...> chain) {
             use([c = std::move(chain)](RequestType &req, ResponseType &res,
-                                       const base::Next next) mutable -> asio::awaitable<void> {
+                                       const base::Next next) mutable -> wavex::task<void> {
                 if (const bool ok = co_await c.process_all_async(req, res); ok) {
                     co_await next();
                 }
@@ -406,7 +407,7 @@ namespace wavex::engine {
         template<typename... Handlers>
         void use(const std::string_view prefix, StaticChain<Handlers...> chain) {
             use(prefix, [c = std::move(chain)](RequestType &req, ResponseType &res,
-                                               const base::Next next) mutable -> asio::awaitable<void> {
+                                               const base::Next next) mutable -> wavex::task<void> {
                 if (const bool ok = co_await c.process_all_async(req, res); ok) {
                     co_await next();
                 }
@@ -432,7 +433,7 @@ namespace wavex::engine {
          */
         void not_found(std::string body, std::string content_type = "text/plain") {
             not_found_handler_ = [b = std::move(body), ct = std::move(content_type)](
-                RequestType &, ResponseType &res) -> asio::awaitable<void> {
+                RequestType &, ResponseType &res) -> wavex::task<void> {
                         res.status(404);
                         if (!ct.empty()) {
                             res.set("Content-Type", ct);

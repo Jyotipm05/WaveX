@@ -67,7 +67,7 @@ void test_server_streaming_and_files() {
 
     // 1. Chunked Stream Route
     router.get("/stream", [](wavex::protos::http::Http1Request &,
-                             wavex::protos::http::Http1Response &res) -> asio::awaitable<void> {
+                             wavex::protos::http::Http1Response &res) -> wavex::task<void> {
         (void) co_await res.start_chunked();
         (void) co_await res.write_chunk("Part 1: Hello ");
         (void) co_await res.write_chunk("Part 2: WaveX!");
@@ -76,13 +76,13 @@ void test_server_streaming_and_files() {
 
     // 2. Auto MIME File Route
     router.get("/download_html", [html_file](wavex::protos::http::Http1Request &,
-                                             wavex::protos::http::Http1Response &res) -> asio::awaitable<void> {
+                                             wavex::protos::http::Http1Response &res) -> wavex::task<void> {
         (void) co_await res.send_file(html_file.string());
     });
 
     // 3. Custom MIME File Route
     router.get("/download_custom", [bin_file](wavex::protos::http::Http1Request &,
-                                              wavex::protos::http::Http1Response &res) -> asio::awaitable<void> {
+                                              wavex::protos::http::Http1Response &res) -> wavex::task<void> {
         (void) co_await res.send_file(bin_file.string(), "application/x-wavex-custom");
     });
 
@@ -91,7 +91,7 @@ void test_server_streaming_and_files() {
     // Launch server on port 8099
     wavex::server::Http1Server server(router, "127.0.0.1", 8099);
 
-    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+    asio::co_spawn(io, [&]() -> wavex::task<void> {
         // A. Test /stream
         auto stream_res = co_await wavex::client::HttpClient::get("http://127.0.0.1:8099/stream");
         check(stream_res.status_code() == 200, "GET /stream returns 200 OK");

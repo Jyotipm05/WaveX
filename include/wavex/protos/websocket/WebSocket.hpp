@@ -46,6 +46,7 @@
 #endif
 #include <asio/any_io_executor.hpp>
 #include <asio/awaitable.hpp>
+#include <wavex/Base/Task.hpp>
 
 #include <wavex/Network/AnyStream.hpp>
 #include <wavex/protos/http/Methods.hpp>
@@ -267,7 +268,7 @@ namespace wavex::protos::websocket {
         // ─── 4. Member Functions ────────────────────────────────────────────
 
         /// Next complete data message. Fails with `error::closed` once the close handshake is done.
-        [[nodiscard]] asio::awaitable<std::expected<message, std::error_code> > read();
+        [[nodiscard]] wavex::task<std::expected<message, std::error_code> > read();
 
         /// Queue a text message (must be valid UTF-8). Returns false if the connection can no longer send.
         bool send_text(std::string_view text);
@@ -294,7 +295,7 @@ namespace wavex::protos::websocket {
          *        within options::close_timeout, for the peer's close. The server calls this after the
          *        application's handler returns; applications may call it to end a session early.
          */
-        [[nodiscard]] asio::awaitable<void> finish();
+        [[nodiscard]] wavex::task<void> finish();
 
         /// Abort without a close handshake (closes the transport).
         void abort() noexcept;
@@ -324,24 +325,24 @@ namespace wavex::protos::websocket {
         bool enqueue(opcode op, std::string_view payload, bool is_close = false);
 
         /// The writer: runs on the connection executor until the outbox is empty. Owns `self` for its lifetime.
-        [[nodiscard]] static asio::awaitable<void> drain(std::shared_ptr<connection> self);
+        [[nodiscard]] static wavex::task<void> drain(std::shared_ptr<connection> self);
 
         /// Send a close with `code` (if none was sent) and stop reading; returns `err` for read().
         std::error_code fail(uint16_t code, error err);
 
-        [[nodiscard]] asio::awaitable<std::error_code> fill(std::chrono::milliseconds timeout);
+        [[nodiscard]] wavex::task<std::error_code> fill(std::chrono::milliseconds timeout);
 
         [[nodiscard]] bool writes_pending() const noexcept;
     };
 
-    using handler_fn = std::function<asio::awaitable<void>(std::shared_ptr<connection>)>;
+    using handler_fn = std::function<wavex::task<void>(std::shared_ptr<connection>)>;
 
     namespace detail {
         /// Pick the first subprotocol the server supports from the client's comma-separated offer.
         [[nodiscard]] std::string select_subprotocol(std::string_view offered, const std::vector<std::string> &supported);
 
         /// Runs a server session: wraps the transport, calls the application, completes the close handshake.
-        [[nodiscard]] asio::awaitable<void> run_server_session(network::AnyStream stream, std::string leftover,
+        [[nodiscard]] wavex::task<void> run_server_session(network::AnyStream stream, std::string leftover,
                                                                options opts, std::string subprotocol,
                                                                bool http3_tunnel, handler_fn handler);
 
@@ -439,7 +440,7 @@ namespace wavex::protos::websocket {
         // session hands over an already de-framed stream.
         const bool tunnel = (version == 3);
         res.upgrade([handler = std::move(handler), opts = std::move(opts), subprotocol, tunnel](
-            network::AnyStream stream, std::string leftover) -> asio::awaitable<void> {
+            network::AnyStream stream, std::string leftover) -> wavex::task<void> {
                 // Delegate to a plain function: the closure's captures stay in this lambda object (owned by
                 // the server for the duration of the call) and are copied into that coroutine's frame.
                 co_await detail::run_server_session(std::move(stream), std::move(leftover), opts, subprotocol,

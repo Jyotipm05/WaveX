@@ -11,7 +11,7 @@ WaveX provides a protocol-agnostic, coroutine-native HTTP client (`HttpClient`) 
 
 using namespace wavex::client;
 
-asio::awaitable<void> run_client_examples() {
+wavex::task<void> run_client_examples() {
     // 1. GET with automatic protocol negotiation (ALPN h2 / http/1.1)
     ClientResponse res = co_await HttpClient::get("https://api.github.com/zen");
     std::cout << "Status: " << res.status_code() << "\n";

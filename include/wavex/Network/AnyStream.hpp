@@ -37,6 +37,7 @@
 #include <asio/any_io_executor.hpp>
 #include <asio/as_tuple.hpp>
 #include <asio/awaitable.hpp>
+#include <wavex/Base/Task.hpp>
 #include <asio/buffer.hpp>
 #include <asio/error.hpp>
 #include <asio/ip/tcp.hpp>
@@ -57,8 +58,8 @@ namespace wavex::network {
     public:
         // ─── 1. Nested Types & Definitions ───────────────────────────────────
         using read_result = std::pair<std::error_code, std::size_t>;
-        using read_fn = std::function<asio::awaitable<read_result>(asio::mutable_buffer)>;
-        using write_fn = std::function<asio::awaitable<std::error_code>(asio::const_buffer)>;
+        using read_fn = std::function<wavex::task<read_result>(asio::mutable_buffer)>;
+        using write_fn = std::function<wavex::task<std::error_code>(asio::const_buffer)>;
 
         /// The erased operations. Exposed so adapters (e.g. the HTTP/3 DATA-frame tunnel) can compose streams.
         struct operations {
@@ -87,7 +88,7 @@ namespace wavex::network {
     private:
         /// Awaitable that completes immediately with `value` (the invalid-handle path).
         template<typename T>
-        static asio::awaitable<T> failed(T value) {
+        static wavex::task<T> failed(T value) {
             co_return value;
         }
 
@@ -128,13 +129,13 @@ namespace wavex::network {
         /// Not a coroutine itself: the erased operation's awaitable is handed straight to the caller, so a read
         /// costs one coroutine frame instead of two. The awaitable owns everything it needs (it does not refer
         /// back to this handle), so the handle may be destroyed before the awaitable is awaited.
-        [[nodiscard]] asio::awaitable<read_result> read_some(const asio::mutable_buffer &buffer) const {
+        [[nodiscard]] wavex::task<read_result> read_some(const asio::mutable_buffer &buffer) const {
             if (ops_ && ops_->read_some) return ops_->read_some(buffer);
             return failed<read_result>(read_result{asio::error::bad_descriptor, 0});
         }
 
         /// Write the whole buffer. The caller must keep the bytes alive until the awaitable completes.
-        [[nodiscard]] asio::awaitable<std::error_code> write(const asio::const_buffer &buffer) const {
+        [[nodiscard]] wavex::task<std::error_code> write(const asio::const_buffer &buffer) const {
             if (ops_ && ops_->write) return ops_->write(buffer);
             return failed<std::error_code>(std::error_code(asio::error::bad_descriptor));
         }
@@ -163,14 +164,14 @@ namespace wavex::network {
 
     namespace detail {
         template<typename Stream>
-        asio::awaitable<AnyStream::read_result> any_stream_read_some(std::shared_ptr<Stream> s,
+        wavex::task<AnyStream::read_result> any_stream_read_some(std::shared_ptr<Stream> s,
                                                                      const asio::mutable_buffer buffer) {
             auto [ec, n] = co_await s->async_read_some(buffer, asio::as_tuple(asio::use_awaitable));
             co_return AnyStream::read_result{ec, n};
         }
 
         template<typename Stream>
-        asio::awaitable<std::error_code> any_stream_write(std::shared_ptr<Stream> s, const asio::const_buffer buffer) {
+        wavex::task<std::error_code> any_stream_write(std::shared_ptr<Stream> s, const asio::const_buffer buffer) {
             auto [ec, n] = co_await asio::async_write(*s, buffer, asio::as_tuple(asio::use_awaitable));
             (void) n;
             co_return ec;
