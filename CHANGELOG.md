@@ -80,3 +80,4 @@ Tagged releases before 0.4.0 (`v0.1.0-alpha` to `v0.3.0-alpha`) are listed under
 - Use-after-release hazard when a request was still alive after `arena.release()` in the 431 path.
 - HTTP/3 and QUIC hardening: Content-Length verification, stream-count limits, flow control, crypto-stream reassembly limits, reserved HTTP/2 frame rejection, max field section size.
 - Documentation: corrected the `CLI/CLI.hpp` include path, the `-h` (help) short-option clash in the CLI example, the `set_max_request_size` / `set_max_memory_buffer` setter names, and the preset names used for configure, build and test.
+- `ComposedHttpServer`: the HTTP/3 uni-stream handler read the connection context and then set it in two steps, so two streams arriving together could each create one and lose the other's state. It now uses `QuicConnection::user_context_or_create`, like WebTransport.

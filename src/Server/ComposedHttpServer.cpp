@@ -40,11 +40,12 @@ namespace wavex::server {
                 if (!stream) co_return;
                 const auto conn = stream->connection();
                 if (!conn) co_return;
-                auto session_ctx = std::static_pointer_cast<protos::http::http3::connection_context>(conn->user_context());
-                if (!session_ctx) {
-                    session_ctx = std::make_shared<protos::http::http3::connection_context>();
-                    conn->set_user_context(session_ctx);
-                }
+                // The control/QPACK uni streams of one connection arrive concurrently; the connection creates
+                // the shared context exactly once under its own lock.
+                const auto session_ctx = std::static_pointer_cast<protos::http::http3::connection_context>(
+                    conn->user_context_or_create([] {
+                        return std::make_shared<protos::http::http3::connection_context>();
+                    }));
                 co_await protos::http::http3codec::session_handler::handle_unidirectional_stream(
                     std::move(stream), session_ctx);
             });
