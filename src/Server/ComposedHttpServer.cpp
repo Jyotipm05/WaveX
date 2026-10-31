@@ -27,7 +27,7 @@ namespace wavex::server {
         }
 
         auto quic = std::make_unique<network::quic::QuicServer>(
-            server_.io_context(), address_, port_);
+            server_.executor(), address_, port_);
         quic->set_max_field_section_size(max_field_section_size_);
 
         if (tls_enabled_) {
@@ -36,7 +36,7 @@ namespace wavex::server {
 
         quic->set_uni_stream_handler(
             [](std::shared_ptr<network::quic::QuicStream> stream)
-        -> asio::awaitable<void> {
+        -> wavex::task<void> {
                 if (!stream) co_return;
                 const auto conn = stream->connection();
                 if (!conn) co_return;
@@ -52,7 +52,7 @@ namespace wavex::server {
 
         quic->set_stream_handler(
             [this](std::shared_ptr<network::quic::QuicStream> stream)
-        -> asio::awaitable<void> {
+        -> wavex::task<void> {
                 if (!stream) co_return;
                 if ((stream->stream_id() & 0x03) == 0x00) {
                     // WebTransport streams (WT_STREAM signal) go to their session, not to the router.

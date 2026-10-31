@@ -51,6 +51,7 @@
 #endif
 #include <asio/any_io_executor.hpp>
 #include <asio/awaitable.hpp>
+#include <wavex/Base/Task.hpp>
 #include <asio/buffer.hpp>
 #include <asio/experimental/concurrent_channel.hpp>
 
@@ -148,14 +149,14 @@ namespace wavex::protos::webtransport {
         [[nodiscard]] bool can_write() const noexcept { return bidirectional_ || !incoming_; }
 
         /// Read at least one byte; `{eof, 0}` once the peer finished the stream.
-        [[nodiscard]] asio::awaitable<std::pair<std::error_code, std::size_t> > read_some(asio::mutable_buffer buffer);
+        [[nodiscard]] wavex::task<std::pair<std::error_code, std::size_t> > read_some(asio::mutable_buffer buffer);
 
         /// Read until the peer finishes the stream (or `max_bytes` would be exceeded → `message_size` error).
-        [[nodiscard]] asio::awaitable<std::pair<std::error_code, std::string> > read_all(
+        [[nodiscard]] wavex::task<std::pair<std::error_code, std::string> > read_all(
             std::size_t max_bytes = 16 * 1024 * 1024);
 
         /// Write all of `data` (keep it alive until the awaitable completes).
-        [[nodiscard]] asio::awaitable<std::error_code> write(std::string_view data);
+        [[nodiscard]] wavex::task<std::error_code> write(std::string_view data);
 
         /// Send FIN: no more data in this direction.
         void finish() const noexcept;
@@ -232,9 +233,9 @@ namespace wavex::protos::webtransport {
         [[nodiscard]] const std::string &origin() const noexcept { return origin_; }
 
         /// Next stream the peer opened, or nullptr once the session is closed.
-        [[nodiscard]] asio::awaitable<std::shared_ptr<stream> > accept_bidirectional_stream();
+        [[nodiscard]] wavex::task<std::shared_ptr<stream> > accept_bidirectional_stream();
 
-        [[nodiscard]] asio::awaitable<std::shared_ptr<stream> > accept_unidirectional_stream();
+        [[nodiscard]] wavex::task<std::shared_ptr<stream> > accept_unidirectional_stream();
 
         /// Open a server-initiated stream (nullptr if the session or connection is closed).
         [[nodiscard]] std::shared_ptr<stream> open_bidirectional_stream();
@@ -242,7 +243,7 @@ namespace wavex::protos::webtransport {
         [[nodiscard]] std::shared_ptr<stream> open_unidirectional_stream();
 
         /// Next datagram, or std::nullopt once the session is closed.
-        [[nodiscard]] asio::awaitable<std::optional<std::string> > receive_datagram();
+        [[nodiscard]] wavex::task<std::optional<std::string> > receive_datagram();
 
         /// Send an unreliable datagram (false if it cannot be sent: too large, not negotiated, closed).
         bool send_datagram(std::string_view payload) const;
@@ -279,7 +280,7 @@ namespace wavex::protos::webtransport {
         void deliver_datagram(std::string payload) const;
 
         /// Read capsules from the CONNECT stream until the session ends.
-        [[nodiscard]] asio::awaitable<void> run_capsule_reader();
+        [[nodiscard]] wavex::task<void> run_capsule_reader();
 
     private:
         /// Mark closed, wake all waiters, close the streams. `notify_peer` sends the CLOSE capsule + FIN.
@@ -359,10 +360,10 @@ namespace wavex::protos::webtransport {
      * true is returned. Otherwise the bytes are put back (QuicStream::unread) and false is returned: the caller
      * then serves the stream as an HTTP/3 request exactly as before.
      */
-    [[nodiscard]] asio::awaitable<bool> dispatch_bidirectional_stream(std::shared_ptr<network::quic::QuicStream> s);
+    [[nodiscard]] wavex::task<bool> dispatch_bidirectional_stream(std::shared_ptr<network::quic::QuicStream> s);
 
     // ─── Server Integration ──────────────────────────────────────────────────
-    using handler_fn = std::function<asio::awaitable<void>(std::shared_ptr<session>)>;
+    using handler_fn = std::function<wavex::task<void>(std::shared_ptr<session>)>;
 
     namespace detail {
         struct request_info {
@@ -372,7 +373,7 @@ namespace wavex::protos::webtransport {
         };
 
         /// Runs a session once the 200 response is on the wire.
-        [[nodiscard]] asio::awaitable<void> run_server_session(network::AnyStream connect_stream, std::string leftover,
+        [[nodiscard]] wavex::task<void> run_server_session(network::AnyStream connect_stream, std::string leftover,
                                                                options opts, request_info info, handler_fn handler);
     } // namespace detail
 
@@ -405,7 +406,7 @@ namespace wavex::protos::webtransport {
             res.set("sec-webtransport-http3-draft", "draft02");
         }
         res.upgrade([handler = std::move(handler), opts, info = std::move(info)](
-            network::AnyStream stream, std::string leftover) -> asio::awaitable<void> {
+            network::AnyStream stream, std::string leftover) -> wavex::task<void> {
                 co_await detail::run_server_session(std::move(stream), std::move(leftover), opts, info, handler);
             });
         res.send();

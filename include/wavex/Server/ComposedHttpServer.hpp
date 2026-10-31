@@ -175,14 +175,15 @@ namespace wavex::server {
         }
 
         [[nodiscard]] asio::io_context &io_context() noexcept { return server_.io_context(); }
+        [[nodiscard]] wavex::executor executor() noexcept { return server_.executor(); }
 
         // ─── Templated Router Convenience Methods ────────────────────────────
         template<typename Handler>
         ComposedHttpServer &get(const std::string_view pattern, Handler &&h) {
             auto h_copy = h;
             h2_router_->get(pattern, [h_copy](Http2Router::RequestType &req,
-                                              Http2Router::ResponseType &res) -> asio::awaitable<void> {
-                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h_copy), Http2Router::RequestType &,
+                                              Http2Router::ResponseType &res) -> wavex::task<void> {
+                if constexpr (std::is_invocable_r_v<wavex::task<void>, decltype(h_copy), Http2Router::RequestType &,
                     Http2Router::ResponseType &>) {
                     co_await h_copy(req, res);
                 } else {
@@ -191,9 +192,9 @@ namespace wavex::server {
                 }
             });
             h3_router_->get(pattern, [h = std::forward<Handler>(h)](Http3Router::RequestType &req,
-                                                                    Http3Router::ResponseType &res) -> asio::awaitable<
+                                                                    Http3Router::ResponseType &res) -> wavex::task<
                         void> {
-                                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h),
+                                if constexpr (std::is_invocable_r_v<wavex::task<void>, decltype(h),
                                     Http3Router::RequestType &, Http3Router::ResponseType &>) {
                                     co_await h(req, res);
                                 } else {
@@ -208,8 +209,8 @@ namespace wavex::server {
         ComposedHttpServer &post(const std::string_view pattern, Handler &&h) {
             auto h_copy = h;
             h2_router_->post(pattern, [h_copy](Http2Router::RequestType &req,
-                                               Http2Router::ResponseType &res) -> asio::awaitable<void> {
-                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h_copy), Http2Router::RequestType &,
+                                               Http2Router::ResponseType &res) -> wavex::task<void> {
+                if constexpr (std::is_invocable_r_v<wavex::task<void>, decltype(h_copy), Http2Router::RequestType &,
                     Http2Router::ResponseType &>) {
                     co_await h_copy(req, res);
                 } else {
@@ -219,8 +220,8 @@ namespace wavex::server {
             });
             h3_router_->post(
                 pattern, [h = std::forward<Handler>(h)](Http3Router::RequestType &req,
-                                                        Http3Router::ResponseType &res) -> asio::awaitable<void> {
-                    if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h), Http3Router::RequestType &,
+                                                        Http3Router::ResponseType &res) -> wavex::task<void> {
+                    if constexpr (std::is_invocable_r_v<wavex::task<void>, decltype(h), Http3Router::RequestType &,
                         Http3Router::ResponseType &>) {
                         co_await h(req, res);
                     } else {
@@ -235,8 +236,8 @@ namespace wavex::server {
         ComposedHttpServer &put(const std::string_view pattern, Handler &&h) {
             auto h_copy = h;
             h2_router_->put(pattern, [h_copy](Http2Router::RequestType &req,
-                                              Http2Router::ResponseType &res) -> asio::awaitable<void> {
-                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h_copy), Http2Router::RequestType &,
+                                              Http2Router::ResponseType &res) -> wavex::task<void> {
+                if constexpr (std::is_invocable_r_v<wavex::task<void>, decltype(h_copy), Http2Router::RequestType &,
                     Http2Router::ResponseType &>) {
                     co_await h_copy(req, res);
                 } else {
@@ -245,9 +246,9 @@ namespace wavex::server {
                 }
             });
             h3_router_->put(pattern, [h = std::forward<Handler>(h)](Http3Router::RequestType &req,
-                                                                    Http3Router::ResponseType &res) -> asio::awaitable<
+                                                                    Http3Router::ResponseType &res) -> wavex::task<
                         void> {
-                                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h),
+                                if constexpr (std::is_invocable_r_v<wavex::task<void>, decltype(h),
                                     Http3Router::RequestType &, Http3Router::ResponseType &>) {
                                     co_await h(req, res);
                                 } else {
@@ -262,8 +263,8 @@ namespace wavex::server {
         ComposedHttpServer &del(const std::string_view pattern, Handler &&h) {
             auto h_copy = h;
             h2_router_->del(pattern, [h_copy](Http2Router::RequestType &req,
-                                              Http2Router::ResponseType &res) -> asio::awaitable<void> {
-                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h_copy), Http2Router::RequestType &,
+                                              Http2Router::ResponseType &res) -> wavex::task<void> {
+                if constexpr (std::is_invocable_r_v<wavex::task<void>, decltype(h_copy), Http2Router::RequestType &,
                     Http2Router::ResponseType &>) {
                     co_await h_copy(req, res);
                 } else {
@@ -272,9 +273,9 @@ namespace wavex::server {
                 }
             });
             h3_router_->del(pattern, [h = std::forward<Handler>(h)](Http3Router::RequestType &req,
-                                                                    Http3Router::ResponseType &res) -> asio::awaitable<
+                                                                    Http3Router::ResponseType &res) -> wavex::task<
                         void> {
-                                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h),
+                                if constexpr (std::is_invocable_r_v<wavex::task<void>, decltype(h),
                                     Http3Router::RequestType &, Http3Router::ResponseType &>) {
                                     co_await h(req, res);
                                 } else {
@@ -289,8 +290,8 @@ namespace wavex::server {
         ComposedHttpServer &patch(const std::string_view pattern, Handler &&h) {
             auto h_copy = h;
             h2_router_->patch(pattern, [h_copy](Http2Router::RequestType &req,
-                                                Http2Router::ResponseType &res) -> asio::awaitable<void> {
-                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h_copy), Http2Router::RequestType &,
+                                                Http2Router::ResponseType &res) -> wavex::task<void> {
+                if constexpr (std::is_invocable_r_v<wavex::task<void>, decltype(h_copy), Http2Router::RequestType &,
                     Http2Router::ResponseType &>) {
                     co_await h_copy(req, res);
                 } else {
@@ -300,8 +301,8 @@ namespace wavex::server {
             });
             h3_router_->patch(
                 pattern, [h = std::forward<Handler>(h)](Http3Router::RequestType &req,
-                                                        Http3Router::ResponseType &res) -> asio::awaitable<void> {
-                    if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h), Http3Router::RequestType &,
+                                                        Http3Router::ResponseType &res) -> wavex::task<void> {
+                    if constexpr (std::is_invocable_r_v<wavex::task<void>, decltype(h), Http3Router::RequestType &,
                         Http3Router::ResponseType &>) {
                         co_await h(req, res);
                     } else {
@@ -317,15 +318,15 @@ namespace wavex::server {
          *        (RFC 9220). `h` receives the protocol-neutral session; use `h2`/`h3` overloads for the request.
          */
         ComposedHttpServer &websocket(const std::string_view pattern,
-                                      std::function<asio::awaitable<void>(std::shared_ptr<protos::websocket::connection>)> h,
+                                      std::function<wavex::task<void>(std::shared_ptr<protos::websocket::connection>)> h,
                                       const protos::websocket::options &opts = {}) {
             auto shared = std::make_shared<decltype(h)>(std::move(h));
             h2_router_->websocket(pattern, [shared](Http2Router::RequestType &,
                                                     std::shared_ptr<protos::websocket::connection> c)
-                              -> asio::awaitable<void> { co_await (*shared)(std::move(c)); }, opts);
+                              -> wavex::task<void> { co_await (*shared)(std::move(c)); }, opts);
             h3_router_->websocket(pattern, [shared](Http3Router::RequestType &,
                                                     std::shared_ptr<protos::websocket::connection> c)
-                              -> asio::awaitable<void> { co_await (*shared)(std::move(c)); }, opts);
+                              -> wavex::task<void> { co_await (*shared)(std::move(c)); }, opts);
             return *this;
         }
 
@@ -340,8 +341,8 @@ namespace wavex::server {
         ComposedHttpServer &query(const std::string_view pattern, Handler &&h) {
             auto h_copy = h;
             h2_router_->query(pattern, [h_copy](Http2Router::RequestType &req,
-                                                Http2Router::ResponseType &res) -> asio::awaitable<void> {
-                if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h_copy), Http2Router::RequestType &,
+                                                Http2Router::ResponseType &res) -> wavex::task<void> {
+                if constexpr (std::is_invocable_r_v<wavex::task<void>, decltype(h_copy), Http2Router::RequestType &,
                     Http2Router::ResponseType &>) {
                     co_await h_copy(req, res);
                 } else {
@@ -351,8 +352,8 @@ namespace wavex::server {
             });
             h3_router_->query(
                 pattern, [h = std::forward<Handler>(h)](Http3Router::RequestType &req,
-                                                        Http3Router::ResponseType &res) -> asio::awaitable<void> {
-                    if constexpr (std::is_invocable_r_v<asio::awaitable<void>, decltype(h), Http3Router::RequestType &,
+                                                        Http3Router::ResponseType &res) -> wavex::task<void> {
+                    if constexpr (std::is_invocable_r_v<wavex::task<void>, decltype(h), Http3Router::RequestType &,
                         Http3Router::ResponseType &>) {
                         co_await h(req, res);
                     } else {

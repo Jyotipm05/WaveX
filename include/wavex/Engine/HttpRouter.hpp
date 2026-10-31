@@ -357,7 +357,7 @@ namespace wavex::engine {
         // ---------------------------------------------------------------
 
         /// Session handler: runs after the handshake; `req` stays valid until it returns.
-        using WebSocketHandler = std::function<asio::awaitable<void>(
+        using WebSocketHandler = std::function<wavex::task<void>(
             typename Base::RequestType &, std::shared_ptr<protos::websocket::connection>)>;
 
         /**
@@ -378,11 +378,11 @@ namespace wavex::engine {
             auto session = std::make_shared<WebSocketHandler>(std::move(h));
             route(websocket_method(), pattern, std::move(mws),
                   [session, opts = std::move(opts)](typename Base::RequestType &req,
-                                                    typename Base::ResponseType &res) -> asio::awaitable<void> {
+                                                    typename Base::ResponseType &res) -> wavex::task<void> {
                       protos::websocket::accept(
                           req, res,
                           [session, &req](std::shared_ptr<protos::websocket::connection> ws)
-                      -> asio::awaitable<void> {
+                      -> wavex::task<void> {
                               co_await (*session)(req, std::move(ws));
                           },
                           opts);
@@ -396,7 +396,7 @@ namespace wavex::engine {
         // ---------------------------------------------------------------
 
         /// Session handler: runs once the CONNECT is accepted; `req` stays valid until it returns.
-        using WebTransportHandler = std::function<asio::awaitable<void>(
+        using WebTransportHandler = std::function<wavex::task<void>(
             typename Base::RequestType &, std::shared_ptr<protos::webtransport::session>)>;
 
         /**
@@ -415,11 +415,11 @@ namespace wavex::engine {
             auto session = std::make_shared<WebTransportHandler>(std::move(h));
             route(protos::http::method::CONNECT, pattern, std::move(mws),
                   [session, opts](typename Base::RequestType &req,
-                                  typename Base::ResponseType &res) -> asio::awaitable<void> {
+                                  typename Base::ResponseType &res) -> wavex::task<void> {
                       protos::webtransport::accept(
                           req, res,
                           [session, &req](std::shared_ptr<protos::webtransport::session> wt)
-                      -> asio::awaitable<void> {
+                      -> wavex::task<void> {
                               co_await (*session)(req, std::move(wt));
                           },
                           opts);

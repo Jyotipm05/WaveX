@@ -36,6 +36,8 @@ export import :utils;
 
 export namespace wavex {
     using wavex::_version;
+    using wavex::task;
+    using wavex::executor;
     std::string_view wx_version = ::wx_version;
 }
 #else
@@ -44,6 +46,8 @@ export namespace wavex {
     using wavex::protocol;
     using wavex::_version;
     using wavex::spawn_blocking;
+    using wavex::task;
+    using wavex::executor;
     std::string_view wx_version = ::wx_version;
 }
 

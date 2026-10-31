@@ -19,7 +19,7 @@ int main() {
     auto &router = wavex::engine::Http2Router::instance();
 
     // Stream-aware HTTP/2 JSON endpoint
-    router.get("/api/h2", [](auto &req, auto &res) -> asio::awaitable<void> {
+    router.get("/api/h2", [](auto &req, auto &res) -> wavex::task<void> {
         res.status(200).json({
             {"protocol", "HTTP/2"},
             {"stream_id", req.stream_id()},
@@ -57,7 +57,7 @@ int main() {
     auto &router = wavex::engine::Http3Router::instance();
 
     // Stream-aware HTTP/3 JSON endpoint
-    router.get("/api/h3", [](auto &req, auto &res) -> asio::awaitable<void> {
+    router.get("/api/h3", [](auto &req, auto &res) -> wavex::task<void> {
         res.status(200).json({
             {"protocol", "HTTP/3"},
             {"transport", "QUIC (RFC 9000)"},

@@ -21,6 +21,7 @@
 
 #define ASIO_HAS_CO_AWAIT 1
 #include <asio/awaitable.hpp>
+#include <wavex/Base/Task.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/io_context.hpp>
@@ -85,14 +86,14 @@ void run_sync(Coro coro) {
 
 /// Linear coroutine runner that iterates over MiddlewareFn vector.
 template<typename ReqT, typename ResT>
-asio::awaitable<void> run_chain(
+wavex::task<void> run_chain(
     ReqT &req,
     ResT &res,
     std::vector<wavex::base::GenericMiddlewareFn<ReqT, ResT> > mws) {
     std::size_t idx = 0;
     while (idx < mws.size() && !res.is_sent()) {
         bool next_called = false;
-        wavex::base::Next next = [&next_called]() -> asio::awaitable<void> {
+        wavex::base::Next next = [&next_called]() -> wavex::task<void> {
             next_called = true;
             co_return;
         };
@@ -130,13 +131,13 @@ void test_chain_executes_in_order() {
 
     std::vector<wavex::base::GenericMiddlewareFn<StubRequest, StubResponse> > mws = {
         [&log](StubRequest &, StubResponse &, wavex::base::Next next)
-    -> asio::awaitable<void> {
+    -> wavex::task<void> {
             log.emplace_back("A:before");
             co_await next();
             log.emplace_back("A:after");
         },
         [&log](StubRequest &, StubResponse &, wavex::base::Next next)
-    -> asio::awaitable<void> {
+    -> wavex::task<void> {
             log.emplace_back("B:before");
             co_await next();
             log.emplace_back("B:after");
@@ -164,13 +165,13 @@ void test_short_circuit() {
     std::vector<wavex::base::GenericMiddlewareFn<StubRequest, StubResponse> > mws = {
         // Auth guard — rejects without forwarding
         [](StubRequest &, StubResponse &r, wavex::base::Next)
-    -> asio::awaitable<void> {
+    -> wavex::task<void> {
             r.status(401).send("Unauthorized");
             co_return;
         },
         // Must never run
         [&reached_second](StubRequest &, StubResponse &, wavex::base::Next next)
-    -> asio::awaitable<void> {
+    -> wavex::task<void> {
             reached_second = true;
             co_await next();
         },
@@ -194,13 +195,13 @@ void test_middleware_post_processes_response() {
     std::vector<wavex::base::GenericMiddlewareFn<StubRequest, StubResponse> > mws = {
         // Outer: adds a header AFTER the inner middleware sets the body
         [](StubRequest &, StubResponse &r, wavex::base::Next next)
-    -> asio::awaitable<void> {
+    -> wavex::task<void> {
             co_await next();
             r.set("X-Powered-By", "WaveX");
         },
         // Inner: sets status + body
         [](StubRequest &, StubResponse &r, wavex::base::Next)
-    -> asio::awaitable<void> {
+    -> wavex::task<void> {
             r.status(200).send("Hello");
             co_return;
         },
@@ -228,14 +229,14 @@ void test_express_style_send_and_linear_chain() {
 
     std::vector<wavex::base::GenericMiddlewareFn<StubRequest, StubResponse> > mws = {
         [&post_send_executed](StubRequest &, StubResponse &r, wavex::base::Next)
-    -> asio::awaitable<void> {
+    -> wavex::task<void> {
             r.status(200).json({{"message", "immediate"}});
             // Code after send() inside current lambda executes normally
             post_send_executed = true;
             co_return;
         },
         [&second_mw_executed](StubRequest &, StubResponse &, wavex::base::Next next)
-    -> asio::awaitable<void> {
+    -> wavex::task<void> {
             second_mw_executed = true;
             co_await next();
         }

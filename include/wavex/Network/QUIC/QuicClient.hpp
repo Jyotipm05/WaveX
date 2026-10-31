@@ -13,8 +13,10 @@
 #include <string_view>
 
 #include <asio/awaitable.hpp>
+#include <wavex/Base/Task.hpp>
 #include <asio/ip/udp.hpp>
 
+#include <wavex/Base/Executor.hpp>
 #include <wavex/Network/QUIC/QuicConnection.hpp>
 #include <wavex/Network/QUIC/QuicStream.hpp>
 
@@ -25,7 +27,7 @@ namespace wavex::network::quic {
      */
     class QuicClient {
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
-        asio::io_context &io_;
+        wavex::executor ex_;
         asio::ip::udp::socket socket_;
         asio::ip::udp::endpoint server_endpoint_{};
         asio::ip::udp::endpoint recv_endpoint_{}; // sender of the last datagram; never used for sending
@@ -37,12 +39,14 @@ namespace wavex::network::quic {
 
     public:
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
-        explicit QuicClient(asio::io_context &io);
+        explicit QuicClient(const wavex::executor &ex);
+
+        explicit QuicClient(asio::io_context &io) : QuicClient(wavex::executor_of(io)) {}
 
         ~QuicClient();
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
-        auto connect(std::string_view host, uint16_t port) -> asio::awaitable<bool>;
+        auto connect(std::string_view host, uint16_t port) -> wavex::task<bool>;
 
         auto create_stream(bool bidirectional = true) -> std::shared_ptr<QuicStream>;
 

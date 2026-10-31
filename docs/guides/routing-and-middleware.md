@@ -13,7 +13,7 @@ int main() {
     auto &router = wavex::engine::HttpRouter::instance();
 
     // Plain text "Hello, World!" endpoint
-    router.get("/", [](auto &, auto &res) -> asio::awaitable<void> {
+    router.get("/", [](auto &, auto &res) -> wavex::task<void> {
         res.status(200).send("Hello, World!");
         co_return;
     });
@@ -38,7 +38,7 @@ int main() {
     auto &router = wavex::engine::HttpRouter::instance();
 
     // 1. JSON "Hello, World!" endpoint
-    router.get("/api/hello", [](auto &, auto &res) -> asio::awaitable<void> {
+    router.get("/api/hello", [](auto &, auto &res) -> wavex::task<void> {
         res.status(200).json({
             {"message", "Hello, World!"},
             {"framework", "WaveX"},
@@ -48,7 +48,7 @@ int main() {
     });
 
     // 2. Dynamic route parameter: /hello/Alice -> "Hello, Alice!"
-    router.get("/hello/:name", [](auto &req, auto &res) -> asio::awaitable<void> {
+    router.get("/hello/:name", [](auto &req, auto &res) -> wavex::task<void> {
         auto name = req.param("name").value_or("World");
         res.status(200).send("Hello, " + std::string(name) + "!");
         co_return;
@@ -74,7 +74,7 @@ Middleware are coroutines that either call `co_await next()` or answer the reque
 using namespace wavex;
 
 // Auth Guard Middleware
-asio::awaitable<void> auth_guard(protos::http::HttpRequest &req, protos::http::HttpResponse &res, base::Next next) {
+wavex::task<void> auth_guard(protos::http::HttpRequest &req, protos::http::HttpResponse &res, base::Next next) {
     auto auth_header = req.header("Authorization");
     if (!auth_header || *auth_header != "Bearer secret123") {
         res.status(401).json({{"error", "Unauthorized"}});
@@ -87,25 +87,25 @@ int main() {
     auto &router = engine::HttpRouter::instance();
 
     // 1. Plain text endpoint
-    router.get("/", [](protos::http::HttpRequest &, protos::http::HttpResponse &res) -> asio::awaitable<void> {
+    router.get("/", [](protos::http::HttpRequest &, protos::http::HttpResponse &res) -> wavex::task<void> {
         res.status(200).send("Welcome to WaveX!");
         co_return;
     });
 
     // 2. JSON endpoint
-    router.get("/api/json", [](protos::http::HttpRequest &, protos::http::HttpResponse &res) -> asio::awaitable<void> {
+    router.get("/api/json", [](protos::http::HttpRequest &, protos::http::HttpResponse &res) -> wavex::task<void> {
         res.status(200).json({{"status", "success"}, {"framework", "WaveX"}, {"version", wx_version}});
         co_return;
     });
 
     // 3. Protected endpoint with middleware
-    router.get("/api/protected", {auth_guard}, [](protos::http::HttpRequest &, protos::http::HttpResponse &res) -> asio::awaitable<void> {
+    router.get("/api/protected", {auth_guard}, [](protos::http::HttpRequest &, protos::http::HttpResponse &res) -> wavex::task<void> {
         res.status(200).json({{"secret", "Access Granted"}});
         co_return;
     });
 
     // 4. Wildcard catch-all endpoint
-    router.get("/files/*filepath", [](protos::http::HttpRequest &req, protos::http::HttpResponse &res) -> asio::awaitable<void> {
+    router.get("/files/*filepath", [](protos::http::HttpRequest &req, protos::http::HttpResponse &res) -> wavex::task<void> {
         res.status(200).json({{"file", std::string(req.path())}});
         co_return;
     });
@@ -130,7 +130,7 @@ Build compile-time static dispatch pipelines without vtables or dynamic heap all
 // 1. Define Chainable Middlewares using C++23 "Deducing This"
 struct AuthGuard : public wavex::Chainable {
     template <typename Self, typename Req, typename Res>
-    asio::awaitable<bool> handle_impl(this Self&& self, Req& req, Res& res) {
+    wavex::task<bool> handle_impl(this Self&& self, Req& req, Res& res) {
         if (req.header("Authorization") != "Bearer valid_token") {
             res.status(401).send("Unauthorized");
             co_return false; // Short-circuits remaining pipeline statically!
@@ -141,7 +141,7 @@ struct AuthGuard : public wavex::Chainable {
 
 struct AuditLogger : public wavex::Chainable {
     template <typename Self, typename Req, typename Res>
-    asio::awaitable<bool> handle_impl(this Self&& self, Req& req, Res& res) {
+    wavex::task<bool> handle_impl(this Self&& self, Req& req, Res& res) {
         std::cout << "[AuditLog] Request path: " << req.path() << "\n";
         co_return true;
     }
@@ -149,7 +149,7 @@ struct AuditLogger : public wavex::Chainable {
 
 struct TargetHandler : public wavex::Chainable {
     template <typename Self, typename Req, typename Res>
-    asio::awaitable<bool> handle_impl(this Self&& self, Req& req, Res& res) {
+    wavex::task<bool> handle_impl(this Self&& self, Req& req, Res& res) {
         res.status(200).send("Static Chain Success!");
         co_return true;
     }
@@ -191,7 +191,7 @@ server.set_not_found_page("public/404.html");
 ### Option C: Full Dynamic Coroutine Handler
 
 ```c++
-router.not_found([](auto &req, auto &res) -> asio::awaitable<void> {
+router.not_found([](auto &req, auto &res) -> wavex::task<void> {
     nlohmann::json j = {
         {"error", "Not Found"},
         {"requested_path", std::string(req.path())},
@@ -213,26 +213,26 @@ int main() {
     auto &router = wavex::engine::HttpRouter::instance();
 
     // 1. Default temporary redirect (302 Found)
-    router.get("/old-docs", [](auto &, auto &res) -> asio::awaitable<void> {
+    router.get("/old-docs", [](auto &, auto &res) -> wavex::task<void> {
         res.redirect("/docs/v2");
         co_return;
     });
 
     // 2. Custom status redirect (e.g. 307 Temporary Redirect, or 303 See Other)
-    router.post("/login", [](auto &, auto &res) -> asio::awaitable<void> {
+    router.post("/login", [](auto &, auto &res) -> wavex::task<void> {
         res.redirect("/dashboard", 307);
         // Equivalent: res.redirect(307, "/dashboard");
         co_return;
     });
 
     // 3. Permanent redirect (301 Moved Permanently; pass true for 308)
-    router.get("/legacy-api", [](auto &, auto &res) -> asio::awaitable<void> {
+    router.get("/legacy-api", [](auto &, auto &res) -> wavex::task<void> {
         res.permanent_redirect("/api/v1");
         co_return;
     });
 
     // 4. Temporary redirect helper (302 Found; pass true for 307)
-    router.get("/profile", [](auto &, auto &res) -> asio::awaitable<void> {
+    router.get("/profile", [](auto &, auto &res) -> wavex::task<void> {
         res.temporary_redirect("/user/profile");
         co_return;
     });
@@ -257,7 +257,7 @@ An asynchronous coroutine handler querying DNS records without blocking worker t
 
 auto &router = wavex::engine::Http1Router::instance();
 
-auto dns_handler = [](const auto &req, auto &res) -> asio::awaitable<void> {
+auto dns_handler = [](const auto &req, auto &res) -> wavex::task<void> {
     auto j = nlohmann::json::parse(req.body(), nullptr, false);
     std::string domain = j.value("domain", "");
 

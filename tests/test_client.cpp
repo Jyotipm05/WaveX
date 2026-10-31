@@ -291,12 +291,12 @@ void test_http_client_integration() {
 
     auto &router = HttpRouter::instance();
 
-    router.get("/api/client_test", [](HttpRequest &, HttpResponse &res) -> asio::awaitable<void> {
+    router.get("/api/client_test", [](HttpRequest &, HttpResponse &res) -> wavex::task<void> {
         res.status(200).json({{"client", "connected"}, {"framework", "WaveX"}});
         co_return;
     });
 
-    router.post("/api/client_echo", [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
+    router.post("/api/client_echo", [](const HttpRequest &req, HttpResponse &res) -> wavex::task<void> {
         res.status(200).send(std::string("Echo: ") + std::string(req.body()));
         co_return;
     });
@@ -318,7 +318,7 @@ void test_http_client_integration() {
     bool get_success = false;
     bool post_success = false;
 
-    asio::co_spawn(client_ioc, [&]() -> asio::awaitable<void> {
+    asio::co_spawn(client_ioc, [&]() -> wavex::task<void> {
         // 1. GET request via HttpClient::get
         if (const auto get_res = co_await wavex::client::HttpClient::get("http://127.0.0.1:8086/api/client_test");
             get_res.status_code() == 200 && get_res.get_body().find("WaveX") != std::string::npos) {
@@ -354,7 +354,7 @@ void test_external_example_server() {
 
     asio::io_context client_ioc;
 
-    asio::co_spawn(client_ioc, []() -> asio::awaitable<void> {
+    asio::co_spawn(client_ioc, []() -> wavex::task<void> {
         try {
             auto res = co_await wavex::client::HttpClient::get("http://example.com/");
 
@@ -428,7 +428,7 @@ void test_external_response_output() {
 
     asio::io_context client_ioc;
 
-    asio::co_spawn(client_ioc, []() -> asio::awaitable<void> {
+    asio::co_spawn(client_ioc, []() -> wavex::task<void> {
         try {
             auto res = co_await wavex::client::HttpClient::get("http://example.com/");
 
@@ -470,7 +470,7 @@ void test_http_client_advanced_features() {
     // 2. HTTP/1.1 Server with Queries and Non-JSON routes
     auto &h1_router = HttpRouter::instance();
 
-    h1_router.get("/api/query_test", [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
+    h1_router.get("/api/query_test", [](const HttpRequest &req, HttpResponse &res) -> wavex::task<void> {
         std::string q;
         for (const auto &[k, v]: req.query) {
             if (!q.empty()) q += "&";
@@ -480,22 +480,22 @@ void test_http_client_advanced_features() {
         co_return;
     });
 
-    h1_router.post("/api/text_echo", [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
+    h1_router.post("/api/text_echo", [](const HttpRequest &req, HttpResponse &res) -> wavex::task<void> {
         res.status(200).send(std::string("TextEcho: ") + std::string(req.body()));
         co_return;
     });
 
-    h1_router.put("/api/put_echo", [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
+    h1_router.put("/api/put_echo", [](const HttpRequest &req, HttpResponse &res) -> wavex::task<void> {
         res.status(200).send(std::string("PutEcho: ") + std::string(req.body()));
         co_return;
     });
 
-    h1_router.del("/api/del_test", [](const HttpRequest &, HttpResponse &res) -> asio::awaitable<void> {
+    h1_router.del("/api/del_test", [](const HttpRequest &, HttpResponse &res) -> wavex::task<void> {
         res.status(204).send("");
         co_return;
     });
 
-    h1_router.get("/api/ipv4_direct", [](const HttpRequest &, HttpResponse &res) -> asio::awaitable<void> {
+    h1_router.get("/api/ipv4_direct", [](const HttpRequest &, HttpResponse &res) -> wavex::task<void> {
         res.status(200).send("IPv4 Direct OK");
         co_return;
     });
@@ -507,7 +507,7 @@ void test_http_client_advanced_features() {
     auto &h2_router = wavex::engine::Http2Router::instance();
     h2_router.get("/api/h2_test",
                   [](const wavex::protos::http::Http2Request &,
-                     wavex::protos::http::Http2Response &res) -> asio::awaitable<void> {
+                     wavex::protos::http::Http2Response &res) -> wavex::task<void> {
                       res.status(200).send("HTTP2 Direct h2c OK");
                       co_return;
                   });
@@ -529,7 +529,7 @@ void test_http_client_advanced_features() {
     bool h2c_ok = false;
     bool h2c_version_ok = false;
 
-    asio::co_spawn(client_ioc, [&]() -> asio::awaitable<void> {
+    asio::co_spawn(client_ioc, [&]() -> wavex::task<void> {
         // A. Direct query string in URL
         auto q_res = co_await wavex::client::HttpClient::get("http://127.0.0.1:8087/api/query_test?mode=debug&page=1");
         if (q_res.status_code() == 200 && q_res.get_body().find("mode=debug") != std::string::npos) {

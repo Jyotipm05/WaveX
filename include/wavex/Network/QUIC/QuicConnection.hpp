@@ -31,6 +31,7 @@
 
 #include <asio/any_io_executor.hpp>
 #include <asio/awaitable.hpp>
+#include <wavex/Base/Task.hpp>
 #include <asio/ip/udp.hpp>
 #include <asio/steady_timer.hpp>
 
@@ -493,7 +494,7 @@ namespace wavex::network::quic {
         void close_stream(uint64_t stream_id);
 
         // Accept a new stream asynchronously
-        auto accept_stream() -> asio::awaitable<std::shared_ptr<QuicStream> >;
+        auto accept_stream() -> wavex::task<std::shared_ptr<QuicStream> >;
 
         // Send stream payload
         void queue_stream_data(uint64_t stream_id, std::string_view data, bool fin);

@@ -2,7 +2,7 @@
 
 The full feature list. The [README](../README.md) shows the short version; each area links to a guide in [Documentation](README.md).
 
-- **⚡ Coroutine-Native Engine** — Async server handlers and client requests written with asio C++23 coroutines (`co_await`, `asio::awaitable<void>`), zero callback boilerplate.
+- **⚡ Coroutine-Native Engine** — Async server handlers and client requests written with asio C++23 coroutines (`co_await`, `wavex::task<void>`), zero callback boilerplate.
 - **⚡ Native HTTP/2 (RFC 7540) & HPACK (RFC 7541)** — Full binary framing engine (`http2codec`), connection preface validation (`PRI * HTTP/2.0...`), client/server `SETTINGS` negotiation & ACK handshake, server-side ALPN selection (`h2` over TLS 1.3), stream multiplexing, and HPACK static/dynamic table compression.
 - **⚡ Native HTTP/3 (RFC 9114, RFC 9204) & QUIC (RFC 9000, RFC 9001)** — Full binary framing engine (`http3codec`) with QPACK header compression (RFC 9204), native UDP QUIC transport engine (`wavex::network::quic`), OpenSSL 3.5+ QUIC TLS-callback integration, server-initiated unidirectional Control (Stream 3 with `SETTINGS` frame `0x04`) and QPACK encoder/decoder streams (Streams 7 and 11), stream demuxing, VarInt frame serialization, and zero-overhead `AsyncStream` concept integration.
 - **⚡ 3-Seam Decoupled Server Architecture** — Completely protocol-agnostic `Server<Codec, Router>` template decoupled across three distinct seams: Transport Seam (`AsyncStream` over Plain TCP, TLS 1.3, or native QUIC UDP), Codec Seam (`parse_stream`/`serialize`), and Policy Seam (`wavex::protos::protocol_traits<Codec>`) governing prefaces, keep-alive, response preparation, and ALPN negotiation.

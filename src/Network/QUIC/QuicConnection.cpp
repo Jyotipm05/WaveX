@@ -1753,7 +1753,7 @@ namespace wavex::network::quic {
         }
     }
 
-    asio::awaitable<std::shared_ptr<QuicStream> > QuicConnection::accept_stream() { {
+    wavex::task<std::shared_ptr<QuicStream> > QuicConnection::accept_stream() { {
             std::lock_guard lock(mtx_);
             if (!accepted_streams_.empty()) {
                 auto stream = accepted_streams_.front();

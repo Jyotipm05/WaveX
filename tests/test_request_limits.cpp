@@ -47,7 +47,7 @@ int main() {
     std::cout << "=== Request limit enforcement tests ===\n";
 
     auto router = wavex::engine::Http1Router::make_instance();
-    router.get("/ok", [](wavex::protos::http::Http1Request &, wavex::protos::http::Http1Response &res) -> asio::awaitable<void> {
+    router.get("/ok", [](wavex::protos::http::Http1Request &, wavex::protos::http::Http1Response &res) -> wavex::task<void> {
         res.status(200).send("ok");
         co_return;
     });

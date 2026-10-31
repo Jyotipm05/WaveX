@@ -25,6 +25,7 @@
 #define ASIO_HAS_CO_AWAIT 1
 #endif
 #include <asio/awaitable.hpp>
+#include <wavex/Base/Task.hpp>
 
 #include <wavex/Base/Request.hpp>
 #include <wavex/Base/Url.hpp>
@@ -546,7 +547,7 @@ namespace wavex::protos::http {
          * @param limits Size and count thresholds for memory buffering and spooling.
          * @return Awaitable yielding parsed MultipartFormData containing fields and uploaded files.
          */
-        [[nodiscard]] asio::awaitable<utils::MultipartFormData> multipart_async(
+        [[nodiscard]] wavex::task<utils::MultipartFormData> multipart_async(
             const utils::MultipartLimits &limits = {}) const {
             const auto ct = header_impl("Content-Type");
             co_return co_await utils::MultipartFormData::parse_async(body_impl(), ct.value_or(""), limits);

@@ -24,7 +24,7 @@ Split out of `future-protocols-architecture.md` to keep each rule file small. Se
 
 ## 5. Connection Takeover (Protocol Switch) Contract
 
-1. A handler (via `websocket::accept`, `webtransport::accept` or directly) installs `res.upgrade(fn)`; `fn` has the signature `asio::awaitable<void>(network::AnyStream, std::string unread)`.
+1. A handler (via `websocket::accept`, `webtransport::accept` or directly) installs `res.upgrade(fn)`; `fn` has the signature `wavex::task<void>(network::AnyStream, std::string unread)`.
 2. After `res` is on the wire the kernel asks the policy. `detail::http_wants_takeover` (synchronous, no coroutine frame for ordinary requests) says yes only when an upgrade handler is installed and the status is `101` on HTTP/1.x or a 2xx on HTTP/3 (otherwise the handler is ignored and the request completes normally). `detail::http_take_over` then runs `fn` with `AnyStream::wrap(stream_ptr, <connection coroutine executor>)`.
 3. `unread` (an owned `std::string`) holds the bytes already received past the request: pipelined WebSocket frames, tunnel DATA.
 4. `req` and `res` stay alive while `fn` runs; anything escaping to other threads must be copied (string_view contract).
@@ -35,7 +35,7 @@ Split out of `future-protocols-architecture.md` to keep each rule file small. Se
 
 ## 6. Policy-Driven Connections (`serve_connection`) — Multiplexed HTTP/2
 
-1. A policy may define `template<class Stream, class Services> static asio::awaitable<void> serve_connection(std::shared_ptr<Stream>, std::string buffered, Services &)`. The kernel then calls it after `on_connection_start` instead of running its loop. Only HTTP/2 defines it.
+1. A policy may define `template<class Stream, class Services> static wavex::task<void> serve_connection(std::shared_ptr<Stream>, std::string buffered, Services &)`. The kernel then calls it after `on_connection_start` instead of running its loop. Only HTTP/2 defines it.
 2. `Services` is `Server::ConnectionServices<Codec, Router>`: protocol-neutral (`memory()`, `accepting()`, `idle_timeout()`, `max_request_size()`, `limits()`, `mark_idle()/mark_active()`, `handle(req, res, sink)`). `handle()` is `Server::process_request()`, the same routing/middleware/error/prepare_response pipeline the sequential loop uses: never duplicate that logic in a protocol.
 3. `serve_connection` must not return while any task it spawned can still touch `Services` or the connection memory pool (they live on the kernel coroutine's frame). The HTTP/2 session joins its stream tasks in `shutdown()`.
 4. The session runs entirely on the connection's executor: reader, writer and stream tasks. No locks; the memory pool is unsynchronized. Cross-thread entry points (WebSocket sends) must re-dispatch onto that executor.

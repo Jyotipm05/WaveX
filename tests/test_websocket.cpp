@@ -130,7 +130,7 @@ namespace {
                                                          ws::options{}, ws::role::client);
             leftover.clear();
             bool done = false;
-            asio::co_spawn(io, [conn, body, &done]() -> asio::awaitable<void> {
+            asio::co_spawn(io, [conn, body, &done]() -> wavex::task<void> {
                 co_await body(conn);
                 done = true;
             }, asio::detached);
@@ -249,7 +249,7 @@ void test_takeover_policy() {
     check(!traits1::wants_takeover(req, res), "ordinary response: no takeover");
     res.status(101);
     check(!traits1::wants_takeover(req, res), "101 without an upgrade handler: no takeover");
-    res.upgrade([](wavex::network::AnyStream, std::string) -> asio::awaitable<void> { co_return; });
+    res.upgrade([](wavex::network::AnyStream, std::string) -> wavex::task<void> { co_return; });
     check(traits1::wants_takeover(req, res), "101 with an upgrade handler: takeover");
     res.status(401);
     check(!traits1::wants_takeover(req, res), "handler left on an error response is ignored");
@@ -266,12 +266,12 @@ void run_integration_tests() {
     std::cout << "\n[Test WS] Loopback integration on Http1Server" << std::endl;
 
     auto router = wavex::engine::Http1Router::make_instance();
-    router.get("/plain", [](Http1Request &, Http1Response &res) -> asio::awaitable<void> {
+    router.get("/plain", [](Http1Request &, Http1Response &res) -> wavex::task<void> {
         res.status(200).send("still serving HTTP");
         co_return;
     });
 
-    router.websocket("/echo", [](Http1Request &req, std::shared_ptr<ws::connection> conn) -> asio::awaitable<void> {
+    router.websocket("/echo", [](Http1Request &req, std::shared_ptr<ws::connection> conn) -> wavex::task<void> {
         const std::string path(req.path()); // the request stays valid for the whole session
         for (;;) {
             auto msg = co_await conn->read();
@@ -290,13 +290,13 @@ void run_integration_tests() {
 
     ws::options chat_opts;
     chat_opts.subprotocols = {"chat.v2", "chat.v1"};
-    router.websocket("/chat", [](Http1Request &, std::shared_ptr<ws::connection> conn) -> asio::awaitable<void> {
+    router.websocket("/chat", [](Http1Request &, std::shared_ptr<ws::connection> conn) -> wavex::task<void> {
         conn->send_text("proto=" + conn->subprotocol());
         while (co_await conn->read()) {
         }
     }, chat_opts);
 
-    router.websocket("/bcast", [](Http1Request &, std::shared_ptr<ws::connection> conn) -> asio::awaitable<void> {
+    router.websocket("/bcast", [](Http1Request &, std::shared_ptr<ws::connection> conn) -> wavex::task<void> {
         {
             std::lock_guard lock(g_bcast_mtx);
             g_bcast_conn = conn;
@@ -307,11 +307,11 @@ void run_integration_tests() {
     });
 
     const wavex::base::GenericMiddlewareFn<Http1Request, Http1Response> deny =
-            [](Http1Request &, Http1Response &res, wavex::base::Next) -> asio::awaitable<void> {
+            [](Http1Request &, Http1Response &res, wavex::base::Next) -> wavex::task<void> {
                 res.status(401).send("no token");
                 co_return;
             };
-    router.websocket("/private", {deny}, [](Http1Request &, std::shared_ptr<ws::connection>) -> asio::awaitable<void> {
+    router.websocket("/private", {deny}, [](Http1Request &, std::shared_ptr<ws::connection>) -> wavex::task<void> {
         co_return;
     });
 
@@ -335,7 +335,7 @@ void run_integration_tests() {
         std::error_code close_ec;
         uint16_t close_code = 0;
         const std::string big(70000, '\x5a');
-        const bool done = c.run_session([&](std::shared_ptr<ws::connection> conn) -> asio::awaitable<void> {
+        const bool done = c.run_session([&](std::shared_ptr<ws::connection> conn) -> wavex::task<void> {
             conn->send_text("hello");
             if (auto m = co_await conn->read()) text_echo = m->data;
             conn->send_binary(big);
@@ -361,7 +361,7 @@ void run_integration_tests() {
         c.open(handshake_request("/echo", ws::generate_client_key()));
         uint16_t code = 0;
         std::string reason;
-        c.run_session([&](std::shared_ptr<ws::connection> conn) -> asio::awaitable<void> {
+        c.run_session([&](std::shared_ptr<ws::connection> conn) -> wavex::task<void> {
             conn->send_text("close-me");
             auto r = co_await conn->read();
             if (!r && r.error() == ws::error::closed) {
@@ -451,7 +451,7 @@ void run_integration_tests() {
         c.open(handshake_request("/chat", ws::generate_client_key(), "Sec-WebSocket-Protocol: chat.v1, chat.v2\r\n"));
         check(c.head.find("Sec-WebSocket-Protocol: chat.v2") != std::string::npos, "server selects chat.v2");
         std::string first;
-        c.run_session([&](std::shared_ptr<ws::connection> conn) -> asio::awaitable<void> {
+        c.run_session([&](std::shared_ptr<ws::connection> conn) -> wavex::task<void> {
             if (auto m = co_await conn->read()) first = m->data;
             conn->close();
             while (co_await conn->read()) {
@@ -476,7 +476,7 @@ void run_integration_tests() {
         });
         sender.join();
         std::vector<std::string> got;
-        c.run_session([&](std::shared_ptr<ws::connection> conn) -> asio::awaitable<void> {
+        c.run_session([&](std::shared_ptr<ws::connection> conn) -> wavex::task<void> {
             for (int i = 0; i < 3; ++i) {
                 if (auto m = co_await conn->read()) got.push_back(m->data);
             }

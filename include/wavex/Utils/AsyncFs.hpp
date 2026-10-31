@@ -22,6 +22,7 @@
 #include <type_traits>
 
 #include <asio/awaitable.hpp>
+#include <wavex/Base/Task.hpp>
 #include <wavex/Utils/FsUtils.hpp>
 
 namespace wavex::fs {
@@ -37,11 +38,11 @@ namespace wavex::fs {
      * @param path The file path to read.
      * @return asio::awaitable yielding std::expected<std::string, std::error_code>.
      */
-    asio::awaitable<std::expected<std::string, std::error_code> > read_file(std::string path);
+    wavex::task<std::expected<std::string, std::error_code> > read_file(std::string path);
 
     template<typename PathLike>
         requires (!std::is_convertible_v<PathLike, std::string>)
-    asio::awaitable<std::expected<std::string, std::error_code> > read_file(
+    wavex::task<std::expected<std::string, std::error_code> > read_file(
         const PathLike &path) {
         return read_file(detail::to_string_path(path));
     }
@@ -51,11 +52,11 @@ namespace wavex::fs {
      * @param path The file path to read.
      * @return asio::awaitable yielding std::expected<std::vector<char>, std::error_code>.
      */
-    asio::awaitable<std::expected<std::vector<char>, std::error_code> > read_bytes(std::string path);
+    wavex::task<std::expected<std::vector<char>, std::error_code> > read_bytes(std::string path);
 
     template<typename PathLike>
         requires (!std::is_convertible_v<PathLike, std::string>)
-    asio::awaitable<std::expected<std::vector<char>, std::error_code> > read_bytes(
+    wavex::task<std::expected<std::vector<char>, std::error_code> > read_bytes(
         const PathLike &path) {
         return read_bytes(detail::to_string_path(path));
     }
@@ -66,11 +67,11 @@ namespace wavex::fs {
      * @param content The string contents to write.
      * @return asio::awaitable yielding std::expected<void, std::error_code>.
      */
-    asio::awaitable<std::expected<void, std::error_code> > write_file(std::string path, std::string content);
+    wavex::task<std::expected<void, std::error_code> > write_file(std::string path, std::string content);
 
     template<typename PathLike>
         requires (!std::is_convertible_v<PathLike, std::string>)
-    asio::awaitable<std::expected<void, std::error_code> > write_file(
+    wavex::task<std::expected<void, std::error_code> > write_file(
         const PathLike &path, std::string content) {
         return write_file(detail::to_string_path(path), std::move(content));
     }
@@ -81,11 +82,11 @@ namespace wavex::fs {
      * @param content The string contents to append.
      * @return asio::awaitable yielding std::expected<void, std::error_code>.
      */
-    asio::awaitable<std::expected<void, std::error_code> > append_file(std::string path, std::string content);
+    wavex::task<std::expected<void, std::error_code> > append_file(std::string path, std::string content);
 
     template<typename PathLike>
         requires (!std::is_convertible_v<PathLike, std::string>)
-    asio::awaitable<std::expected<void, std::error_code> > append_file(
+    wavex::task<std::expected<void, std::error_code> > append_file(
         const PathLike &path, std::string content) {
         return append_file(detail::to_string_path(path), std::move(content));
     }
@@ -97,12 +98,12 @@ namespace wavex::fs {
      * @param overwrite True to overwrite existing file.
      * @return asio::awaitable yielding std::expected<void, std::error_code>.
      */
-    asio::awaitable<std::expected<void, std::error_code> > copy_file(
+    wavex::task<std::expected<void, std::error_code> > copy_file(
         std::string from, std::string to, bool overwrite = true);
 
     template<typename PathLike1, typename PathLike2>
         requires (!std::is_convertible_v<PathLike1, std::string> || !std::is_convertible_v<PathLike2, std::string>)
-    asio::awaitable<std::expected<void, std::error_code> > copy_file(
+    wavex::task<std::expected<void, std::error_code> > copy_file(
         const PathLike1 &from, const PathLike2 &to, const bool overwrite = true) {
         return copy_file(detail::to_string_path(from), detail::to_string_path(to), overwrite);
     }
@@ -112,11 +113,11 @@ namespace wavex::fs {
      * @param path Path to remove.
      * @return asio::awaitable yielding std::expected<bool, std::error_code> (true if file existed and was removed).
      */
-    asio::awaitable<std::expected<bool, std::error_code> > remove(std::string path);
+    wavex::task<std::expected<bool, std::error_code> > remove(std::string path);
 
     template<typename PathLike>
         requires (!std::is_convertible_v<PathLike, std::string>)
-    asio::awaitable<std::expected<bool, std::error_code> > remove(
+    wavex::task<std::expected<bool, std::error_code> > remove(
         const PathLike &path) {
         return remove(detail::to_string_path(path));
     }

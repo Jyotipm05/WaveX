@@ -21,16 +21,16 @@
 
 namespace wavex::network::quic {
 
-    QuicServer::QuicServer(asio::io_context &io, const uint16_t port)
-        : io_(io), socket_(io) {
+    QuicServer::QuicServer(const wavex::executor &ex, const uint16_t port)
+        : ex_(ex), socket_(ex) {
         asio::error_code ec;
         socket_.open(asio::ip::udp::v4(), ec);
         socket_.set_option(asio::socket_base::reuse_address(true), ec);
         socket_.bind(asio::ip::udp::endpoint(asio::ip::udp::v4(), port), ec);
     }
 
-    QuicServer::QuicServer(asio::io_context &io, const std::string_view host, const uint16_t port)
-        : io_(io), socket_(io) {
+    QuicServer::QuicServer(const wavex::executor &ex, const std::string_view host, const uint16_t port)
+        : ex_(ex), socket_(ex) {
         asio::error_code ec;
         const auto addr = asio::ip::make_address(host, ec);
         if (!ec) {
@@ -75,7 +75,7 @@ namespace wavex::network::quic {
             std::lock_guard lock(mtx_);
             conns.swap(connections_);
         }
-        if (conns.empty() || io_.get_executor().running_in_this_thread() || io_.stopped()) {
+        if (conns.empty() || wavex::running_in_this_thread(ex_) || wavex::context_stopped(ex_)) {
             for (auto &conn: conns | std::views::values) {
                 if (conn) conn->close();
             }
@@ -93,7 +93,7 @@ namespace wavex::network::quic {
             std::move(conns));
         auto drained = std::make_shared<std::promise<void>>();
         const auto fut = drained->get_future();
-        asio::post(io_, [conns_ptr, drained] {
+        asio::post(ex_, [conns_ptr, drained] {
             for (auto &conn: *conns_ptr | std::views::values) {
                 if (conn) conn->close();
             }
@@ -191,17 +191,17 @@ namespace wavex::network::quic {
                             // New incoming connection (Initial)
                             const ConnectionId server_cid = ConnectionId::random(server_cid_len_);
                             conn = std::make_shared<QuicConnection>(server_cid, hdr.scid, sender_endpoint_, true,
-                                                                    io_.get_executor(), hdr.dcid);
+                                                                    ex_, hdr.dcid);
                             conn->set_max_field_section_size(max_field_section_size_);
 
                             conn->set_outbound_callback([this, weak_conn = std::weak_ptr<QuicConnection>(conn)] {
                                 if (stopped_.load() || !running_.load()) return;
-                                if (io_.get_executor().running_in_this_thread()) {
+                                if (wavex::running_in_this_thread(ex_)) {
                                     if (const auto c = weak_conn.lock()) {
                                         flush_outbound(c);
                                     }
                                 } else {
-                                    asio::post(io_, [this, weak_conn] {
+                                    asio::post(ex_, [this, weak_conn] {
                                         if (stopped_.load() || !running_.load()) return;
                                         if (const auto c = weak_conn.lock()) {
                                             flush_outbound(c);
@@ -212,7 +212,7 @@ namespace wavex::network::quic {
 
                             conn->set_closed_callback([this, server_cid, owner = conn.get()](
                                 const ConnectionId &scid, const ConnectionId &, const ConnectionId &orig_dcid) {
-                                asio::post(io_, [this, server_cid, scid, orig_dcid, owner] {
+                                asio::post(ex_, [this, server_cid, scid, orig_dcid, owner] {
                                     if (stopped_.load()) return;
                                     std::lock_guard lock(mtx_);
                                     // Only erase entries that still point at this connection: a key may have
@@ -260,11 +260,11 @@ namespace wavex::network::quic {
                                             // awaitable frame, whose implicit closure pointer would dangle the
                                             // moment the local `uni_handler` variable goes out of scope below -
                                             // a use-after-free on first resume.
-                                            asio::co_spawn(io_, [uni_handler, stream]() -> asio::awaitable<void> {
+                                            asio::co_spawn(ex_, [uni_handler, stream]() -> wavex::task<void> {
                                                 co_await uni_handler(stream);
                                             }, asio::detached);
                                         } else {
-                                            asio::co_spawn(io_, [stream]() -> asio::awaitable<void> {
+                                            asio::co_spawn(ex_, [stream]() -> wavex::task<void> {
                                                 char buf[1024];
                                                 while (stream->is_open()) {
                                                     auto [ec, n] = co_await stream->async_read_some(
@@ -291,7 +291,7 @@ namespace wavex::network::quic {
                                             // segfault: the coroutine's captured reference to the handler's own
                                             // closure (e.g. server_received_msg in test_quic.cpp) was already a
                                             // dangling pointer by the time the completion handler resumed it.
-                                            asio::co_spawn(io_, [handler, stream]() -> asio::awaitable<void> {
+                                            asio::co_spawn(ex_, [handler, stream]() -> wavex::task<void> {
                                                 co_await handler(stream);
                                             }, asio::detached);
                                         }

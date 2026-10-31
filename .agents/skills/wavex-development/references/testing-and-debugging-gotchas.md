@@ -87,7 +87,7 @@ If the test completes its assertions and exits without closing the streams, the 
 ### The Invariants
 1. **Lambda Closure for `co_spawn`**: Never pass an invoked awaitable expression directly from a temporary or local callable to `asio::co_spawn`. Wrap it in an explicit lambda:
    ```cpp
-   asio::co_spawn(io, [stream, ctx]() -> asio::awaitable<void> {
+   asio::co_spawn(io, [stream, ctx]() -> wavex::task<void> {
        co_await h3::session_handler::handle_unidirectional_stream(stream, ctx);
    }, asio::detached);
    ```

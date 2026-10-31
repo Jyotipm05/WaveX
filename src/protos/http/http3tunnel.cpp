@@ -68,7 +68,7 @@ namespace wavex::protos::http::http3 {
             }
         };
 
-        asio::awaitable<network::AnyStream::read_result> tunnel_read_some(std::shared_ptr<tunnel_state> st,
+        wavex::task<network::AnyStream::read_result> tunnel_read_some(std::shared_ptr<tunnel_state> st,
                                                                          const asio::mutable_buffer out) {
             if (out.size() == 0) co_return network::AnyStream::read_result{std::error_code{}, 0};
 
@@ -140,7 +140,7 @@ namespace wavex::protos::http::http3 {
             }
         }
 
-        asio::awaitable<std::error_code> tunnel_write(std::shared_ptr<tunnel_state> st, const asio::const_buffer in) {
+        wavex::task<std::error_code> tunnel_write(std::shared_ptr<tunnel_state> st, const asio::const_buffer in) {
             // The frame lives in this coroutine frame until the inner write completes.
             const std::string frame = encode_tunnel_data_frame(
                 std::string_view(static_cast<const char *>(in.data()), in.size()));

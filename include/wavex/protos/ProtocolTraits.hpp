@@ -27,6 +27,7 @@
 #define ASIO_HAS_PTHREADS 1
 #endif
 #include <asio/awaitable.hpp>
+#include <wavex/Base/Task.hpp>
 #include <asio/as_tuple.hpp>
 #include <asio/use_awaitable.hpp>
 #include <asio/buffer.hpp>
@@ -111,7 +112,7 @@ namespace wavex::protos {
 
         /// Run the takeover handler on the connection's own executor with the transport type-erased.
         template<typename Stream, typename Request, typename Response>
-        asio::awaitable<void> http_take_over(std::shared_ptr<Stream> stream, Request &, Response &res,
+        wavex::task<void> http_take_over(std::shared_ptr<Stream> stream, Request &, Response &res,
                                              std::string unread) {
             auto takeover = res.take_upgrade();
             if (!takeover) co_return;
@@ -165,7 +166,7 @@ namespace wavex::protos {
          * @return true to continue, false to drop the connection.
          */
         template<typename Stream>
-        static asio::awaitable<bool> on_connection_start([[maybe_unused]] Stream &stream, [[maybe_unused]] std::string &stream_buf) {
+        static wavex::task<bool> on_connection_start([[maybe_unused]] Stream &stream, [[maybe_unused]] std::string &stream_buf) {
             co_return true;
         }
 
@@ -229,7 +230,7 @@ namespace wavex::protos {
          * @param unread Bytes already received past the end of this request.
          */
         template<typename Stream, typename Request, typename Response>
-        static asio::awaitable<void> take_over([[maybe_unused]] std::shared_ptr<Stream> stream, Request &, Response &,
+        static wavex::task<void> take_over([[maybe_unused]] std::shared_ptr<Stream> stream, Request &, Response &,
                                                [[maybe_unused]]std::string unread) {
             co_return;
         }
@@ -285,7 +286,7 @@ struct wavex::protos::protocol_traits<wavex::protos::http::http1codec> {
     }
 
     template<typename Stream>
-    static asio::awaitable<bool> on_connection_start(Stream &, std::string &) {
+    static wavex::task<bool> on_connection_start(Stream &, std::string &) {
         co_return true;
     }
 
@@ -301,7 +302,7 @@ struct wavex::protos::protocol_traits<wavex::protos::http::http1codec> {
     }
 
     template<typename Stream, typename Request, typename Response>
-    static asio::awaitable<void> take_over(std::shared_ptr<Stream> stream, Request &req, Response &res,
+    static wavex::task<void> take_over(std::shared_ptr<Stream> stream, Request &req, Response &res,
                                            std::string unread) {
         return detail::http_take_over(std::move(stream), req, res, std::move(unread));
     }
@@ -409,7 +410,7 @@ struct wavex::protos::protocol_traits<wavex::protos::http::http2codec> {
          *        which also acknowledges the client's SETTINGS when they arrive.
          */
     template<typename Stream>
-    static asio::awaitable<bool> on_connection_start(Stream &stream, std::string &stream_buf) {
+    static wavex::task<bool> on_connection_start(Stream &stream, std::string &stream_buf) {
         namespace h2 = wavex::protos::http::http2;
         while (stream_buf.size() < h2::CONNECTION_PREFACE.size()) {
             char buf[4096];
@@ -430,7 +431,7 @@ struct wavex::protos::protocol_traits<wavex::protos::http::http2codec> {
      *        `services.handle()`.
      */
     template<typename Stream, typename Services>
-    static asio::awaitable<void> serve_connection(std::shared_ptr<Stream> stream, std::string buffered,
+    static wavex::task<void> serve_connection(std::shared_ptr<Stream> stream, std::string buffered,
                                                   Services &services) {
         auto session = std::make_shared<http::http2::server_session<Stream, Services> >(
             std::move(stream), std::move(buffered), services);
@@ -568,7 +569,7 @@ struct wavex::protos::protocol_traits<wavex::protos::http::http3codec> {
     }
 
     template<typename Stream>
-    static asio::awaitable<bool> on_connection_start(Stream &, std::string &) {
+    static wavex::task<bool> on_connection_start(Stream &, std::string &) {
         co_return true;
     }
 
@@ -579,7 +580,7 @@ struct wavex::protos::protocol_traits<wavex::protos::http::http3codec> {
     }
 
     template<typename Stream, typename Request, typename Response>
-    static asio::awaitable<void> take_over(std::shared_ptr<Stream> stream, Request &req, Response &res,
+    static wavex::task<void> take_over(std::shared_ptr<Stream> stream, Request &req, Response &res,
                                            std::string unread) {
         return detail::http_take_over(std::move(stream), req, res, std::move(unread));
     }

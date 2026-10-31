@@ -6,7 +6,9 @@ WaveX is a stack of small, protocol-agnostic layers. A `Server<Codec, Router>` t
 
 - **Zero-vtable base types.** `base::Request` and `base::Response` use C++23 explicit object parameters (`this Self&& self`) instead of virtuals or CRTP.
 - **Base layers never include protocol types.** `Server` and `Router` are templated on request/response types.
-- **Coroutine-native.** Handlers are `asio::awaitable<void>`; middleware run in a linear, non-recursive `run_chain`.
+- **Coroutine-native.** Handlers are `wavex::task<void>`; middleware run in a linear, non-recursive `run_chain`.
+- **One coroutine type.** Asynchronous WaveX functions return `wavex::task<T>` (`wavex/Base/Task.hpp`), which is the same type as `asio::awaitable<T>`: nothing converts, and code that still says `asio::awaitable` interoperates. Handlers, middleware and your own helpers should be spelled `wavex::task<...>`.
+- **One executor type.** Everything above the thread pool (QUIC server/client, WebSocket, WebTransport, `AnyStream`, HTTP/2 sessions) is written against `wavex::executor` (`asio::any_io_executor`, `wavex/Base/Executor.hpp`), never against `asio::io_context`. `Server::executor()` and `ThreadPool::WorkerLease::executor()` hand it out; `QuicServer` and `QuicClient` accept any executor (an `io_context`, a strand, ...) and keep their `io_context&` overloads. `wavex::running_in_this_thread()` and `wavex::context_stopped()` are best-effort helpers: for an executor whose context is not an `io_context` they report "unknown" (`false`), and callers then post, which is always correct.
 - **Three seams.** Transport (`AsyncStream`: TCP, TLS 1.3, QUIC), Codec (`parse_stream` / `serialize`) and Policy (`protocol_traits<Codec>`).
 
 ## Runtime

@@ -23,6 +23,7 @@
 #endif
 
 #include <asio/awaitable.hpp>
+#include <wavex/Base/Task.hpp>
 
 // Forward declarations of Request and Response base classes
 namespace wavex::base {
@@ -30,20 +31,20 @@ namespace wavex::base {
     class Response;
 
     /// Callable that invokes the next middleware or the final handler
-    using Next = std::function<asio::awaitable<void>()>;
+    using Next = std::function<wavex::task<void>()>;
 
     /**
      * @brief Generic middleware function signature for Request and Response types.
      *
      * Usage:
-     *   auto logger = [](ReqT &req, ResT &res, Next next) -> asio::awaitable<void> {
+     *   auto logger = [](ReqT &req, ResT &res, Next next) -> wavex::task<void> {
      *       WX_LOG_INFO("-> {}", req.path());
      *       co_await next();
      *       WX_LOG_INFO("<- {} {}", res.status_code(), req.path());
      *   };
      */
     template<typename ReqT, typename ResT>
-    using GenericMiddlewareFn = std::function<asio::awaitable<void>(ReqT &, ResT &, Next)>;
+    using GenericMiddlewareFn = std::function<wavex::task<void>(ReqT &, ResT &, Next)>;
 
     /**
      * @brief Factory for keep-alive middleware enforcing persistent connection headers.
@@ -52,7 +53,7 @@ namespace wavex::base {
      */
     template<typename ReqT, typename ResT>
     GenericMiddlewareFn<ReqT, ResT> keep_alive(unsigned timeout_sec = 5, unsigned max_requests = 1000) {
-        return [timeout_sec, max_requests](ReqT &req, ResT &res, const Next next) -> asio::awaitable<void> {
+        return [timeout_sec, max_requests](ReqT &req, ResT &res, const Next next) -> wavex::task<void> {
             if (req.should_keep_alive()) {
                 res.set("Connection", "keep-alive");
                 res.set("Keep-Alive",
@@ -69,7 +70,7 @@ namespace wavex::base {
      */
     template<typename ReqT, typename ResT>
     GenericMiddlewareFn<ReqT, ResT> sse_stay_active() {
-        return [](const ReqT &req, ResT &res, const Next next) -> asio::awaitable<void> {
+        return [](const ReqT &req, ResT &res, const Next next) -> wavex::task<void> {
             (void) req;
             res.set("Content-Type", "text/event-stream");
             res.set("Cache-Control", "no-cache");
@@ -84,7 +85,7 @@ namespace wavex::base {
      */
     template<typename ReqT, typename ResT>
     GenericMiddlewareFn<ReqT, ResT> body_limit(const std::size_t max_bytes) {
-        return [max_bytes](ReqT &req, ResT &res, const Next next) -> asio::awaitable<void> {
+        return [max_bytes](ReqT &req, ResT &res, const Next next) -> wavex::task<void> {
             if (req.body().size() > max_bytes) {
                 res.status(413).send("Payload Too Large");
                 co_return;

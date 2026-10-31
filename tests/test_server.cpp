@@ -407,7 +407,7 @@ void test_server_graceful_remote_shutdown() {
     wavex::server::Http1Server server(router, "127.0.0.1", 18091);
     server.enable_signal_handling(false);
 
-    router.post("/api/admin/shutdown", [&](wavex::protos::http::Http1Request &, wavex::protos::http::Http1Response &res) -> asio::awaitable<void> {
+    router.post("/api/admin/shutdown", [&](wavex::protos::http::Http1Request &, wavex::protos::http::Http1Response &res) -> wavex::task<void> {
         res.status(200).send("Shutdown initiated");
         server.exit(std::chrono::seconds(2));
         co_return;
@@ -426,7 +426,7 @@ void test_server_graceful_remote_shutdown() {
     bool request_ok = false;
     bool conn_close_found = false;
 
-    asio::co_spawn(client_ioc, [&]() -> asio::awaitable<void> {
+    asio::co_spawn(client_ioc, [&]() -> wavex::task<void> {
         auto res = co_await wavex::client::HttpClient::post("http://127.0.0.1:18091/api/admin/shutdown", "");
         if (res.status_code() == 200 && res.get_body() == "Shutdown initiated") {
             request_ok = true;
@@ -489,7 +489,7 @@ void test_server_inflight_drain() {
     wavex::server::Http1Server server(router, "127.0.0.1", 18093);
     server.enable_signal_handling(false);
 
-    router.get("/slow", [](wavex::protos::http::Http1Request &, wavex::protos::http::Http1Response &res) -> asio::awaitable<void> {
+    router.get("/slow", [](wavex::protos::http::Http1Request &, wavex::protos::http::Http1Response &res) -> wavex::task<void> {
         auto ex = co_await asio::this_coro::executor;
         asio::steady_timer timer(ex, std::chrono::milliseconds(100));
         co_await timer.async_wait(asio::use_awaitable);
@@ -508,7 +508,7 @@ void test_server_inflight_drain() {
     bool slow_finished = false;
     std::thread client_th([&]() {
         asio::io_context client_ioc;
-        asio::co_spawn(client_ioc, [&]() -> asio::awaitable<void> {
+        asio::co_spawn(client_ioc, [&]() -> wavex::task<void> {
             auto res = co_await wavex::client::HttpClient::get("http://127.0.0.1:18093/slow");
             if (res.status_code() == 200 && res.get_body() == "Slow response done") {
                 slow_finished = true;
@@ -537,7 +537,7 @@ void test_server_restartability() {
     std::cout << "\n[Test 12] Server restartability across multiple run() / exit() lifecycles\n";
 
     wavex::engine::Http1Router router;
-    router.get("/ping", [](wavex::protos::http::Http1Request &, wavex::protos::http::Http1Response &res) -> asio::awaitable<void> {
+    router.get("/ping", [](wavex::protos::http::Http1Request &, wavex::protos::http::Http1Response &res) -> wavex::task<void> {
         res.status(200).send("pong");
         co_return;
     });
@@ -563,7 +563,7 @@ void test_server_restartability() {
     bool ping_ok = false;
     {
         asio::io_context client_ioc;
-        asio::co_spawn(client_ioc, [&]() -> asio::awaitable<void> {
+        asio::co_spawn(client_ioc, [&]() -> wavex::task<void> {
             auto res = co_await wavex::client::HttpClient::get("http://127.0.0.1:18094/ping");
             if (res.status_code() == 200 && res.get_body() == "pong") {
                 ping_ok = true;
@@ -586,7 +586,7 @@ void test_server_hard_stop_and_restart() {
     std::cout << "\n[Test 13] stop() drains live connections in-process; same Server object restarts\n";
 
     wavex::engine::Http1Router router;
-    router.get("/ping", [](wavex::protos::http::Http1Request &, wavex::protos::http::Http1Response &res) -> asio::awaitable<void> {
+    router.get("/ping", [](wavex::protos::http::Http1Request &, wavex::protos::http::Http1Response &res) -> wavex::task<void> {
         res.status(200).send("pong");
         co_return;
     });
@@ -648,7 +648,7 @@ void test_server_hard_stop_and_restart() {
 // ─── Test 14: scale-down never retires a worker that owns live coroutines ──────
 
 // A coroutine *function* (not a capturing lambda): the frame copies its parameters, so nothing dangles.
-asio::awaitable<void> live_until_released(std::atomic<bool> *release, std::atomic<int> *running,
+wavex::task<void> live_until_released(std::atomic<bool> *release, std::atomic<int> *running,
                                           std::atomic<int> *finished) {
     ++*running;
     auto ex = co_await asio::this_coro::executor;
@@ -716,7 +716,7 @@ void test_worker_lease() {
     auto ctx_thread = std::make_shared<std::atomic<std::thread::id> >();
     asio::post(leases[0].context(), [ctx_thread] { ctx_thread->store(std::this_thread::get_id()); });
     pool.spawn_leased(std::move(leases[0]),
-                      [](std::atomic<bool> *d, std::atomic<std::thread::id> *id) -> asio::awaitable<void> {
+                      [](std::atomic<bool> *d, std::atomic<std::thread::id> *id) -> wavex::task<void> {
                           id->store(std::this_thread::get_id());
                           d->store(true);
                           co_return;

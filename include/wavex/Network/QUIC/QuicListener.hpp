@@ -2,7 +2,7 @@
  * @file QuicListener.hpp
  * @brief QUIC/UDP transport listener driven by a generic server host.
  *
- * `Host` is any server exposing: address(), port(), io_context(), is_tls_enabled(), tls_config(),
+ * `Host` is any server exposing: address(), port(), executor(), is_tls_enabled(), tls_config(),
  * allow_insecure_transports() and spawn_connection(stream). The host never names QUIC; it holds this
  * object through network::TransportListener.
  */
@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <utility>
 #include <asio/awaitable.hpp>
+#include <wavex/Base/Task.hpp>
 #include <wavex/Base/Logger.hpp>
 #include <wavex/Network/QUIC/QuicServer.hpp>
 #include <wavex/protos/http/http3codec.hpp>
@@ -42,14 +43,14 @@ namespace wavex::network::quic {
                     "QUIC transport requires TLS 1.3. "
                     "Call server.enable_tls(cert, key) before server.run().");
             }
-            auto quic = std::make_unique<QuicServer>(host_.io_context(), host_.address(), host_.port());
+            auto quic = std::make_unique<QuicServer>(host_.executor(), host_.address(), host_.port());
             if (host_.is_tls_enabled()) {
                 quic->set_tls_credentials(host_.tls_config().cert_file, host_.tls_config().key_file);
             }
             // Peer control / QPACK streams must reach the HTTP/3 session handler; without this the
             // generic server silently drained them and never saw the client's SETTINGS or GOAWAY.
             quic->set_uni_stream_handler(
-                [](std::shared_ptr<QuicStream> stream) -> asio::awaitable<void> {
+                [](std::shared_ptr<QuicStream> stream) -> wavex::task<void> {
                     if (!stream) co_return;
                     const auto conn = stream->connection();
                     if (!conn) co_return;
@@ -62,7 +63,7 @@ namespace wavex::network::quic {
                         std::move(stream), ctx);
                 });
             quic->set_stream_handler(
-                [this](std::shared_ptr<QuicStream> stream) -> asio::awaitable<void> {
+                [this](std::shared_ptr<QuicStream> stream) -> wavex::task<void> {
                     if (!stream) co_return;
                     // Client-initiated bidirectional streams carry requests, unless they open with the
                     // WebTransport stream signal, in which case they belong to a WebTransport session.

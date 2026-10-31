@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 4.0)
-project(wavex VERSION 0.4.1 LANGUAGES C CXX)
+project(wavex VERSION 0.4.2 LANGUAGES C CXX)
 
 # ===========================================================================
 #  Header Configuration
@@ -355,6 +355,8 @@ target_sources(wavex
         include/wavex/Version.hpp
         include/wavex/Base/Logger.hpp
         include/wavex/Base/Chainable.hpp
+        include/wavex/Base/Executor.hpp
+        include/wavex/Base/Task.hpp
         include/wavex/Base/FlatMap.hpp
         include/wavex/Base/Memory.hpp
         include/wavex/Base/MiddleWare.hpp
@@ -680,6 +682,7 @@ if (WAVEX_TEST)
     wavex_add_test(wavex_spawn_blocking_tests tests/test_spawn_blocking.cpp)
     wavex_add_test(wavex_async_fs_tests tests/test_async_fs.cpp)
     wavex_add_test(wavex_flat_map_tests tests/test_flat_map.cpp)
+    wavex_add_test(wavex_executor_tests tests/test_executor.cpp)
     wavex_add_test(wavex_request_arena_tests tests/test_request_arena.cpp)
     wavex_add_test(wavex_websocket_tests tests/test_websocket.cpp)
     wavex_add_test(wavex_http2_session_tests tests/test_http2_session.cpp)

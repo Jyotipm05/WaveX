@@ -12,7 +12,7 @@ Parse uploaded files and form fields with transparent in-memory and disk spoolin
 int main() {
     auto &router = wavex::engine::HttpRouter::instance();
 
-    router.post("/upload", [](auto &req, auto &res) -> asio::awaitable<void> {
+    router.post("/upload", [](auto &req, auto &res) -> wavex::task<void> {
         if (!req.is_multipart()) {
             res.status(400).send("Expected multipart/form-data");
             co_return;
@@ -60,7 +60,7 @@ Compose multipart files, compress client payloads, and save binary responses to 
 #include <wavex/Client/HttpClient.hpp>
 #include <wavex/Utils/Utils.hpp>
 
-asio::awaitable<void> upload_file() {
+wavex::task<void> upload_file() {
     wavex::client::HttpClient client;
 
     // 1. Build multipart request with files and fields

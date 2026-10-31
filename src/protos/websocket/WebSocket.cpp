@@ -499,7 +499,7 @@ namespace wavex::protos::websocket {
         return true;
     }
 
-    asio::awaitable<void> connection::drain(std::shared_ptr<connection> self) {
+    wavex::task<void> connection::drain(std::shared_ptr<connection> self) {
         connection &c = *self;
         constexpr std::size_t kKeepCapacity = 1024 * 1024; // do not pin a huge buffer after one big message
         for (;;) {
@@ -542,7 +542,7 @@ namespace wavex::protos::websocket {
         return make_error_code(err);
     }
 
-    asio::awaitable<std::error_code> connection::fill(const std::chrono::milliseconds timeout) {
+    wavex::task<std::error_code> connection::fill(const std::chrono::milliseconds timeout) {
         constexpr std::size_t kReadChunk = 16384;
         if (rbuf_consumed_ > 0 && rbuf_consumed_ == rbuf_.size()) {
             rbuf_.clear();
@@ -585,7 +585,7 @@ namespace wavex::protos::websocket {
         co_return std::error_code{};
     }
 
-    asio::awaitable<std::expected<message, std::error_code> > connection::read() {
+    wavex::task<std::expected<message, std::error_code> > connection::read() {
         auto self = shared_from_this(); // the session must outlive a suspended read
 
         for (;;) {
@@ -677,7 +677,7 @@ namespace wavex::protos::websocket {
         }
     }
 
-    asio::awaitable<void> connection::finish() {
+    wavex::task<void> connection::finish() {
         auto self = shared_from_this();
         const auto deadline = std::chrono::steady_clock::now() + opts_.close_timeout;
         const auto time_left = [&deadline] {
@@ -715,7 +715,7 @@ namespace wavex::protos::websocket {
     }
 
     // ─── Server Session ──────────────────────────────────────────────────────
-    asio::awaitable<void> detail::run_server_session(network::AnyStream stream, std::string leftover, options opts,
+    wavex::task<void> detail::run_server_session(network::AnyStream stream, std::string leftover, options opts,
                                                      std::string subprotocol, const bool http3_tunnel,
                                                      handler_fn handler) {
         network::AnyStream transport = std::move(stream);

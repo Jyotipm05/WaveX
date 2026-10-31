@@ -114,11 +114,11 @@ This rule governs Asio networking, socket options, coroutine frame lifetimes, an
   { std::lock_guard lock(mtx_); handler = stream_handler_; }
   if (handler) asio::co_spawn(io_, handler(stream), asio::detached);
   ```
-- `asio::awaitable<T>` is lazily evaluated (`suspend_always` on initial suspend). Invoking `handler(stream)` immediately builds the coroutine frame, holding an implicit pointer back to the closure inside the local `handler` variable. When `handler` leaves scope, its closure is destroyed, leaving dangling references (observed as `this=0x0` or SegFaults on resume).
+- `wavex::task<T>` is lazily evaluated (`suspend_always` on initial suspend). Invoking `handler(stream)` immediately builds the coroutine frame, holding an implicit pointer back to the closure inside the local `handler` variable. When `handler` leaves scope, its closure is destroyed, leaving dangling references (observed as `this=0x0` or SegFaults on resume).
 - **Mandatory Pattern**: Always pass the callable itself to `asio::co_spawn` so Asio owns a copy for the entire duration of the coroutine:
   ```cpp
   // MANDATORY: co_spawn owns the lambda and keeps the handler closure alive
-  asio::co_spawn(io_, [handler, stream]() -> asio::awaitable<void> {
+  asio::co_spawn(io_, [handler, stream]() -> wavex::task<void> {
       co_await handler(stream);
   }, asio::detached);
   ```

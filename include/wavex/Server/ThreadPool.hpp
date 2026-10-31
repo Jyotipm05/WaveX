@@ -42,6 +42,8 @@
 #include <asio/detached.hpp>
 #include <asio/executor_work_guard.hpp>
 #include <asio/io_context.hpp>
+#include <wavex/Base/Executor.hpp>
+#include <wavex/Base/Task.hpp>
 
 #include <wavex/Base/Logger.hpp>
 #include <wavex/Server/WorkStealingQueue.hpp>
@@ -238,6 +240,9 @@ namespace wavex::server {
             /// The worker's io_context: create sockets/timers for the leased coroutine on it.
             [[nodiscard]] asio::io_context &context() const noexcept { return *ctx_; }
 
+            /// The same worker as an executor, for code written against `wavex::executor`.
+            [[nodiscard]] wavex::executor executor() const noexcept { return ctx_->get_executor(); }
+
         private:
             friend class ThreadPool;
             WorkerLease(std::shared_ptr<asio::io_context> ctx, std::shared_ptr<std::atomic<std::size_t> > live)
@@ -381,7 +386,7 @@ namespace wavex::server {
     private:
         /// Decrements the worker's live-coroutine count when the wrapped coroutine finishes or is destroyed.
         template<typename Coro>
-        static asio::awaitable<void> track_live(std::shared_ptr<std::atomic<std::size_t> > live, Coro coro) {
+        static wavex::task<void> track_live(std::shared_ptr<std::atomic<std::size_t> > live, Coro coro) {
             struct Guard {
                 std::shared_ptr<std::atomic<std::size_t> > n;
                 ~Guard() { n->fetch_sub(1, std::memory_order_seq_cst); }

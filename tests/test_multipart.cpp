@@ -144,7 +144,7 @@ int main() {
         asio::io_context io;
         bool async_tests_passed = false;
 
-        asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        asio::co_spawn(io, [&]() -> wavex::task<void> {
             try {
                 // A. parse_async in-memory
                 std::cout << "  [Step 7.A] Starting parse_async (in-memory)...\n" << std::flush;

@@ -157,7 +157,7 @@ namespace wavex::server {
                                                   std::string content_type) {
         server_not_found_handler_ =
                 [b = std::move(body), ct = std::move(content_type)](
-            RequestType &, ResponseType &res) -> asio::awaitable<void> {
+            RequestType &, ResponseType &res) -> wavex::task<void> {
                     traits::write_not_found(res, b, ct);
                     co_return;
                 };
@@ -175,6 +175,11 @@ namespace wavex::server {
     template<typename Codec, typename RouterType>
     asio::io_context &Server<Codec, RouterType>::io_context() noexcept {
         return master_io_;
+    }
+
+    template<typename Codec, typename RouterType>
+    wavex::executor Server<Codec, RouterType>::executor() noexcept {
+        return master_io_.get_executor();
     }
 
     template<typename Codec, typename RouterType>

@@ -27,14 +27,14 @@ server.run();
 Control keep-alive persistence dynamically in route handlers:
 
 ```c++
-router.get("/stream", [](auto &, auto &res) -> asio::awaitable<void> {
+router.get("/stream", [](auto &, auto &res) -> wavex::task<void> {
     // Advertise keep-alive with custom timeout (seconds) and remaining request count
     res.set_keep_alive(true, /*timeout_sec=*/15, /*max_requests=*/200);
     res.status(200).send("Keep-Alive Active");
     co_return;
 });
 
-router.get("/logout", [](auto &, auto &res) -> asio::awaitable<void> {
+router.get("/logout", [](auto &, auto &res) -> wavex::task<void> {
     // Explicitly command connection closure
     res.set_keep_alive(false); // Sends 'Connection: close' and strips 'Keep-Alive'
     res.status(200).send("Logged out. Connection closing.");
@@ -83,7 +83,7 @@ Developers can trigger graceful shutdown directly inside any custom route handle
 
 ```c++
 // Remote shutdown endpoint (authentication omitted for brevity)
-router.post("/api/admin/exit", [&](auto &, auto &res) -> asio::awaitable<void> {
+router.post("/api/admin/exit", [&](auto &, auto &res) -> wavex::task<void> {
     res.status(200).send("Server draining. Goodbye!");
     
     // Initiates graceful drain with 5s timeout.

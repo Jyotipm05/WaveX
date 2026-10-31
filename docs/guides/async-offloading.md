@@ -8,7 +8,7 @@ To keep low-latency network I/O threads from starving when handling CPU-intensiv
 #include <wavex/wavex.hpp>
 
 // 1. Offload heavy computation or blocking legacy libraries to the dedicated thread pool
-router.post("/api/hash", [](auto &req, auto &res) -> asio::awaitable<void> {
+router.post("/api/hash", [](auto &req, auto &res) -> wavex::task<void> {
     // Calling coroutine yields immediately; executes on background blocking pool
     std::string hash = co_await wavex::spawn_blocking([body = req.body()] {
         return compute_heavy_argon2_hash(body);
@@ -19,7 +19,7 @@ router.post("/api/hash", [](auto &req, auto &res) -> asio::awaitable<void> {
 });
 
 // 2. Tokio-equivalent non-blocking file system operations
-router.get("/api/file", [](auto &, auto &res) -> asio::awaitable<void> {
+router.get("/api/file", [](auto &, auto &res) -> wavex::task<void> {
     auto file_content = co_await wavex::fs::read_file("./data/document.txt");
     if (!file_content) {
         res.status(404).send("File not found");

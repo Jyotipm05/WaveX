@@ -17,6 +17,7 @@
 #include <wavex/Async/SpawnBlocking.hpp>
 
 #include <asio/awaitable.hpp>
+#include <wavex/Base/Task.hpp>
 #include <asio/use_awaitable.hpp>
 #include <asio/async_result.hpp>
 #include <asio/post.hpp>
@@ -153,7 +154,7 @@ namespace wavex::utils {
         return BinaryFile::write_all(destination, data);
     }
 
-    asio::awaitable<bool> UploadedFile::save_to_async(
+    wavex::task<bool> UploadedFile::save_to_async(
         std::string destination, const bool overwrite) const {
         if (is_on_disk()) {
             co_return temp_file->move_to(destination, overwrite);
@@ -302,7 +303,7 @@ namespace wavex::utils {
         return result;
     }
 
-    asio::awaitable<MultipartFormData> MultipartFormData::parse_async(
+    wavex::task<MultipartFormData> MultipartFormData::parse_async(
         const std::string_view body,
         const std::string_view content_type_header,
         MultipartLimits limits) {

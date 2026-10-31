@@ -113,7 +113,7 @@ namespace wavex::protos::http {
             return *this;
         }
 
-        using write_sink_fn = std::function<asio::awaitable<std::expected<void, std::error_code> >(
+        using write_sink_fn = std::function<wavex::task<std::expected<void, std::error_code> >(
             std::string_view, std::chrono::milliseconds)>;
 
         /// Attach a type-erased write sink for stream output (chunked transfers & file streaming)
@@ -135,7 +135,7 @@ namespace wavex::protos::http {
          * `websocket::accept` and `webtransport::accept`; the server consults it only through
          * `protocol_traits<Codec>::wants_takeover` / `take_over`.
          */
-        using upgrade_fn = std::function<asio::awaitable<void>(network::AnyStream, std::string)>;
+        using upgrade_fn = std::function<wavex::task<void>(network::AnyStream, std::string)>;
 
         /// Hand the connection to `fn` once this response is on the wire (e.g. after `101 Switching Protocols`).
         HttpResponse &upgrade(upgrade_fn fn) {
@@ -597,7 +597,7 @@ namespace wavex::protos::http {
          * @brief Starts chunked response streaming over the bound socket.
          * Transmits HTTP status line and Transfer-Encoding: chunked headers immediately.
          */
-        asio::awaitable<std::expected<void, std::error_code> > start_chunked(
+        wavex::task<std::expected<void, std::error_code> > start_chunked(
             const std::chrono::milliseconds timeout = std::chrono::milliseconds(15000)) {
             if (is_headers_sent_) co_return std::expected<void, std::error_code>{};
 
@@ -617,7 +617,7 @@ namespace wavex::protos::http {
         /**
          * @brief Writes a single chunk of data to the chunked HTTP stream.
          */
-        asio::awaitable<std::expected<void, std::error_code> > write_chunk(
+        wavex::task<std::expected<void, std::error_code> > write_chunk(
             const std::string_view data,
             const std::chrono::milliseconds timeout = std::chrono::milliseconds(15000)) {
             if (!is_headers_sent_) {
@@ -635,7 +635,7 @@ namespace wavex::protos::http {
         /**
          * @brief Sends terminal chunk 0\r\n\r\n and finishes the chunked HTTP response.
          */
-        asio::awaitable<std::expected<void, std::error_code> > end_chunked(
+        wavex::task<std::expected<void, std::error_code> > end_chunked(
             const std::chrono::milliseconds timeout = std::chrono::milliseconds(15000)) {
             if (is_sent_) co_return std::expected<void, std::error_code>{};
 
@@ -655,7 +655,7 @@ namespace wavex::protos::http {
         /**
          * @brief Streams a file from disk with automatic MIME detection and default/custom timeouts.
          */
-        asio::awaitable<std::expected<void, std::error_code> > send_file(
+        wavex::task<std::expected<void, std::error_code> > send_file(
             const std::string_view filepath,
             const std::chrono::milliseconds timeout = std::chrono::milliseconds(30000),
             const std::size_t buffer_size = 65536,
@@ -667,7 +667,7 @@ namespace wavex::protos::http {
         /**
          * @brief Streams a file from disk with custom MIME override and default/custom timeouts.
          */
-        asio::awaitable<std::expected<void, std::error_code> > send_file(
+        wavex::task<std::expected<void, std::error_code> > send_file(
             const std::string_view filepath,
             const std::string_view custom_mime,
             const std::chrono::milliseconds timeout = std::chrono::milliseconds(30000),
@@ -767,7 +767,7 @@ namespace wavex::protos::http {
         };
 
         /// Reads the next block on the blocking pool; returns 0 at end of file.
-        static asio::awaitable<std::size_t> read_next_chunk(std::shared_ptr<FileSendState> st) {
+        static wavex::task<std::size_t> read_next_chunk(std::shared_ptr<FileSendState> st) {
             co_return co_await wavex::spawn_blocking([st]() -> std::size_t {
                 if (st->file.read(st->buf.data(), st->buf.size()) > 0) {
                     return static_cast<std::size_t>(st->file.gCount());
@@ -776,7 +776,7 @@ namespace wavex::protos::http {
             });
         }
 
-        [[nodiscard]] asio::awaitable<std::expected<void, std::error_code> > async_write_with_timeout(
+        [[nodiscard]] wavex::task<std::expected<void, std::error_code> > async_write_with_timeout(
             const std::string_view data,
             const std::chrono::milliseconds timeout) const {
             if (write_sink_) {

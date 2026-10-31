@@ -43,7 +43,7 @@
 
 namespace wavex::server {
     template<typename Codec, typename RouterType>
-    asio::awaitable<void> Server<Codec, RouterType>::accept_loop() {
+    wavex::task<void> Server<Codec, RouterType>::accept_loop() {
         while (state_.load(std::memory_order_acquire) == ServerState::Running) {
             try {
                 asio::ip::tcp::socket accepted = co_await acceptor_.async_accept();
@@ -55,7 +55,7 @@ namespace wavex::server {
                 // connection is handled on the worker instead of funnelling through the master io_context.
                 auto lease = pool_.lease_worker();
                 if (!lease) [[unlikely]] continue; // no workers (shutting down): drop the connection
-                asio::ip::tcp::socket socket = adopt_on_worker(std::move(accepted), lease.context());
+                asio::ip::tcp::socket socket = adopt_on_worker(std::move(accepted), lease.executor());
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
                 if (tls_enabled_ && ssl_ctx_) {
                     auto stream = std::make_shared<asio::ssl::stream<asio::ip::tcp::socket> >(
@@ -77,7 +77,7 @@ namespace wavex::server {
 
     template<typename Codec, typename RouterType>
     asio::ip::tcp::socket Server<Codec, RouterType>::adopt_on_worker(asio::ip::tcp::socket &&accepted,
-                                                                     asio::io_context &worker_io) {
+                                                                     const wavex::executor &worker) {
 #if !defined(ASIO_HAS_IOCP)
         // Re-register the connected socket with the worker's reactor. If anything fails the original socket is
         // returned untouched (it keeps working through the master reactor), so this is purely an optimisation.
@@ -86,18 +86,18 @@ namespace wavex::server {
         if (!ec) {
             const auto fd = accepted.release(ec);
             if (!ec) {
-                asio::ip::tcp::socket moved(worker_io);
+                asio::ip::tcp::socket moved(worker);
                 if (!moved.assign(protocol, fd, ec)) {
                     return moved;
                 }
                 // assign() failed after release(): the descriptor is ours to close. The returned socket is
                 // closed, so the connection coroutine ends on its first read.
                 ::close(fd);
-                return asio::ip::tcp::socket(worker_io);
+                return asio::ip::tcp::socket(worker);
             }
         }
 #else
-        (void) worker_io; // IOCP cannot hand a socket to another completion port
+        (void) worker; // IOCP cannot hand a socket to another completion port
 #endif
         return std::move(accepted);
     }
@@ -114,7 +114,7 @@ namespace wavex::server {
 
     template<typename Codec, typename RouterType>
     template<typename Stream>
-    asio::awaitable<void> Server<Codec, RouterType>::drain_and_abort(Stream &s) {
+    wavex::task<void> Server<Codec, RouterType>::drain_and_abort(Stream &s) {
         // QUIC streams handle their own graceful teardown — drain is TCP-only
         if constexpr (std::is_convertible_v<decltype(get_stream_socket(s)) &, asio::ip::tcp::socket &>) {
             detail::drain_and_abort_tcp(get_stream_socket(s));
@@ -124,7 +124,7 @@ namespace wavex::server {
 
     template<typename Codec, typename RouterType>
     template<typename Stream>
-    asio::awaitable<void> Server<Codec, RouterType>::handle_connection(
+    wavex::task<void> Server<Codec, RouterType>::handle_connection(
         std::shared_ptr<Stream> stream_ptr) {
         co_await handle_connection_impl<Codec, RouterType>(std::move(stream_ptr), router_);
         co_return;
@@ -136,7 +136,7 @@ namespace wavex::server {
 
     template<typename Codec, typename RouterType>
     template<typename CustomCodec, typename CustomRouter, typename Stream>
-    asio::awaitable<void> Server<Codec, RouterType>::handle_connection_impl(
+    wavex::task<void> Server<Codec, RouterType>::handle_connection_impl(
         std::shared_ptr<Stream> stream_ptr, CustomRouter &router) {
         using CustTraits = protos::protocol_traits<CustomCodec>;
         using CustReq = CustomRouter::RequestType;
@@ -427,7 +427,7 @@ namespace wavex::server {
                     // Per-connection write sink for streaming transfers (chunked, send_file)
                     auto write_sink = [weak_stream](const std::string_view data,
                                                          const std::chrono::milliseconds timeout)
-                        -> asio::awaitable<std::expected<void, std::error_code> > {
+                        -> wavex::task<std::expected<void, std::error_code> > {
                                 auto s = weak_stream.lock();
                                 if (!s) [[unlikely]] {
                                     co_return std::unexpected(std::make_error_code(std::errc::broken_pipe));
@@ -522,7 +522,7 @@ namespace wavex::server {
 
     template<typename Codec, typename RouterType>
     template<typename CustomCodec, typename CustomRouter, typename CustReq, typename CustRes, typename Sink>
-    asio::awaitable<bool> Server<Codec, RouterType>::process_request(
+    wavex::task<bool> Server<Codec, RouterType>::process_request(
         CustReq &req, CustRes &res, CustomRouter &router, const bool keep, const unsigned remaining, Sink sink) {
         using CustTraits = protos::protocol_traits<CustomCodec>;
 
@@ -621,12 +621,12 @@ namespace wavex::server {
 
     template<typename Codec, typename RouterType>
     template<typename ReqT, typename ResT, typename MwVec, typename H>
-    asio::awaitable<void> Server<Codec, RouterType>::run_chain(
+    wavex::task<void> Server<Codec, RouterType>::run_chain(
         ReqT &req, ResT &res, const MwVec &mws, const H &handler) {
         std::size_t idx = 0;
         while (idx < mws.size() && !res.is_sent()) {
             bool next_called = false;
-            wavex::base::Next next = [&next_called]() -> asio::awaitable<void> {
+            wavex::base::Next next = [&next_called]() -> wavex::task<void> {
                 next_called = true;
                 co_return;
             };

@@ -562,7 +562,7 @@ void test_http3_session_unidirectional_routing_c7() {
     ctrl_stream->push_inbound(ctrl_wire, false);
 
     // Spawn unidirectional session handler for Control Stream
-    asio::co_spawn(io, [ctrl_stream, ctx]() -> asio::awaitable<void> {
+    asio::co_spawn(io, [ctrl_stream, ctx]() -> wavex::task<void> {
         co_await h3::session_handler::handle_unidirectional_stream(ctrl_stream, ctx);
     }, asio::detached);
     io.poll();
@@ -588,7 +588,7 @@ void test_http3_session_unidirectional_routing_c7() {
     enc_stream->push_inbound(enc_wire, false);
 
     // Spawn handler for Encoder Stream
-    asio::co_spawn(io, [enc_stream, ctx]() -> asio::awaitable<void> {
+    asio::co_spawn(io, [enc_stream, ctx]() -> wavex::task<void> {
         co_await h3::session_handler::handle_unidirectional_stream(enc_stream, ctx);
     }, asio::detached);
     io.poll();
