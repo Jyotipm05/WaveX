@@ -102,6 +102,8 @@ WaveX is a pure C++23 framework requiring a conforming modern C++23 compiler and
 
 `.github/workflows/portability.yml` builds and tests on Windows (MSVC, vcpkg) and macOS (Homebrew LLVM) when started manually and once a week. It is informational: the jobs use `continue-on-error`, so they never block a pull request, and they have not been run yet, so expect to adjust them on first use. Move a job into `ci.yml` once it passes reliably.
 
+**OpenSSL 4 is not supported yet.** The pinned Asio 1.32 reads `ASN1_STRING` fields and stores `X509_get_subject_name` results in non-const pointers, which OpenSSL 4 no longer allows (opaque types, const accessors). Build against OpenSSL 3.5 or 3.6 (Homebrew: `openssl@3`); if a linked OpenSSL 4 shadows it, `brew unlink` it or point `OPENSSL_ROOT_DIR` and `OPENSSL_INCLUDE_DIR` at the 3.x prefix.
+
 ---
 
 ## Compiler-specific notes
