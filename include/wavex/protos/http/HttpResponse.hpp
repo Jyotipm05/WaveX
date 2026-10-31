@@ -20,10 +20,12 @@
 #include <utility>
 #include <expected>
 #include <chrono>
-#include <fstream>
-#include <filesystem>
+#include <memory>
+#include <wavex/Utils/BinaryFile.hpp>
+#include <wavex/Async/SpawnBlocking.hpp>
 #include <system_error>
 #include <functional>
+#include <memory_resource>
 #include <asio/ip/tcp.hpp>
 #include <asio/as_tuple.hpp>
 #include <asio/write.hpp>
@@ -31,6 +33,8 @@
 #include <asio/use_awaitable.hpp>
 #include <wavex/Base/Response.hpp>
 #include <wavex/Base/MimeTypes.hpp>
+#include <wavex/Base/StringSink.hpp>
+#include <wavex/Network/AnyStream.hpp>
 #include <wavex/protos/http/http1codec.hpp>
 
 namespace wavex::protos::http {
@@ -39,6 +43,8 @@ namespace wavex::protos::http {
         Gzip, // Planned for future zlib update
         Deflate // Planned for future zlib update
     };
+
+    using base::StringSink;
 
     /**
      * @class HttpResponse
@@ -93,6 +99,20 @@ namespace wavex::protos::http {
             return stream_id(id);
         }
 
+        [[nodiscard]] uint8_t version_major() const noexcept {
+            return version_major_;
+        }
+
+        [[nodiscard]] uint8_t version_minor() const noexcept {
+            return version_minor_;
+        }
+
+        HttpResponse &set_version(const uint8_t major, const uint8_t minor) noexcept {
+            version_major_ = major;
+            version_minor_ = minor;
+            return *this;
+        }
+
         using write_sink_fn = std::function<asio::awaitable<std::expected<void, std::error_code> >(
             std::string_view, std::chrono::milliseconds)>;
 
@@ -105,9 +125,41 @@ namespace wavex::protos::http {
         /// Check if headers or chunked stream have already been flushed to the wire
         [[nodiscard]] bool is_headers_sent() const noexcept { return is_headers_sent_; }
 
+        /**
+         * @brief Connection takeover handler (protocol switch).
+         *
+         * Receives the connection's transport, type-erased, and any bytes the client already sent past the
+         * end of this request. It runs after the response has been written, on the connection's coroutine,
+         * while the request and this response are still alive. When it returns the server closes the
+         * connection (HTTP/1.1) or the stream (HTTP/3). Installed by protocol helpers such as
+         * `websocket::accept` and `webtransport::accept`; the server consults it only through
+         * `protocol_traits<Codec>::wants_takeover` / `take_over`.
+         */
+        using upgrade_fn = std::function<asio::awaitable<void>(network::AnyStream, std::string)>;
+
+        /// Hand the connection to `fn` once this response is on the wire (e.g. after `101 Switching Protocols`).
+        HttpResponse &upgrade(upgrade_fn fn) {
+            upgrade_ = std::move(fn);
+            return *this;
+        }
+
+        /// Whether a takeover handler is installed.
+        [[nodiscard]] bool has_upgrade() const noexcept { return static_cast<bool>(upgrade_); }
+
+        /// Remove and return the takeover handler (the server calls this exactly once).
+        [[nodiscard]] upgrade_fn take_upgrade() noexcept { return std::exchange(upgrade_, nullptr); }
+
+        /// Drop a previously installed takeover handler (e.g. when a later middleware rejects the request).
+        void cancel_upgrade() noexcept { upgrade_ = nullptr; }
+
         HttpResponse() = default;
 
-        explicit HttpResponse(asio::ip::tcp::socket *socket) : socket_(socket) {
+        explicit HttpResponse(std::pmr::memory_resource *mr) noexcept
+            : base::Response(mr) {
+        }
+
+        explicit HttpResponse(asio::ip::tcp::socket *socket, std::pmr::memory_resource *mr = nullptr)
+            : base::Response(mr), socket_(socket) {
         }
 
         ~HttpResponse() = default;
@@ -116,14 +168,21 @@ namespace wavex::protos::http {
          * @brief Copy constructor — deep-copies backing stores and rebases all
          *        string_view members so they point into THIS object's buffers.
          */
-        HttpResponse(const HttpResponse &other)
-            : base::Response(other),
+        HttpResponse(const HttpResponse &other, std::pmr::memory_resource *mr)
+            : Response(other, mr),
               socket_(other.socket_),
               write_sink_(other.write_sink_),
+              upgrade_(other.upgrade_),
               stream_id_(other.stream_id_),
+              status_text_(other.status_text_),
               buffer_owner_(other.buffer_owner_),
               dechunked_body_storage_(other.dechunked_body_storage_),
+              body_view_(other.body_view_),
               parsed_(other.parsed_),
+              headers_views_(other.headers_views_),
+              header_store_(other.header_store_),
+              version_major_(other.version_major_),
+              version_minor_(other.version_minor_),
               is_headers_sent_(other.is_headers_sent_) {
             const auto buf_base = other.buffer_owner_.data();
             const auto buf_len = other.buffer_owner_.size();
@@ -169,19 +228,147 @@ namespace wavex::protos::http {
             }
 
             // Rebase headers_views_ (all from buffer_owner_ if http1)
+            headers_views_.clear();
             headers_views_.reserve(other.headers_views_.size());
             if (buf_len > 0 && std::is_same_v<Codec, wavex::protos::http::http1codec>) {
-                for (const auto &[k, v]: other.headers_views_)
-                    headers_views_.emplace_back(rebase_buf(k), rebase_buf(v));
+                headers_.clear();
+                for (const auto &[k, v]: other.headers_views_) {
+                    const auto rk = rebase_buf(k);
+                    const auto rv = rebase_buf(v);
+                    headers_views_.emplace_back(rk, rv);
+                    headers_.insert_or_assign_ci(rk, rv);
+                }
             } else {
                 if (!parsed_.headers.empty()) {
-                    for (const auto &h : parsed_.headers) {
+                    for (const auto &h: parsed_.headers) {
                         headers_views_.emplace_back(h.name, h.value);
                     }
                 } else {
                     headers_views_ = other.headers_views_;
                 }
             }
+
+            // Rebuild base headers_ FlatMap and headers_views_ so views point into THIS object's header_store_
+            if (!header_store_.empty()) {
+                headers_.clear();
+                headers_views_.clear();
+                for (const auto &[k, v]: header_store_) {
+                    headers_.insert_or_assign_ci(std::string_view(k), std::string_view(v));
+                    headers_views_.emplace_back(std::string_view(k), std::string_view(v));
+                }
+            }
+        }
+
+        HttpResponse(const HttpResponse &other)
+            : HttpResponse(other, other.arena_mr_) {}
+
+        HttpResponse &operator=(const HttpResponse &other) {
+            if (this != &other) {
+                base::Response::operator=(other);
+                socket_ = other.socket_;
+                write_sink_ = other.write_sink_;
+                upgrade_ = other.upgrade_;
+                stream_id_ = other.stream_id_;
+                status_text_ = other.status_text_;
+                buffer_owner_ = other.buffer_owner_;
+                dechunked_body_storage_ = other.dechunked_body_storage_;
+                body_view_ = other.body_view_;
+                parsed_ = other.parsed_;
+                headers_views_ = other.headers_views_;
+                header_store_ = other.header_store_;
+                version_major_ = other.version_major_;
+                version_minor_ = other.version_minor_;
+                is_headers_sent_ = other.is_headers_sent_;
+                body_ = other.body_;
+                status_code_ = other.status_code_;
+                if (!header_store_.empty()) {
+                    headers_.clear();
+                    headers_views_.clear();
+                    for (const auto &[k, v]: header_store_) {
+                        headers_.insert_or_assign_ci(std::string_view(k), std::string_view(v));
+                        headers_views_.emplace_back(std::string_view(k), std::string_view(v));
+                    }
+                } else if (!buffer_owner_.empty() && std::is_same_v<Codec, wavex::protos::http::http1codec>) {
+                    const auto buf_base = other.buffer_owner_.data();
+                    const auto buf_len = other.buffer_owner_.size();
+                    const auto my_base = buffer_owner_.data();
+                    auto rebase_buf = [buf_base, buf_len, my_base](const std::string_view sv) -> std::string_view {
+                        if (sv.data() == nullptr) return {};
+                        const auto off = static_cast<std::size_t>(sv.data() - buf_base);
+                        if (off < buf_len && off + sv.size() <= buf_len)
+                            return {my_base + off, sv.size()};
+                        // ReSharper disable once CppDFALocalValueEscapesFunction
+                        return sv;
+                    };
+                    headers_views_.clear();
+                    headers_.clear();
+                    for (const auto &[k, v]: other.headers_views_) {
+                        const auto rk = rebase_buf(k);
+                        const auto rv = rebase_buf(v);
+                        headers_views_.emplace_back(rk, rv);
+                        headers_.insert_or_assign_ci(rk, rv);
+                    }
+                }
+            }
+            return *this;
+        }
+
+        HttpResponse(HttpResponse &&other, std::pmr::memory_resource *mr)
+            : base::Response(std::move(other), mr),
+              socket_(other.socket_),
+              write_sink_(std::move(other.write_sink_)),
+              upgrade_(std::move(other.upgrade_)),
+              stream_id_(other.stream_id_),
+              status_text_(other.status_text_),
+              buffer_owner_(std::move(other.buffer_owner_)),
+              dechunked_body_storage_(std::move(other.dechunked_body_storage_)),
+              body_view_(other.body_view_),
+              parsed_(std::move(other.parsed_)),
+              headers_views_(std::move(other.headers_views_)),
+              header_store_(std::move(other.header_store_)),
+              version_major_(other.version_major_),
+              version_minor_(other.version_minor_),
+              is_headers_sent_(other.is_headers_sent_) {
+            if (!header_store_.empty()) {
+                headers_.clear();
+                headers_views_.clear();
+                for (const auto &[k, v]: header_store_) {
+                    headers_.insert_or_assign_ci(std::string_view(k), std::string_view(v));
+                    headers_views_.emplace_back(std::string_view(k), std::string_view(v));
+                }
+            }
+        }
+
+        HttpResponse(HttpResponse &&other) noexcept
+            : HttpResponse(std::move(other), other.arena_mr_) {}
+
+        HttpResponse &operator=(HttpResponse &&other) noexcept {
+            if (this != &other) {
+                base::Response::operator=(std::move(other));
+                socket_ = other.socket_;
+                write_sink_ = std::move(other.write_sink_);
+                upgrade_ = std::move(other.upgrade_);
+                stream_id_ = other.stream_id_;
+                status_text_ = other.status_text_;
+                buffer_owner_ = std::move(other.buffer_owner_);
+                dechunked_body_storage_ = std::move(other.dechunked_body_storage_);
+                body_view_ = other.body_view_;
+                parsed_ = std::move(other.parsed_);
+                headers_views_ = std::move(other.headers_views_);
+                header_store_ = std::move(other.header_store_);
+                version_major_ = other.version_major_;
+                version_minor_ = other.version_minor_;
+                is_headers_sent_ = other.is_headers_sent_;
+                if (!header_store_.empty()) {
+                    headers_.clear();
+                    headers_views_.clear();
+                    for (const auto &[k, v]: header_store_) {
+                        headers_.insert_or_assign_ci(std::string_view(k), std::string_view(v));
+                        headers_views_.emplace_back(std::string_view(k), std::string_view(v));
+                    }
+                }
+            }
+            return *this;
         }
 
         /// Attach or update the target socket for immediate response writing
@@ -201,8 +388,7 @@ namespace wavex::protos::http {
             parsed_ = {};
             headers_views_.clear();
 
-            std::size_t consumed = 0;
-            if (parser_type::parse_response(buffer_owner_, parsed_, consumed) != parser_type::result::success) {
+            if (std::size_t consumed = 0; parser_type::parse_response(buffer_owner_, parsed_, consumed) != parser_type::result::success) {
                 headers_views_.clear();
                 return false;
             }
@@ -222,8 +408,11 @@ namespace wavex::protos::http {
 
             headers_views_.clear();
             headers_views_.reserve(parsed_.headers.size());
+            headers_.clear();
+            header_store_.clear();
             for (const auto &[name, value]: parsed_.headers) {
                 headers_views_.emplace_back(name, value);
+                headers_.insert_or_assign_ci(name, value);
             }
             if constexpr (requires { stream_id_ = parsed_.stream_id; }) {
                 stream_id_ = parsed_.stream_id;
@@ -241,13 +430,71 @@ namespace wavex::protos::http {
         }
 
         /**
-         * @brief Serialize the HTTP response into wire format via Codec::encoder.
-         * @return Serialized HTTP response string ready to be transmitted over the socket.
+         * @brief Set a response header — owns the string storage, stores string_view in base FlatMap.
+         *
+         * Uses case-insensitive update to avoid duplicate headers (RFC 7230 §3.2).
+         * Names and values are copied into header_store_ (owned strings) so that
+         * the string_views stored in headers_ FlatMap remain valid for the Response lifetime.
          */
-        [[nodiscard]] std::string serialize_impl() const {
+        HttpResponse &set_impl(const std::string_view name, const std::string_view value) {
+            for (auto &[k, v]: header_store_) {
+                if (detail::is_equal(k, name)) {
+                    v = std::string(value);
+                    headers_.insert_or_assign_ci(std::string_view(k), std::string_view(v));
+                    for (auto &[fst, snd]: headers_views_) {
+                        if (detail::is_equal(fst, name)) {
+                            snd = std::string_view(v);
+                            return *this;
+                        }
+                    }
+                    headers_views_.emplace_back(std::string_view(k), std::string_view(v));
+                    return *this;
+                }
+            }
+            header_store_.emplace_back(std::string(name), std::string(value));
+            headers_.clear();
+            headers_views_.clear();
+            for (const auto &[k, v]: header_store_) {
+                headers_.insert_or_assign_ci(std::string_view(k), std::string_view(v));
+                headers_views_.emplace_back(std::string_view(k), std::string_view(v));
+            }
+            return *this;
+        }
+
+        /**
+         * @brief Remove a header by name (case-insensitive).
+         *
+         * Removes the entry from both header_store_ and the base FlatMap headers_.
+         * Rebuilds the FlatMap from the remaining store entries to maintain consistency.
+         */
+        HttpResponse &remove_header_impl(const std::string_view name) {
+            auto it = std::ranges::find_if(header_store_, [&](const auto &pair) {
+                return detail::is_equal(pair.first, name);
+            });
+            if (it != header_store_.end()) {
+                header_store_.erase(it);
+            }
+            headers_.clear();
+            headers_views_.clear();
+            for (const auto &[k, v]: header_store_) {
+                headers_.insert_or_assign_ci(std::string_view(k), std::string_view(v));
+                headers_views_.emplace_back(std::string_view(k), std::string_view(v));
+            }
+            return *this;
+        }
+
+        /**
+         * @brief Serialize the HTTP response directly into any string sink (std::string, pmr::string).
+         */
+        template<StringSink Out>
+        void serialize_into(Out &out) const {
             response_type res;
             if constexpr (requires { res.stream_id = stream_id_; }) {
                 res.stream_id = stream_id_;
+            }
+            if constexpr (requires { res.version_major = version_major_; }) {
+                res.version_major = version_major_;
+                res.version_minor = version_minor_;
             }
             res.status_code = status_code_;
             res.status_text = (status_text_.empty() || (status_text_ == "OK" && status_code_ != 200))
@@ -255,19 +502,47 @@ namespace wavex::protos::http {
                                   : status_text_;
             res.body = body_view_.empty() ? std::string_view(body_) : body_view_;
 
-            if (!headers_views_.empty()) {
-                res.headers.reserve(headers_views_.size());
-                for (const auto &[name, value]: headers_views_) {
-                    res.headers.emplace_back(name, value);
-                }
-            } else {
+            if (!headers_.empty()) {
                 res.headers.reserve(headers_.size());
                 for (const auto &[name, value]: headers_) {
                     res.headers.emplace_back(name, value);
                 }
+            } else if (!headers_views_.empty()) {
+                res.headers.reserve(headers_views_.size());
+                for (const auto &[name, value]: headers_views_) {
+                    res.headers.emplace_back(name, value);
+                }
             }
 
-            return encoder_type::serialize(res);
+            if constexpr (requires { encoder_type::serialize_into(res, out); }) {
+                encoder_type::serialize_into(res, out);
+            } else {
+                const std::string wire = encoder_type::serialize(res);
+                out.append(wire.data(), wire.size());
+            }
+        }
+
+        /**
+         * @brief Serialize the HTTP response into wire format via Codec::encoder.
+         * @return Serialized HTTP response string ready to be transmitted over the socket.
+         */
+        [[nodiscard]] std::string serialize_impl() const {
+            std::string out;
+            serialize_into(out);
+            return out;
+        }
+
+        /**
+         * @brief Serialize the HTTP response directly into a PMR/arena-backed string.
+         *
+         * Writes the wire HTTP representation (status line + headers + body) into
+         * an existing pmr::string to avoid a separate heap allocation.
+         *
+         * @param out  Output string to append the serialized response into.
+         */
+        void serialize_to(std::pmr::string &out) const {
+            out.clear();
+            serialize_into(out);
         }
 
         /// Access status text as zero-copy std::string_view
@@ -275,14 +550,11 @@ namespace wavex::protos::http {
 
         /// Retrieve a header value by name (zero-copy std::string_view)
         [[nodiscard]] std::optional<std::string_view> header(const std::string_view name) const {
-            if (!headers_views_.empty()) {
-                for (const auto &[k, v]: headers_views_) {
-                    if (detail::is_equal(k, name)) return v;
-                }
-            } else {
-                for (const auto &[k, v]: headers_) {
-                    if (detail::is_equal(k, name)) return v;
-                }
+            if (const auto it = headers_.find_ci(name); it != headers_.end()) {
+                return it->second;
+            }
+            for (const auto &[k, v]: headers_views_) {
+                if (detail::is_equal(k, name)) return v;
             }
             return std::nullopt;
         }
@@ -301,7 +573,7 @@ namespace wavex::protos::http {
          * @param timeout_sec Idle timeout in seconds (default: 5).
          * @param max_requests Remaining maximum requests on this connection (default: 1000).
          */
-        HttpResponse &set_keep_alive(bool enable, unsigned timeout_sec = 5, unsigned max_requests = 1000) {
+        HttpResponse &set_keep_alive(const bool enable, const unsigned timeout_sec = 5, const unsigned max_requests = 1000) {
             if (enable) {
                 this->set("Connection", "keep-alive");
                 this->set("Keep-Alive",
@@ -315,8 +587,7 @@ namespace wavex::protos::http {
 
         /// Checks if this HTTP response allows the connection to stay active
         [[nodiscard]] bool should_keep_alive() const noexcept {
-            const auto conn = header("Connection");
-            if (conn && detail::is_equal(*conn, "close")) {
+            if (const auto conn = header("Connection"); conn && detail::is_equal(*conn, "close")) {
                 return false;
             }
             return true;
@@ -330,10 +601,14 @@ namespace wavex::protos::http {
             const std::chrono::milliseconds timeout = std::chrono::milliseconds(15000)) {
             if (is_headers_sent_) co_return std::expected<void, std::error_code>{};
 
-            this->set("Transfer-Encoding", "chunked");
-            this->set("Connection", "keep-alive");
+            // Chunked transfer coding and connection headers exist only in HTTP/1.x; HTTP/2 and HTTP/3
+            // stream the body in DATA frames and treat these headers as malformed (RFC 9113 §8.2.2).
+            if (version_major_ < 2) {
+                this->set("Transfer-Encoding", "chunked");
+                this->set("Connection", "keep-alive");
+            }
 
-            std::string head = serialize_headers_only();
+            const std::string head = serialize_headers_only();
             is_headers_sent_ = true;
 
             co_return co_await async_write_with_timeout(head, timeout);
@@ -353,7 +628,7 @@ namespace wavex::protos::http {
 
             if (data.empty()) co_return std::expected<void, std::error_code>{};
 
-            std::string chunk_bytes = encoder_type::format_chunk(data);
+            const std::string chunk_bytes = frame_body_chunk(data);
             co_return co_await async_write_with_timeout(chunk_bytes, timeout);
         }
 
@@ -370,8 +645,9 @@ namespace wavex::protos::http {
                 }
             }
 
-            std::string_view term = encoder_type::format_terminal_chunk();
-            auto res = co_await async_write_with_timeout(term, timeout);
+            const std::string term = terminal_chunk();
+            auto res = term.empty() ? std::expected<void, std::error_code>{}
+                                    : co_await async_write_with_timeout(term, timeout);
             is_sent_ = true;
             co_return res;
         }
@@ -399,36 +675,50 @@ namespace wavex::protos::http {
             const CompressionMode compression = CompressionMode::None) {
             (void) compression; // Reserved for future zlib update
 
-            std::filesystem::path path(filepath);
-            std::error_code ec;
-            const uintmax_t file_size = std::filesystem::file_size(path, ec);
-            if (ec) {
+            // Every filesystem touch (open/stat/read) runs on the blocking pool so a slow disk or network
+            // mount never stalls a reactor/worker thread. The handle and buffer are owned by a shared
+            // state that the blocking task captures by value, so the task stays valid even if this
+            // coroutine is destroyed (e.g. connection closed) while a read is in flight.
+            auto st = co_await wavex::spawn_blocking([path = std::string(filepath), buffer_size] {
+                auto state = std::make_shared<FileSendState>(path, buffer_size);
+                if (state->file.is_open()) state->size = state->file.file_size();
+                return state;
+            });
+            if (!st->file.is_open()) {
                 co_return std::unexpected(std::make_error_code(std::errc::no_such_file_or_directory));
             }
 
-            std::ifstream file(path, std::ios::binary);
-            if (!file.is_open()) {
-                co_return std::unexpected(std::make_error_code(std::errc::no_such_file_or_directory));
-            }
+            const std::size_t file_size = st->size;
 
             this->set("Content-Type", custom_mime);
 
-            if (file_size < 100 * 1024 * 1024) {
+            if (file_size < 100ULL * 1024 * 1024) {
                 // < 100 MB: use Content-Length
                 this->set("Content-Length", std::to_string(file_size));
-                std::string headers = serialize_headers_only();
+                const std::string headers = serialize_headers_only();
                 is_headers_sent_ = true;
                 if (auto res = co_await async_write_with_timeout(headers, timeout); !res) {
                     co_return res;
                 }
 
-                std::vector<char> buf(buffer_size);
-                while (file.read(buf.data(), static_cast<std::streamsize>(buf.size())) || file.gcount() > 0) {
-                    const auto bytes_read = static_cast<std::size_t>(file.gcount());
-                    if (bytes_read == 0) break;
-                    if (auto res = co_await async_write_with_timeout(std::string_view(buf.data(), bytes_read), timeout);
-                        !res) {
+                while (const std::size_t n = co_await read_next_chunk(st)) {
+                    // HTTP/1.x sends the bytes as they are (Content-Length framing); HTTP/2 and HTTP/3 wrap
+                    // them in DATA frames of this stream.
+                    const std::string_view raw(st->buf.data(), n);
+                    std::string framed;
+                    if constexpr (!std::is_same_v<Codec, wavex::protos::http::http1codec>) {
+                        framed = frame_body_chunk(raw);
+                    }
+                    const std::string_view out = framed.empty() ? raw : std::string_view(framed);
+                    if (auto res = co_await async_write_with_timeout(out, timeout); !res) {
                         co_return res;
+                    }
+                }
+                if constexpr (!std::is_same_v<Codec, wavex::protos::http::http1codec>) {
+                    if (const std::string term = terminal_chunk(); !term.empty()) {
+                        if (auto res = co_await async_write_with_timeout(term, timeout); !res) {
+                            co_return res;
+                        }
                     }
                 }
                 is_sent_ = true;
@@ -436,11 +726,8 @@ namespace wavex::protos::http {
             }
 
             // Chunked streaming for large files
-            std::vector<char> buf(buffer_size);
-            while (file.read(buf.data(), static_cast<std::streamsize>(buf.size())) || file.gcount() > 0) {
-                const auto bytes_read = static_cast<std::size_t>(file.gcount());
-                if (bytes_read == 0) break;
-                if (auto res = co_await write_chunk(std::string_view(buf.data(), bytes_read), timeout); !res) {
+            while (const std::size_t n = co_await read_next_chunk(st)) {
+                if (auto res = co_await write_chunk(std::string_view(st->buf.data(), n), timeout); !res) {
                     co_return res;
                 }
             }
@@ -448,6 +735,47 @@ namespace wavex::protos::http {
         }
 
     private:
+        /// One streamed body chunk in the codec's framing: chunked coding (HTTP/1.1) or a DATA frame on this
+        /// response's stream (HTTP/2, HTTP/3).
+        [[nodiscard]] std::string frame_body_chunk(const std::string_view data) const {
+            if constexpr (requires { encoder_type::serialize_data_frame(uint32_t{}, data, false); }) {
+                return encoder_type::serialize_data_frame(stream_id_, data, false);
+            } else {
+                return encoder_type::format_chunk(data);
+            }
+        }
+
+        /// End of a streamed body: `0\r\n\r\n` (HTTP/1.1), an empty END_STREAM DATA frame on this stream
+        /// (HTTP/2), nothing (HTTP/3 ends with the QUIC stream FIN).
+        [[nodiscard]] std::string terminal_chunk() const {
+            if constexpr (requires { encoder_type::serialize_data_frame(uint32_t{}, std::string_view{}, true); }) {
+                return encoder_type::serialize_data_frame(stream_id_, {}, true);
+            } else {
+                return std::string(encoder_type::format_terminal_chunk());
+            }
+        }
+
+        /// File handle + staging buffer for send_file(); shared so offloaded reads outlive the coroutine.
+        struct FileSendState {
+            utils::BinaryFile file;
+            std::vector<char> buf;
+            std::size_t size{0};
+
+            FileSendState(const std::string &path, const std::size_t buffer_size)
+                : file(path, utils::FileMode::Read), buf(buffer_size) {
+            }
+        };
+
+        /// Reads the next block on the blocking pool; returns 0 at end of file.
+        static asio::awaitable<std::size_t> read_next_chunk(std::shared_ptr<FileSendState> st) {
+            co_return co_await wavex::spawn_blocking([st]() -> std::size_t {
+                if (st->file.read(st->buf.data(), st->buf.size()) > 0) {
+                    return static_cast<std::size_t>(st->file.gCount());
+                }
+                return 0;
+            });
+        }
+
         [[nodiscard]] asio::awaitable<std::expected<void, std::error_code> > async_write_with_timeout(
             const std::string_view data,
             const std::chrono::milliseconds timeout) const {
@@ -495,29 +823,39 @@ namespace wavex::protos::http {
             if constexpr (requires { res.stream_id = stream_id_; }) {
                 res.stream_id = stream_id_;
             }
+            if constexpr (requires { res.version_major = version_major_; }) {
+                res.version_major = version_major_;
+                res.version_minor = version_minor_;
+            }
             res.status_code = status_code_;
             res.status_text = (status_text_.empty() || (status_text_ == "OK" && status_code_ != 200))
                                   ? Codec::status_text_for(status_code_)
                                   : status_text_;
             res.body = "";
 
-            if (!headers_views_.empty()) {
-                res.headers.reserve(headers_views_.size());
-                for (const auto &[name, value]: headers_views_) {
-                    res.headers.emplace_back(name, value);
-                }
-            } else {
+            if (!headers_.empty()) {
                 res.headers.reserve(headers_.size());
                 for (const auto &[name, value]: headers_) {
                     res.headers.emplace_back(name, value);
                 }
+            } else if (!headers_views_.empty()) {
+                res.headers.reserve(headers_views_.size());
+                for (const auto &[name, value]: headers_views_) {
+                    res.headers.emplace_back(name, value);
+                }
             }
 
-            return encoder_type::serialize(res);
+            // HTTP/2: the body follows in DATA frames, so the HEADERS frame must not end the stream.
+            if constexpr (requires { encoder_type::serialize_headers(res, false); }) {
+                return encoder_type::serialize_headers(res, false);
+            } else {
+                return encoder_type::serialize(res);
+            }
         }
 
         asio::ip::tcp::socket *socket_ = nullptr;
         write_sink_fn write_sink_{nullptr};
+        upgrade_fn upgrade_{nullptr};
         uint32_t stream_id_{1};
         std::string_view status_text_{"OK"};
         std::string buffer_owner_;
@@ -525,6 +863,12 @@ namespace wavex::protos::http {
         std::string_view body_view_;
         response_type parsed_;
         std::vector<std::pair<std::string_view, std::string_view> > headers_views_;
+        /// Owned string storage for server-built response headers.
+        /// std::vector backed storage with safe post-insertion view synchronization.
+        /// string_views in headers_views_ and base headers_ FlatMap point into these owned strings.
+        std::vector<std::pair<std::string, std::string> > header_store_;
+        uint8_t version_major_{1};
+        uint8_t version_minor_{1};
         bool is_headers_sent_{false};
     };
 

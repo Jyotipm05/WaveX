@@ -52,7 +52,7 @@ namespace wavex::base {
      */
     template<typename ReqT, typename ResT>
     GenericMiddlewareFn<ReqT, ResT> keep_alive(unsigned timeout_sec = 5, unsigned max_requests = 1000) {
-        return [timeout_sec, max_requests](ReqT &req, ResT &res, Next next) -> asio::awaitable<void> {
+        return [timeout_sec, max_requests](ReqT &req, ResT &res, const Next next) -> asio::awaitable<void> {
             if (req.should_keep_alive()) {
                 res.set("Connection", "keep-alive");
                 res.set("Keep-Alive",
@@ -74,6 +74,21 @@ namespace wavex::base {
             res.set("Content-Type", "text/event-stream");
             res.set("Cache-Control", "no-cache");
             res.set("Connection", "keep-alive");
+            co_await next();
+        };
+    }
+
+    /**
+     * @brief Middleware rejecting requests whose body exceeds max_bytes with 413 Payload Too Large.
+     * @param max_bytes Maximum allowed body size in bytes.
+     */
+    template<typename ReqT, typename ResT>
+    GenericMiddlewareFn<ReqT, ResT> body_limit(const std::size_t max_bytes) {
+        return [max_bytes](ReqT &req, ResT &res, const Next next) -> asio::awaitable<void> {
+            if (req.body().size() > max_bytes) {
+                res.status(413).send("Payload Too Large");
+                co_return;
+            }
             co_await next();
         };
     }

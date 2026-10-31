@@ -6,7 +6,7 @@
 
 /**
  * @file wavex.ixx
- * @brief Primary C++ module interface file for the WaveX library.
+ * @brief Primary C++ module interface file for the WaveX framework.
  * 
  * Exports the main WaveX namespace symbols, functions, and submodule partitions.
  */
@@ -16,19 +16,235 @@ module;
 #include <wavex/wavex.hpp>
 
 export module wavex;
+
+#if !defined(__GNUC__) || defined(__clang__)
+// Active in MSVC / Clang: Aggregate submodule partitions
 export import :chainable;
 export import :logger;
 export import :protos;
 export import :protos_http;
+export import :protos_websocket;
+export import :protos_webtransport;
+export import :network_any_stream;
 export import :middleware;
 export import :router;
 export import :http_router;
 export import :server;
 export import :client;
 export import :cli;
-
+export import :utils;
 
 export namespace wavex {
     using wavex::_version;
     std::string_view wx_version = ::wx_version;
 }
+#else
+// Deactivated in GCC to prevent cross-partition internal-linkage symbol collisions (ISO P2808R0)
+export namespace wavex {
+    using wavex::protocol;
+    using wavex::_version;
+    using wavex::spawn_blocking;
+    std::string_view wx_version = ::wx_version;
+}
+
+export namespace wavex::base {
+    using base::Chainable;
+    using base::StaticChain;
+    using base::make_chain;
+    using base::LogLevel;
+    using base::Logger;
+    using base::set_log_level;
+    using base::log;
+    using base::Next;
+    using base::Middleware;
+}
+
+export namespace wavex::protos {
+    using protos::protocol_traits;
+    using protos::protocol_error;
+    using protos::request_limits;
+}
+
+export namespace wavex::protos::http {
+    using http::method;
+    using http::header;
+    using http::message_base;
+    using http::request;
+    using http::response;
+    using http::to_string;
+    using http::from_string;
+    using http::status_text_for;
+    using http::parser;
+    using http::encoder;
+    using http::decoder;
+    using http::http1codec;
+    using http::http2codec;
+    using http::HttpRequest;
+    using http::Http1Request;
+    using http::http1request;
+    using http::Http2Request;
+    using http::http2request;
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+    using http::Http3Request;
+    using http::http3request;
+#endif
+    using http::HttpResponse;
+    using http::Http1Response;
+    using http::http1response;
+    using http::Http2Response;
+    using http::http2response;
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+    using http::Http3Response;
+    using http::http3response;
+#endif
+}
+
+export namespace wavex::network {
+    using network::AnyStream;
+}
+
+export namespace wavex::protos::websocket {
+    using websocket::opcode;
+    using websocket::role;
+    using websocket::error;
+    using websocket::make_error_code;
+    using websocket::frame_header;
+    using websocket::parse_result;
+    using websocket::codec;
+    using websocket::compute_accept_key;
+    using websocket::is_valid_client_key;
+    using websocket::generate_client_key;
+    using websocket::header_contains_token;
+    using websocket::is_valid_utf8;
+    using websocket::options;
+    using websocket::message;
+    using websocket::connection;
+    using websocket::handler_fn;
+    using websocket::accept;
+}
+
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+export namespace wavex::protos::webtransport {
+    using webtransport::error;
+    using webtransport::make_error_code;
+    using webtransport::options;
+    using webtransport::stream;
+    using webtransport::session;
+    using webtransport::session_registry;
+    using webtransport::dispatch_bidirectional_stream;
+    using webtransport::handler_fn;
+    using webtransport::accept;
+}
+#endif
+
+export namespace wavex::engine {
+    using engine::Router;
+    using engine::HttpRouter;
+    using engine::http_router;
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+    using engine::Http3Router;
+    using engine::http3router;
+#endif
+}
+
+export namespace wavex::server {
+    using server::TlsConfig;
+    using server::Task;
+    using server::LocalQueue;
+    using server::InjectorQueue;
+    using server::ThreadPoolConfig;
+    using server::WorkerNode;
+    using server::ThreadPool;
+    using server::BlockingTask;
+    using server::BlockingThreadPool;
+    using server::ConnectionTracker;
+    using server::Server;
+    using server::Http1Server;
+    using server::http1server;
+    using server::Http2Server;
+    using server::http2server;
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+    using server::Http3Server;
+    using server::http3server;
+    using server::ComposedHttpServer;
+    using server::composed_http_server;
+#endif
+    using server::HttpServer;
+    using server::httpserver;
+}
+
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+export namespace wavex::network::quic {
+    using quic::PacketType;
+    using quic::TransportError;
+    using quic::FrameType;
+    using quic::VarInt;
+    using quic::ConnectionId;
+    using quic::siphash24;
+    using quic::Frame;
+    using quic::PacketHeader;
+    using quic::ProtectionKeys;
+    using quic::CryptoSuite;
+    using quic::RttStats;
+    using quic::SentPacket;
+    using quic::CongestionController;
+    using quic::QuicStream;
+    using quic::QuicConnection;
+    using quic::QuicServer;
+    using quic::QuicClient;
+    using quic::quic_protocol;
+    using quic::basic_quic_socket;
+    using quic::basic_quic_acceptor;
+    using quic::protocol;
+    using quic::socket;
+    using quic::acceptor;
+    using quic::endpoint;
+    using quic::resolver;
+    using quic::v4;
+    using quic::v6;
+}
+
+export namespace wavex::quic {
+    using namespace wavex::network::quic;
+}
+#endif
+
+
+
+export namespace wavex::client {
+    using client::HttpVersion;
+    using client::ClientOptions;
+    using client::QueryParams;
+    using client::ClientRequest;
+    using client::ClientResponse;
+    using client::HttpClient;
+    using protos::http::method;
+    using enum wavex::protos::http::method;
+}
+
+export namespace wavex::cli {
+    using cli::CLI;
+    using cli::App;
+}
+
+export namespace wavex::utils {
+    using utils::FileMode;
+    using utils::BinaryFile;
+    using utils::TempFileGuard;
+    using utils::CompressionFormat;
+    using utils::Compressor;
+    using utils::UploadedFile;
+    using utils::FormField;
+    using utils::MultipartLimits;
+    using utils::MultipartFormData;
+}
+
+export namespace wavex::fs {
+    using fs::read_file;
+    using fs::read_bytes;
+    using fs::write_file;
+    using fs::append_file;
+    using fs::remove;
+    using fs::copy_file;
+}
+#endif

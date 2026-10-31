@@ -26,6 +26,7 @@
 #include <optional>
 #include <charconv>
 #include <wavex/protos/http/Methods.hpp>
+#include <wavex/Base/StringSink.hpp>
 
 namespace wavex::protos::http {
     // ─── Internal helpers ────────────────────────────────────────────────────────
@@ -75,19 +76,19 @@ namespace wavex::protos::http {
          * Replaces std::to_string(v) which allocates a temporary std::string.
          * std::to_chars writes into a stack buffer; we then append the used range.
          */
-        inline void append_uint(std::string &out, const unsigned int v) {
+        template<typename Out>
+        inline void append_uint(Out &out, const unsigned int v) {
             char buf[10];
             if (const auto [end, ec] = std::to_chars(buf, buf + sizeof(buf), v); ec == std::errc{})
-                out.
-                        append(buf, end);
+                out.append(buf, static_cast<std::size_t>(end - buf));
         }
 
         /** @brief Same as append_uint but for std::size_t (Content-Length). */
-        inline void append_size(std::string &out, const std::size_t v) {
+        template<typename Out>
+        inline void append_size(Out &out, const std::size_t v) {
             char buf[20];
             if (const auto [end, ec] = std::to_chars(buf, buf + sizeof(buf), v); ec == std::errc{})
-                out.
-                        append(buf, end);
+                out.append(buf, static_cast<std::size_t>(end - buf));
         }
     } // namespace detail
     // ─────────────────────────────────────────────────────────────────────────────
@@ -118,21 +119,21 @@ namespace wavex::protos::http {
      * every method lookup.
      */
     inline method from_string(const std::string_view m) noexcept {
-        if (m.empty()) return method::UNKNOWN;
+        if (m.empty()) [[unlikely]] return method::UNKNOWN;
         switch (m[0]) {
-            case 'G': return (m == "GET") ? method::GET : method::UNKNOWN;
+            case 'G': [[likely]] return (m == "GET") ? method::GET : method::UNKNOWN;
+            case 'P':
+                if (m == "POST") [[likely]] return method::POST;
+                if (m == "PUT") return method::PUT;
+                if (m == "PATCH") return method::PATCH;
+                return method::UNKNOWN;
             case 'D': return (m == "DELETE") ? method::DELETE : method::UNKNOWN;
             case 'H': return (m == "HEAD") ? method::HEAD : method::UNKNOWN;
             case 'O': return (m == "OPTIONS") ? method::OPTIONS : method::UNKNOWN;
             case 'T': return (m == "TRACE") ? method::TRACE : method::UNKNOWN;
             case 'C': return (m == "CONNECT") ? method::CONNECT : method::UNKNOWN;
             case 'Q': return (m == "QUERY") ? method::QUERY : method::UNKNOWN;
-            case 'P':
-                if (m == "POST") return method::POST;
-                if (m == "PUT") return method::PUT;
-                if (m == "PATCH") return method::PATCH;
-                return method::UNKNOWN;
-            default: return method::UNKNOWN;
+            default: [[unlikely]] return method::UNKNOWN;
         }
     }
 
@@ -147,19 +148,51 @@ namespace wavex::protos::http {
      * Both views reference the original parse buffer — no copies made.
      */
     struct header {
-        std::string_view name;
-        std::string_view value;
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        std::string_view name{};
+        std::string_view value{};
+
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        header() = default;
+
+        constexpr header(const std::string_view n, const std::string_view v) noexcept : name(n), value(v) {
+        }
+
+        ~header() = default;
+
+        header(const header &) = default;
+
+        header &operator=(const header &) = default;
+
+        header(header &&) noexcept = default;
+
+        header &operator=(header &&) noexcept = default;
     };
 
     /**
      * @brief Base for HTTP request and response messages.
      */
     struct message_base {
-        int version_major = 1;
-        int version_minor = 1;
-        std::vector<header> headers;
-        std::string_view body;
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        std::vector<header> headers{};
+        std::string_view body{};
+        int version_major{1};
+        int version_minor{1};
 
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        message_base() = default;
+
+        ~message_base() = default;
+
+        message_base(const message_base &) = default;
+
+        message_base &operator=(const message_base &) = default;
+
+        message_base(message_base &&) noexcept = default;
+
+        message_base &operator=(message_base &&) noexcept = default;
+
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
         /**
          * @brief Case-insensitive header lookup.
          *
@@ -175,15 +208,43 @@ namespace wavex::protos::http {
     };
 
     /** @brief HTTP request message. */
-    struct request : public message_base {
-        http::method method_type = method::UNKNOWN;
-        std::string_view target;
+    struct request : message_base {
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        std::string_view target{};
+        method method_type{method::UNKNOWN};
+
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        request() = default;
+
+        ~request() = default;
+
+        request(const request &) = default;
+
+        request &operator=(const request &) = default;
+
+        request(request &&) noexcept = default;
+
+        request &operator=(request &&) noexcept = default;
     };
 
     /** @brief HTTP response message. */
-    struct response : public message_base {
-        unsigned int status_code = 200;
-        std::string_view status_text = "OK";
+    struct response : message_base {
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        std::string_view status_text{"OK"};
+        unsigned int status_code{200};
+
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        response() = default;
+
+        ~response() = default;
+
+        response(const response &) = default;
+
+        response &operator=(const response &) = default;
+
+        response(response &&) noexcept = default;
+
+        response &operator=(response &&) noexcept = default;
     };
 
     // ─────────────────────────────────────────────────────────────────────────────
@@ -195,12 +256,16 @@ namespace wavex::protos::http {
     inline std::string_view status_text_for(const unsigned int code) noexcept {
         switch (code) {
             case 100: return "Continue";
+            case 101: return "Switching Protocols";
             case 200: return "OK";
             case 201: return "Created";
             case 204: return "No Content";
             case 301: return "Moved Permanently";
             case 302: return "Found";
+            case 303: return "See Other";
             case 304: return "Not Modified";
+            case 307: return "Temporary Redirect";
+            case 308: return "Permanent Redirect";
             case 400: return "Bad Request";
             case 401: return "Unauthorized";
             case 403: return "Forbidden";
@@ -208,8 +273,10 @@ namespace wavex::protos::http {
             case 405: return "Method Not Allowed";
             case 408: return "Request Timeout";
             case 413: return "Payload Too Large";
+            case 426: return "Upgrade Required";
             case 429: return "Too Many Requests";
             case 500: return "Internal Server Error";
+            case 501: return "Not Implemented";
             case 502: return "Bad Gateway";
             case 503: return "Service Unavailable";
             default: return "Unknown";
@@ -237,7 +304,7 @@ namespace wavex::protos::http {
                                    std::size_t &line_end,
                                    std::size_t &next_cursor) {
             const std::size_t pos = buffer.find('\n', cursor);
-            if (pos == std::string_view::npos) return false;
+            if (pos == std::string_view::npos) [[unlikely]] return false;
 
             if (pos > cursor && buffer[pos - 1] == '\r') {
                 line_end = pos - 1;
@@ -260,33 +327,37 @@ namespace wavex::protos::http {
                                     std::size_t &bytes_consumed) {
             bytes_consumed = 0;
             std::size_t cursor = 0;
+            // CRITICAL INVARIANT: DO NOT REMOVE req.headers.clear()!
+            // Discards stale string_views referencing previous reallocated stream_buf turns
+            // when resuming from an earlier result::incomplete parse attempt.
+            req.headers.clear();
 
             // ── Request line ──────────────────────────────────────────────────────
             std::size_t rl_end = 0;
             std::size_t next_cursor = 0;
-            if (!find_next_line(buffer, cursor, rl_end, next_cursor)) return result::incomplete;
+            if (!find_next_line(buffer, cursor, rl_end, next_cursor)) [[unlikely]] return result::incomplete;
 
             const std::string_view rl = buffer.substr(0, rl_end);
             cursor = next_cursor;
 
             const std::size_t sp1 = rl.find(' ');
-            if (sp1 == std::string_view::npos) return result::error;
+            if (sp1 == std::string_view::npos) [[unlikely]] return result::error;
             const std::size_t sp2 = rl.find(' ', sp1 + 1);
-            if (sp2 == std::string_view::npos) return result::error;
+            if (sp2 == std::string_view::npos) [[unlikely]] return result::error;
 
             req.method_type = from_string(rl.substr(0, sp1));
             req.target = rl.substr(sp1 + 1, sp2 - sp1 - 1);
 
             // Parse "HTTP/X.Y" — starts_with is C++20 and avoids a substr copy
             const std::string_view ver = rl.substr(sp2 + 1);
-            if (ver.size() < 8 || !ver.starts_with("HTTP/")) return result::error;
+            if (ver.size() < 8 || !ver.starts_with("HTTP/")) [[unlikely]] return result::error;
             req.version_major = ver[5] - '0';
             req.version_minor = ver[7] - '0';
 
             // ── Headers ──────────────────────────────────────────────────────────
             if (const result r = parse_headers(buffer, cursor, req.headers);
-                r != result::success)
-                return r;
+                r != result::success) [[unlikely]]
+                    return r;
 
             // ── Body ─────────────────────────────────────────────────────────────
             return extract_body(buffer, cursor, req, bytes_consumed, /*is_request=*/true);
@@ -301,22 +372,26 @@ namespace wavex::protos::http {
                                      std::size_t &bytes_consumed) {
             bytes_consumed = 0;
             std::size_t cursor = 0;
+            // CRITICAL INVARIANT: DO NOT REMOVE res.headers.clear()!
+            // Discards stale string_views referencing previous reallocated stream_buf turns
+            // when resuming from an earlier result::incomplete parse attempt.
+            res.headers.clear();
 
             // ── Status line ───────────────────────────────────────────────────────
             std::size_t sl_end = 0;
             std::size_t next_cursor = 0;
-            if (!find_next_line(buffer, cursor, sl_end, next_cursor)) return result::incomplete;
+            if (!find_next_line(buffer, cursor, sl_end, next_cursor)) [[unlikely]] return result::incomplete;
 
             const std::string_view sl = buffer.substr(0, sl_end);
             cursor = next_cursor;
 
-            if (sl.size() < 12 || !sl.starts_with("HTTP/")) return result::error;
+            if (sl.size() < 12 || !sl.starts_with("HTTP/")) [[unlikely]] return result::error;
 
             res.version_major = sl[5] - '0';
             res.version_minor = sl[7] - '0';
 
             const std::size_t sp1 = sl.find(' ');
-            if (sp1 == std::string_view::npos) return result::error;
+            if (sp1 == std::string_view::npos) [[unlikely]] return result::error;
             const std::size_t sp2 = sl.find(' ', sp1 + 1);
 
             const std::string_view code_sv = sl.substr(
@@ -326,7 +401,7 @@ namespace wavex::protos::http {
             unsigned int code = 0;
             const auto [ptr, ec] = std::from_chars(
                 code_sv.data(), code_sv.data() + code_sv.size(), code);
-            if (ec != std::errc{}) return result::error;
+            if (ec != std::errc{}) [[unlikely]] return result::error;
             res.status_code = code;
 
             if (sp2 != std::string_view::npos)
@@ -334,8 +409,16 @@ namespace wavex::protos::http {
 
             // ── Headers ──────────────────────────────────────────────────────────
             if (const result r = parse_headers(buffer, cursor, res.headers);
-                r != result::success)
-                return r;
+                r != result::success) [[unlikely]]
+                    return r;
+
+            // RFC 7230 §3.3.3: 1xx, 204, and 304 responses MUST NOT contain a message body.
+            if ((res.status_code >= 100 && res.status_code < 200) ||
+                res.status_code == 204 || res.status_code == 304) {
+                res.body = {};
+                bytes_consumed = cursor;
+                return result::success;
+            }
 
             // ── Body ─────────────────────────────────────────────────────────────
             return extract_body(buffer, cursor, res, bytes_consumed);
@@ -352,24 +435,32 @@ namespace wavex::protos::http {
         static result parse_headers(const std::string_view buffer,
                                     std::size_t &cursor,
                                     std::vector<header> &headers) {
+            // CRITICAL INVARIANT: DO NOT REMOVE headers.clear()!
+            // When streaming multi-chunk or large payloads (e.g. multipart file uploads),
+            // the transport buffer (stream_buf) reallocates as subsequent chunks arrive via
+            // async_read_some. If an earlier turn returned result::incomplete, `headers`
+            // still contains string_views pointing to the old, reallocated (freed) heap buffer.
+            // Failing to clear here causes duplicate header accumulation and severe 0xC0000005
+            // SegFaults when accessing dangling string_view pointers in detail::is_equal().
+            headers.clear();
             headers.reserve(16);
 
             while (cursor < buffer.size()) {
                 std::size_t line_end = 0;
                 std::size_t next_cursor = 0;
-                if (!find_next_line(buffer, cursor, line_end, next_cursor)) {
+                if (!find_next_line(buffer, cursor, line_end, next_cursor)) [[unlikely]] {
                     return result::incomplete;
                 }
 
                 // Blank line -> end of header section
-                if (line_end == cursor) {
+                if (line_end == cursor) [[likely]] {
                     cursor = next_cursor;
                     return result::success;
                 }
 
                 const std::string_view line = buffer.substr(cursor, line_end - cursor);
                 const std::size_t colon = line.find(':');
-                if (colon == std::string_view::npos) return result::error;
+                if (colon == std::string_view::npos) [[unlikely]] return result::error;
 
                 headers.emplace_back(
                     line.substr(0, colon),
@@ -392,6 +483,9 @@ namespace wavex::protos::http {
                                    message_base &msg,
                                    std::size_t &bytes_consumed,
                                    const bool is_request = false) {
+            const std::size_t buf_size = buffer.size();
+            [[assume(cursor <= buf_size)]];
+
             // Single pass: find both interesting headers at once
             std::optional<std::string_view> te, cl;
             for (const auto &[n, v]: msg.headers) {
@@ -408,22 +502,17 @@ namespace wavex::protos::http {
             if (cl) {
                 const auto [ptr, ec] = std::from_chars(
                     cl->data(), cl->data() + cl->size(), content_length);
-                if (ec != std::errc{}) return result::error;
+                if (ec != std::errc{}) [[unlikely]] return result::error;
             } else if (is_request) {
                 // RFC 7230 §3.3.3: In a request message without Transfer-Encoding
                 // or Content-Length, message body length is zero.
                 content_length = 0;
             } else {
-                content_length = buffer.size() - cursor;
+                content_length = buf_size - cursor;
             }
 
-            if (buffer.size() - cursor < content_length) {
-                if (is_request) {
-                    return result::incomplete;
-                }
-                msg.body = buffer.substr(cursor);
-                bytes_consumed = buffer.size();
-                return result::success;
+            if (buf_size - cursor < content_length) [[unlikely]] {
+                return result::incomplete;
             }
 
             msg.body = buffer.substr(cursor, content_length);
@@ -525,48 +614,54 @@ namespace wavex::protos::http {
          *   res.body = "Hello, World!";
          *   auto bytes = encoder::serialize(res);
          */
-        static std::string serialize(const response &res) {
-            // ── Accurate reserve estimate ─────────────────────────────────────────
-            // "HTTP/1.1 200 OK\r\n" ≈ 17 bytes baseline,
-            // each header:  name + ": " + value + "\r\n"
-            // auto CL header: "Content-Length: " + 20 digits + "\r\n" ≈ 40 bytes
-            // blank line:  "\r\n" = 2 bytes
-            std::size_t est = 32 + res.body.size() + 40;
+        /**
+         * @brief Serialise an HTTP response directly into any sink implementing append / push_back.
+         */
+        template<base::StringSink Out>
+        static void serialize_into(const response &res, Out &out) {
+            // Upper-bound reserve estimate to prevent arena fragmentation
+            std::size_t est = 64 + res.status_text.size() + res.body.size();
             for (const auto &[name, value]: res.headers) est += name.size() + value.size() + 4;
-
-            std::string out;
-            out.reserve(est);
+            if (out.capacity() < out.size() + est) {
+                out.reserve(out.size() + est);
+            }
 
             // ── Status line ───────────────────────────────────────────────────────
-            out += "HTTP/";
-            out += static_cast<char>('0' + res.version_major); // no allocation
-            out += '.';
-            out += static_cast<char>('0' + res.version_minor);
-            out += ' ';
-            detail::append_uint(out, res.status_code); // no allocation
-            out += ' ';
-            out += res.status_text;
-            out += "\r\n";
+            out.append("HTTP/");
+            out.push_back(static_cast<char>('0' + res.version_major));
+            out.push_back('.');
+            out.push_back(static_cast<char>('0' + res.version_minor));
+            out.push_back(' ');
+            detail::append_uint(out, res.status_code);
+            out.push_back(' ');
+            out.append(res.status_text);
+            out.append("\r\n");
 
             // ── Headers + fused Content-Length check ──────────────────────────────
-            // Detect presence of an existing Content-Length while writing headers
-            // to avoid a second get_header() scan afterwards.
             bool has_cl = false;
             for (const auto &[name, value]: res.headers) {
-                out += name;
-                out += ": ";
-                out += value;
-                out += "\r\n";
+                out.append(name);
+                out.append(": ");
+                out.append(value);
+                out.append("\r\n");
                 if (!has_cl && detail::is_equal(name, "Content-Length")) has_cl = true;
             }
 
             if (!has_cl && !res.body.empty()) {
-                out += "Content-Length: ";
-                detail::append_size(out, res.body.size()); // no allocation
-                out += "\r\n";
+                out.append("Content-Length: ");
+                detail::append_size(out, res.body.size());
+                out.append("\r\n");
             }
-            out += "\r\n";
-            out += res.body;
+            out.append("\r\n");
+            out.append(res.body);
+        }
+
+        /**
+         * @brief Serialise an HTTP response to wire format.
+         */
+        static std::string serialize(const response &res) {
+            std::string out;
+            serialize_into(res, out);
             return out;
         }
 
@@ -770,15 +865,15 @@ namespace wavex::protos::http {
      * @brief HTTP/1.x Protocol Codec combining zero-copy parser, encoder, decoder, and developer-friendly facade.
      */
     struct http1codec {
-        using parser = wavex::protos::http::http1::parser;
-        using encoder = wavex::protos::http::http1::encoder;
-        using decoder = wavex::protos::http::http1::decoder;
-        using request = wavex::protos::http::http1::request;
-        using response = wavex::protos::http::http1::response;
+        using parser = parser;
+        using encoder = encoder;
+        using decoder = decoder;
+        using request = request;
+        using response = response;
         using result = parser::result;
 
         static std::string_view status_text_for(const unsigned int code) noexcept {
-            return wavex::protos::http::status_text_for(code);
+            return http::status_text_for(code);
         }
 
         // ─── Developer-Friendly Codec Facade (Symmetrical with http2codec) ───
@@ -786,6 +881,12 @@ namespace wavex::protos::http {
         /** @brief Serialize an HTTP/1.x response to wire format. */
         static std::string serialize(const response &res) {
             return encoder::serialize(res);
+        }
+
+        /** @brief Serialize an HTTP/1.x response directly into a provided sink. */
+        template<base::StringSink Out>
+        static void serialize_into(const response &res, Out &out) {
+            encoder::serialize_into(res, out);
         }
 
         /** @brief Serialize an HTTP/1.x request to wire format. */

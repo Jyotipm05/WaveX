@@ -26,6 +26,7 @@
 #include <utility>
 #include <wavex/protos/http/Methods.hpp>
 #include <wavex/protos/http/http1codec.hpp> // for header, message_base, detail helpers
+#include <wavex/Base/StringSink.hpp>
 
 namespace wavex::protos::http {
     namespace http2 {
@@ -85,18 +86,39 @@ namespace wavex::protos::http {
             MAX_CONCURRENT_STREAMS = 0x3,
             INITIAL_WINDOW_SIZE = 0x4,
             MAX_FRAME_SIZE = 0x5,
-            MAX_HEADER_LIST_SIZE = 0x6
+            MAX_HEADER_LIST_SIZE = 0x6,
+            ENABLE_CONNECT_PROTOCOL = 0x8 ///< RFC 8441 §3: extended CONNECT (WebSocket over HTTP/2)
         };
 
         // ─── Frame Header (9 octets, RFC 7540 §4.1) ───────────────────────────────
         struct frame_header {
-            uint32_t length = 0; // 24 bits: payload length
-            frame_type type = frame_type::DATA; // 8 bits
-            uint8_t flags = flags::NONE; // 8 bits
-            uint32_t stream_id = 0; // 31 bits: MSB reserved bit masked out
-
+            // ─── 1. Nested Types & Trait Constants (TOP) ───────────────────────
             static constexpr std::size_t HEADER_SIZE = 9;
 
+            // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+            uint32_t length{0}; // 24 bits: payload length
+            uint32_t stream_id{0}; // 31 bits: MSB reserved bit masked out
+            frame_type type{frame_type::DATA}; // 8 bits
+            uint8_t flags{flags::NONE}; // 8 bits
+
+            // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+            frame_header() = default;
+
+            constexpr frame_header(const uint32_t l, const uint32_t sid, const frame_type t, const uint8_t f) noexcept
+                : length(l), stream_id(sid), type(t), flags(f) {
+            }
+
+            ~frame_header() = default;
+
+            frame_header(const frame_header &) = default;
+
+            frame_header &operator=(const frame_header &) = default;
+
+            frame_header(frame_header &&) noexcept = default;
+
+            frame_header &operator=(frame_header &&) noexcept = default;
+
+            // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
             [[nodiscard]] bool has_flag(const uint8_t f) const noexcept {
                 return (flags & f) == f;
             }
@@ -149,6 +171,9 @@ namespace wavex::protos::http {
         }
 
         // ─── HPACK (RFC 7541) Header Compression Engine ───────────────────────────
+        /// Default cap on a decoded request header list (RFC 7541 §4.1 sizes), matching the HTTP/3 default.
+        inline constexpr std::size_t kDefaultMaxHeaderListSize = 65536;
+
         namespace hpack {
             struct static_entry {
                 std::string_view name;
@@ -374,12 +399,16 @@ namespace wavex::protos::http {
                             bool matched = false;
                             // Search symbol in TABLE
                             for (uint32_t sym = 0; sym < 256; ++sym) {
-                                const auto &e = TABLE[sym];
-                                if (e.bits <= bits) {
-                                    const uint32_t code_part = (current >> (bits - e.bits)) & ((1U << e.bits) - 1U);
-                                    if (code_part == e.code) {
+                                if (const auto &[e_code, e_bits] = TABLE[sym]; e_bits <= bits) {
+                                    if (const uint32_t code_part = (current >> (bits - e_bits)) & ((1U << e_bits) - 1U);
+                                        code_part == e_code) {
                                         out.push_back(static_cast<char>(sym));
-                                        bits -= e.bits;
+                                        bits -= e_bits;
+                                        if (bits == 0) {
+                                            current = 0;
+                                        } else {
+                                            current &= (1U << bits) - 1U;
+                                        }
                                         matched = true;
                                         break;
                                     }
@@ -392,8 +421,7 @@ namespace wavex::protos::http {
                     // Padding check: must be less than 8 bits and all 1s
                     if (bits > 0) {
                         if (bits > 7) return false;
-                        const uint32_t mask = (1U << bits) - 1U;
-                        if ((current & mask) != mask) return false;
+                        if (const uint32_t mask = (1U << bits) - 1U; (current & mask) != mask) return false;
                     }
                     return true;
                 }
@@ -426,19 +454,57 @@ namespace wavex::protos::http {
             // ─── HPACK Dynamic Table ──────────────────────────────────────────────
             class dynamic_table {
             public:
+                // ─── 1. Nested Types & Definitions (TOP) ───────────────────────────
                 struct entry {
-                    std::string name;
-                    std::string value;
+                    // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+                    std::string name{};
+                    std::string value{};
 
+                    // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+                    entry() = default;
+
+                    entry(std::string n, std::string v) : name(std::move(n)), value(std::move(v)) {
+                    }
+
+                    ~entry() = default;
+
+                    entry(const entry &) = default;
+
+                    entry &operator=(const entry &) = default;
+
+                    entry(entry &&) noexcept = default;
+
+                    entry &operator=(entry &&) noexcept = default;
+
+                    // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
                     [[nodiscard]] std::size_t size() const noexcept {
                         return name.size() + value.size() + 32;
                     }
                 };
 
+            private:
+                // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+                std::vector<entry> entries_{};
+                std::size_t current_size_{0};
+                std::size_t max_capacity_{4096};
+
+            public:
+                // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
                 explicit dynamic_table(const std::size_t max_capacity = 4096)
                     : max_capacity_(max_capacity) {
                 }
 
+                ~dynamic_table() = default;
+
+                dynamic_table(const dynamic_table &) = default;
+
+                dynamic_table &operator=(const dynamic_table &) = default;
+
+                dynamic_table(dynamic_table &&) noexcept = default;
+
+                dynamic_table &operator=(dynamic_table &&) noexcept = default;
+
+                // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
                 void set_max_capacity(const std::size_t new_cap) {
                     max_capacity_ = new_cap;
                     evict_to_fit();
@@ -471,10 +537,6 @@ namespace wavex::protos::http {
                         entries_.pop_back();
                     }
                 }
-
-                std::vector<entry> entries_;
-                std::size_t current_size_ = 0;
-                std::size_t max_capacity_ = 4096;
             };
 
             /**
@@ -486,7 +548,7 @@ namespace wavex::protos::http {
                  * @brief Encode request pseudo-headers and headers list into a header block fragment.
                  */
                 static std::string encode_request_headers(
-                    const http::method m,
+                    const method m,
                     const std::string_view target,
                     const std::string_view scheme,
                     const std::string_view authority,
@@ -496,8 +558,7 @@ namespace wavex::protos::http {
 
                     // 1. :method
                     const std::string_view method_str = to_string(m);
-                    const auto [m_idx, m_exact] = find_static(":method", method_str);
-                    if (m_exact) {
+                    if (const auto [m_idx, m_exact] = find_static(":method", method_str); m_exact) {
                         encode_integer(out, m_idx, 7, 0x80); // Indexed Header Field (1xxxxxxx)
                     } else if (m_idx > 0) {
                         encode_integer(out, m_idx, 4, 0x00); // Literal without indexing, indexed name (0000xxxx)
@@ -509,8 +570,7 @@ namespace wavex::protos::http {
                     }
 
                     // 2. :scheme
-                    const auto [s_idx, s_exact] = find_static(":scheme", scheme.empty() ? "https" : scheme);
-                    if (s_exact) {
+                    if (const auto [s_idx, s_exact] = find_static(":scheme", scheme.empty() ? "https" : scheme); s_exact) {
                         encode_integer(out, s_idx, 7, 0x80);
                     } else {
                         encode_integer(out, 6, 4, 0x00); // static 6 = :scheme: http
@@ -518,8 +578,7 @@ namespace wavex::protos::http {
                     }
 
                     // 3. :path
-                    const std::string_view path = target.empty() ? "/" : target;
-                    if (path == "/") {
+                    if (const std::string_view path = target.empty() ? "/" : target; path == "/") {
                         encode_integer(out, 4, 7, 0x80); // static 4 = :path: /
                     } else if (path == "/index.html") {
                         encode_integer(out, 5, 7, 0x80); // static 5 = :path: /index.html
@@ -535,10 +594,14 @@ namespace wavex::protos::http {
                     }
 
                     // 5. General Headers
-                    for (const auto &[name, value]: headers) {
-                        if (name.starts_with(':')) continue; // Skip pseudo-headers already handled
-                        const auto [idx, exact] = find_static(name, value);
-                        if (exact) {
+                    for (const auto &[raw_name, value]: headers) {
+                        if (raw_name.starts_with(':')) continue; // Skip pseudo-headers already handled
+                        std::string name;
+                        name.reserve(raw_name.size());
+                        for (const char c: raw_name) {
+                            name.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+                        }
+                        if (const auto [idx, exact] = find_static(name, value); exact) {
                             encode_integer(out, idx, 7, 0x80);
                         } else if (idx > 0) {
                             encode_integer(out, idx, 4, 0x00);
@@ -567,8 +630,7 @@ namespace wavex::protos::http {
                     const auto [ptr, ec] = std::to_chars(status_buf, status_buf + sizeof(status_buf), status_code);
                     const std::string_view status_str(status_buf, ptr);
 
-                    const auto [s_idx, s_exact] = find_static(":status", status_str);
-                    if (s_exact) {
+                    if (const auto [s_idx, s_exact] = find_static(":status", status_str); s_exact) {
                         encode_integer(out, s_idx, 7, 0x80);
                     } else {
                         encode_integer(out, 8, 4, 0x00); // static 8 = :status: 200
@@ -576,10 +638,14 @@ namespace wavex::protos::http {
                     }
 
                     // 2. Regular headers
-                    for (const auto &[name, value]: headers) {
-                        if (name.starts_with(':')) continue;
-                        const auto [idx, exact] = find_static(name, value);
-                        if (exact) {
+                    for (const auto &[raw_name, value]: headers) {
+                        if (raw_name.starts_with(':')) continue;
+                        std::string name;
+                        name.reserve(raw_name.size());
+                        for (const char c: raw_name) {
+                            name.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+                        }
+                        if (const auto [idx, exact] = find_static(name, value); exact) {
                             encode_integer(out, idx, 7, 0x80);
                         } else if (idx > 0) {
                             encode_integer(out, idx, 4, 0x00);
@@ -600,18 +666,39 @@ namespace wavex::protos::http {
              */
             class decoder {
             public:
-                explicit decoder(dynamic_table &dt) : dt_(dt) {
+                /// @param dt dynamic table reference
+                /// @param max_list_size Cap on the decoded header list, counted as RFC 7541 §4.1 entry sizes
+                ///        (name + value + 32 octets per field). 0 means unlimited.
+                explicit decoder(dynamic_table &dt, const std::size_t max_list_size = 0)
+                    : dt_(dt), max_list_size_(max_list_size) {
                 }
+
+                /// True if the last decode_header_block() failed because the list cap was hit.
+                [[nodiscard]] bool limit_exceeded() const noexcept { return limit_exceeded_; }
 
                 bool decode_header_block(
                     const std::string_view block,
                     std::vector<std::pair<std::string, std::string> > &out_headers) const {
+                    limit_exceeded_ = false;
                     std::size_t cursor = 0;
+                    // Bounds the decoded list *as it grows*: a tiny HPACK block can expand into a huge list
+                    // through indexed fields, so the check cannot wait until the block is fully decoded.
+                    std::size_t list_size = 0;
+                    std::size_t counted = out_headers.size(); // fields already present are not ours to count
+                    const auto within_limit = [&] {
+                        for (; counted < out_headers.size(); ++counted) {
+                            list_size += out_headers[counted].first.size() + out_headers[counted].second.size() + 32;
+                        }
+                        if (max_list_size_ != 0 && list_size > max_list_size_) {
+                            limit_exceeded_ = true;
+                            return false;
+                        }
+                        return true;
+                    };
                     while (cursor < block.size()) {
-                        const auto b = static_cast<uint8_t>(block[cursor]);
-
+                        if (!within_limit()) return false;
                         // Case 1: Indexed Header Field (starts with 1xxxxxxx)
-                        if ((b & 0x80) != 0) {
+                        if (const auto b = static_cast<uint8_t>(block[cursor]); (b & 0x80) != 0) {
                             uint64_t index = 0;
                             if (!decode_integer(block, cursor, 7, index)) return false;
                             auto [n, v] = lookup_index(index);
@@ -656,7 +743,7 @@ namespace wavex::protos::http {
                             out_headers.emplace_back(std::move(name), std::move(val));
                         }
                     }
-                    return true;
+                    return within_limit();
                 }
 
             private:
@@ -673,67 +760,106 @@ namespace wavex::protos::http {
                 }
 
                 dynamic_table &dt_;
+                std::size_t max_list_size_{0};
+                mutable bool limit_exceeded_{false};
             };
         } // namespace hpack
+
+        /**
+         * @brief Persistent connection context for HTTP/2 sessions (scoped to TCP/TLS connection lifetime).
+         */
+        struct connection_context {
+            // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+            hpack::dynamic_table decode_table{};
+
+            // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+            connection_context() = default;
+
+            ~connection_context() = default;
+
+            connection_context(const connection_context &) = default;
+
+            connection_context &operator=(const connection_context &) = default;
+
+            connection_context(connection_context &&) noexcept = default;
+
+            connection_context &operator=(connection_context &&) noexcept = default;
+        };
 
         // ─── HTTP/2 Messages ───────────────────────────────────────────────────────
 
         /**
          * @brief HTTP/2 Request Message (inherits protocol-agnostic message_base).
          */
-        struct request : public message_base {
-            http::method method_type = method::UNKNOWN;
-            std::string_view target; ///< Extracted from :path
-            uint32_t stream_id = 1; ///< HTTP/2 Stream Identifier
-            std::string_view scheme = "https"; ///< :scheme
-            std::string_view authority; ///< :authority
-
+        struct request : message_base {
+            // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+            std::string_view target{}; ///< Extracted from :path
+            std::string_view scheme{"https"}; ///< :scheme
+            std::string_view authority{}; ///< :authority
             // Internal backing storage for decoded strings
-            std::string target_storage;
-            std::string scheme_storage;
-            std::string authority_storage;
-            std::string body_storage;
-            std::vector<std::pair<std::string, std::string> > headers_storage;
+            std::string target_storage{};
+            std::string scheme_storage{};
+            std::string authority_storage{};
+            std::string body_storage{};
+            std::string protocol{}; ///< `:protocol` of an extended CONNECT (RFC 8441), empty otherwise
+            std::vector<std::pair<std::string, std::string> > headers_storage{};
+            uint32_t stream_id{1}; ///< HTTP/2 Stream Identifier
+            method method_type{method::UNKNOWN};
 
+            // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
             request() {
                 version_major = 2;
                 version_minor = 0;
             }
 
+            ~request() = default;
+
             request(const request &other)
                 : message_base(other),
-                  method_type(other.method_type),
-                  stream_id(other.stream_id),
+                  target(other.target),
+                  scheme(other.scheme),
+                  authority(other.authority),
                   target_storage(other.target_storage),
                   scheme_storage(other.scheme_storage),
                   authority_storage(other.authority_storage),
                   body_storage(other.body_storage),
-                  headers_storage(other.headers_storage) {
+                  protocol(other.protocol),
+                  headers_storage(other.headers_storage),
+                  stream_id(other.stream_id),
+                  method_type(other.method_type) {
                 rebase(other);
             }
 
             request(request &&other) noexcept
                 : message_base(std::move(other)),
-                  method_type(other.method_type),
-                  stream_id(other.stream_id),
+                  target(other.target),
+                  scheme(other.scheme),
+                  authority(other.authority),
                   target_storage(std::move(other.target_storage)),
                   scheme_storage(std::move(other.scheme_storage)),
                   authority_storage(std::move(other.authority_storage)),
                   body_storage(std::move(other.body_storage)),
-                  headers_storage(std::move(other.headers_storage)) {
+                  protocol(std::move(other.protocol)),
+                  headers_storage(std::move(other.headers_storage)),
+                  stream_id(other.stream_id),
+                  method_type(other.method_type) {
                 rebase(other);
             }
 
             request &operator=(const request &other) {
                 if (this != &other) {
                     message_base::operator=(other);
-                    method_type = other.method_type;
-                    stream_id = other.stream_id;
+                    target = other.target;
+                    scheme = other.scheme;
+                    authority = other.authority;
                     target_storage = other.target_storage;
                     scheme_storage = other.scheme_storage;
                     authority_storage = other.authority_storage;
                     body_storage = other.body_storage;
+                    protocol = other.protocol;
                     headers_storage = other.headers_storage;
+                    stream_id = other.stream_id;
+                    method_type = other.method_type;
                     rebase(other);
                 }
                 return *this;
@@ -742,18 +868,23 @@ namespace wavex::protos::http {
             request &operator=(request &&other) noexcept {
                 if (this != &other) {
                     message_base::operator=(std::move(other));
-                    method_type = other.method_type;
-                    stream_id = other.stream_id;
+                    target = other.target;
+                    scheme = other.scheme;
+                    authority = other.authority;
                     target_storage = std::move(other.target_storage);
                     scheme_storage = std::move(other.scheme_storage);
                     authority_storage = std::move(other.authority_storage);
                     body_storage = std::move(other.body_storage);
+                    protocol = std::move(other.protocol);
                     headers_storage = std::move(other.headers_storage);
+                    stream_id = other.stream_id;
+                    method_type = other.method_type;
                     rebase(other);
                 }
                 return *this;
             }
 
+            // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
             void rebase(const request &fallback) {
                 target = !target_storage.empty() ? std::string_view(target_storage) : fallback.target;
                 scheme = !scheme_storage.empty() ? std::string_view(scheme_storage) : fallback.scheme;
@@ -773,48 +904,51 @@ namespace wavex::protos::http {
         /**
          * @brief HTTP/2 Response Message (inherits protocol-agnostic message_base).
          */
-        struct response : public message_base {
-            unsigned int status_code = 200;
-            std::string_view status_text = "OK";
-            uint32_t stream_id = 1; ///< Target HTTP/2 Stream Identifier
-
+        struct response : message_base {
+            // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+            std::string_view status_text{"OK"};
             // Internal backing storage for decoded strings
-            std::string body_storage;
-            std::vector<std::pair<std::string, std::string> > headers_storage;
+            std::string body_storage{};
+            std::vector<std::pair<std::string, std::string> > headers_storage{};
+            unsigned int status_code{200};
+            uint32_t stream_id{1}; ///< Target HTTP/2 Stream Identifier
 
+            // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
             response() {
                 version_major = 2;
                 version_minor = 0;
             }
 
+            ~response() = default;
+
             response(const response &other)
                 : message_base(other),
-                  status_code(other.status_code),
                   status_text(other.status_text),
-                  stream_id(other.stream_id),
                   body_storage(other.body_storage),
-                  headers_storage(other.headers_storage) {
+                  headers_storage(other.headers_storage),
+                  status_code(other.status_code),
+                  stream_id(other.stream_id) {
                 rebase(other);
             }
 
             response(response &&other) noexcept
                 : message_base(std::move(other)),
-                  status_code(other.status_code),
                   status_text(other.status_text),
-                  stream_id(other.stream_id),
                   body_storage(std::move(other.body_storage)),
-                  headers_storage(std::move(other.headers_storage)) {
+                  headers_storage(std::move(other.headers_storage)),
+                  status_code(other.status_code),
+                  stream_id(other.stream_id) {
                 rebase(other);
             }
 
             response &operator=(const response &other) {
                 if (this != &other) {
                     message_base::operator=(other);
-                    status_code = other.status_code;
                     status_text = other.status_text;
-                    stream_id = other.stream_id;
                     body_storage = other.body_storage;
                     headers_storage = other.headers_storage;
+                    status_code = other.status_code;
+                    stream_id = other.stream_id;
                     rebase(other);
                 }
                 return *this;
@@ -823,16 +957,17 @@ namespace wavex::protos::http {
             response &operator=(response &&other) noexcept {
                 if (this != &other) {
                     message_base::operator=(std::move(other));
-                    status_code = other.status_code;
                     status_text = other.status_text;
-                    stream_id = other.stream_id;
                     body_storage = std::move(other.body_storage);
                     headers_storage = std::move(other.headers_storage);
+                    status_code = other.status_code;
+                    stream_id = other.stream_id;
                     rebase(other);
                 }
                 return *this;
             }
 
+            // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
             void rebase(const response &fallback) {
                 body = !body_storage.empty() ? std::string_view(body_storage) : fallback.body;
 
@@ -853,7 +988,8 @@ namespace wavex::protos::http {
          */
         class parser {
         public:
-            enum class result { success, incomplete, error };
+            /// `headers_too_large`: the decoded request header list exceeded the cap (answer with 431, not a bare close).
+            enum class result { success, incomplete, error, headers_too_large };
 
             /**
              * @brief Parse a single HTTP/2 frame from a buffer.
@@ -882,24 +1018,39 @@ namespace wavex::protos::http {
             }
 
             /**
-             * @brief Parse an incoming HTTP/2 client request from a network buffer.
+             * @brief Parse an incoming HTTP/2 client request from a network buffer using a persistent dynamic table.
              * Handles connection preface, initial SETTINGS, HEADERS, and DATA frames.
              */
             [[nodiscard]]
             static result parse_request(
                 const std::string_view buffer,
                 request &req,
-                std::size_t &bytes_consumed) {
+                std::size_t &bytes_consumed,
+                hpack::dynamic_table &dt) {
                 bytes_consumed = 0;
                 std::size_t cursor = 0;
+                // CRITICAL INVARIANT: DO NOT REMOVE req.headers.clear() & storage clears!
+                // When resuming from an earlier result::incomplete parse attempt (e.g. streaming
+                // multi-chunk DATA or CONTINUATION frames across async_read_some chunks),
+                // the transport buffer (stream_buf) reallocates. Discarding stale string_views
+                // and previous partial state prevents duplicate headers and fatal 0xC0000005
+                // dangling pointer access during header lookup or processing.
+                req.headers.clear();
+                req.headers_storage.clear();
+                req.target_storage.clear();
+                req.scheme_storage.clear();
+                req.authority_storage.clear();
+                req.body_storage.clear();
+                req.protocol.clear();
+                req.body = {};
 
                 // 1. Consume connection preface if present
                 if (buffer.starts_with(CONNECTION_PREFACE)) {
                     cursor += CONNECTION_PREFACE.size();
                 }
 
-                hpack::dynamic_table dt;
-                hpack::decoder dec(dt);
+                hpack::dynamic_table working_dt = dt;
+                const hpack::decoder dec(working_dt, kDefaultMaxHeaderListSize);
 
                 std::vector<std::pair<std::string, std::string> > decoded_headers;
                 bool headers_received = false;
@@ -911,8 +1062,7 @@ namespace wavex::protos::http {
                     std::string_view payload;
                     std::size_t frame_bytes = 0;
 
-                    const auto r = parse_frame(remaining, hdr, payload, frame_bytes);
-                    if (r != result::success) {
+                    if (const auto r = parse_frame(remaining, hdr, payload, frame_bytes); r != result::success) {
                         if (r == result::incomplete && headers_received) {
                             // If headers already parsed and we're waiting for DATA
                             return result::incomplete;
@@ -948,7 +1098,7 @@ namespace wavex::protos::http {
                             header_cursor, payload.size() - header_cursor - pad_len);
 
                         if (!dec.decode_header_block(header_block, decoded_headers)) {
-                            return result::error;
+                            return dec.limit_exceeded() ? result::headers_too_large : result::error;
                         }
 
                         headers_received = true;
@@ -993,9 +1143,18 @@ namespace wavex::protos::http {
                         req.scheme_storage = std::move(value);
                     } else if (name == ":authority") {
                         req.authority_storage = std::move(value);
+                    } else if (name == ":protocol") {
+                        req.protocol = std::move(value); // RFC 8441 §4, validated below
                     } else {
                         req.headers_storage.emplace_back(std::move(name), std::move(value));
                     }
+                }
+
+                // RFC 8441 §4: `:protocol` only on CONNECT, which then carries :scheme, :path and :authority.
+                if (!req.protocol.empty() &&
+                    (req.method_type != method::CONNECT || req.target_storage.empty() ||
+                     req.scheme_storage.empty() || req.authority_storage.empty())) {
+                    return result::error;
                 }
 
                 req.target = req.target_storage;
@@ -1012,23 +1171,59 @@ namespace wavex::protos::http {
                 req.body_storage = std::move(body_accumulator);
                 req.body = req.body_storage;
 
+                dt = std::move(working_dt);
                 bytes_consumed = cursor;
                 return result::success;
             }
 
             /**
-             * @brief Parse an incoming HTTP/2 server response from a network buffer.
+             * @brief Parse an incoming HTTP/2 client request from a network buffer using a connection context.
+             */
+            [[nodiscard]]
+            static result parse_request(
+                const std::string_view buffer,
+                request &req,
+                std::size_t &bytes_consumed,
+                connection_context &ctx) {
+                return parse_request(buffer, req, bytes_consumed, ctx.decode_table);
+            }
+
+            /**
+             * @brief Parse an incoming HTTP/2 client request from a network buffer (standalone fallback).
+             */
+            [[nodiscard]]
+            static result parse_request(
+                const std::string_view buffer,
+                request &req,
+                std::size_t &bytes_consumed) {
+                hpack::dynamic_table local_dt;
+                return parse_request(buffer, req, bytes_consumed, local_dt);
+            }
+
+            /**
+             * @brief Parse an incoming HTTP/2 server response from a network buffer using a persistent dynamic table.
              */
             [[nodiscard]]
             static result parse_response(
                 const std::string_view buffer,
                 response &res,
-                std::size_t &bytes_consumed) {
+                std::size_t &bytes_consumed,
+                hpack::dynamic_table &dt) {
                 bytes_consumed = 0;
                 std::size_t cursor = 0;
+                // CRITICAL INVARIANT: DO NOT REMOVE res.headers.clear() & storage clears!
+                // When resuming from an earlier result::incomplete parse attempt (e.g. streaming
+                // multi-chunk DATA or CONTINUATION frames across async_read_some chunks),
+                // the transport buffer (stream_buf) reallocates. Discarding stale string_views
+                // and previous partial state prevents duplicate headers and fatal 0xC0000005
+                // dangling pointer access during header lookup or processing.
+                res.headers.clear();
+                res.headers_storage.clear();
+                res.body_storage.clear();
+                res.body = {};
 
-                hpack::dynamic_table dt;
-                hpack::decoder dec(dt);
+                hpack::dynamic_table working_dt = dt;
+                const hpack::decoder dec(working_dt, kDefaultMaxHeaderListSize);
 
                 std::vector<std::pair<std::string, std::string> > decoded_headers;
                 bool headers_received = false;
@@ -1040,8 +1235,7 @@ namespace wavex::protos::http {
                     std::string_view payload;
                     std::size_t frame_bytes = 0;
 
-                    const auto r = parse_frame(remaining, hdr, payload, frame_bytes);
-                    if (r != result::success) {
+                    if (const auto r = parse_frame(remaining, hdr, payload, frame_bytes); r != result::success) {
                         return headers_received ? result::incomplete : r;
                     }
 
@@ -1119,8 +1313,33 @@ namespace wavex::protos::http {
                 res.body_storage = std::move(body_accumulator);
                 res.body = res.body_storage;
 
+                dt = std::move(working_dt);
                 bytes_consumed = cursor;
                 return result::success;
+            }
+
+            /**
+             * @brief Parse an incoming HTTP/2 server response from a network buffer using a connection context.
+             */
+            [[nodiscard]]
+            static result parse_response(
+                const std::string_view buffer,
+                response &res,
+                std::size_t &bytes_consumed,
+                connection_context &ctx) {
+                return parse_response(buffer, res, bytes_consumed, ctx.decode_table);
+            }
+
+            /**
+             * @brief Parse an incoming HTTP/2 server response from a network buffer (standalone fallback).
+             */
+            [[nodiscard]]
+            static result parse_response(
+                const std::string_view buffer,
+                response &res,
+                std::size_t &bytes_consumed) {
+                hpack::dynamic_table local_dt;
+                return parse_response(buffer, res, bytes_consumed, local_dt);
             }
         };
 
@@ -1134,12 +1353,44 @@ namespace wavex::protos::http {
             /**
              * @brief Serialize an HTTP/2 response into wire-format frames (HEADERS [+ DATA]).
              */
-            static std::string serialize(const response &res) {
-                std::string wire;
+            /**
+             * @brief Serialize an HTTP/2 response directly into a sink (HEADERS [+ DATA]).
+             */
+            /**
+             * @brief Serialize only the HEADERS frame of a response.
+             * @param res reference to response
+             * @param end_stream Set END_STREAM (no body follows). Streaming responses and tunnels pass false.
+             */
+            static std::string serialize_headers(const response &res, const bool end_stream) {
+                const std::string header_block = hpack::encoder::encode_response_headers(
+                    res.status_code, res.headers);
+                frame_header h_hdr;
+                h_hdr.length = static_cast<uint32_t>(header_block.size());
+                h_hdr.type = frame_type::HEADERS;
+                h_hdr.flags = end_stream ? static_cast<uint8_t>(flags::END_HEADERS | flags::END_STREAM)
+                                         : flags::END_HEADERS;
+                h_hdr.stream_id = res.stream_id;
+                std::array<uint8_t, frame_header::HEADER_SIZE> h_bytes{};
+                pack_frame_header(h_hdr, h_bytes);
+                std::string out;
+                out.reserve(h_bytes.size() + header_block.size());
+                out.append(reinterpret_cast<const char *>(h_bytes.data()), h_bytes.size());
+                out.append(header_block);
+                return out;
+            }
 
+            template<base::StringSink Out>
+            static void serialize_into(const response &res, Out &out) {
                 // 1. HPACK encode headers
                 const std::string header_block = hpack::encoder::encode_response_headers(
                     res.status_code, res.headers);
+
+                // Upper bound reserve: frame header (9) + header block + DATA frames overhead + body
+                const std::size_t num_data_frames = (!res.body.empty()) ? ((res.body.size() + 16383) / 16384) : 0;
+                const std::size_t est = 9 + header_block.size() + (num_data_frames * 9) + res.body.size();
+                if (out.capacity() < out.size() + est) {
+                    out.reserve(out.size() + est);
+                }
 
                 // 2. Build HEADERS frame
                 frame_header h_hdr;
@@ -1154,8 +1405,8 @@ namespace wavex::protos::http {
                 std::array<uint8_t, frame_header::HEADER_SIZE> h_bytes{};
                 pack_frame_header(h_hdr, h_bytes);
 
-                wire.append(reinterpret_cast<const char *>(h_bytes.data()), h_bytes.size());
-                wire.append(header_block);
+                out.append(reinterpret_cast<const char *>(h_bytes.data()), h_bytes.size());
+                out.append(header_block);
 
                 // 3. Build DATA frame(s) if body present
                 if (!res.body.empty()) {
@@ -1175,13 +1426,17 @@ namespace wavex::protos::http {
                         std::array<uint8_t, frame_header::HEADER_SIZE> d_bytes{};
                         pack_frame_header(d_hdr, d_bytes);
 
-                        wire.append(reinterpret_cast<const char *>(d_bytes.data()), d_bytes.size());
-                        wire.append(res.body.substr(offset, chunk_len));
+                        out.append(reinterpret_cast<const char *>(d_bytes.data()), d_bytes.size());
+                        out.append(res.body.substr(offset, chunk_len));
 
                         offset += chunk_len;
                     }
                 }
+            }
 
+            static std::string serialize(const response &res) {
+                std::string wire;
+                serialize_into(res, wire);
                 return wire;
             }
 
@@ -1192,7 +1447,7 @@ namespace wavex::protos::http {
                 std::string wire;
 
                 // 1. HPACK encode request headers
-                std::string header_block = hpack::encoder::encode_request_headers(
+                const std::string header_block = hpack::encoder::encode_request_headers(
                     req.method_type, req.target, req.scheme, req.authority, req.headers);
 
                 // 2. Build HEADERS frame
@@ -1457,6 +1712,24 @@ namespace wavex::protos::http {
             static parser::result decode_response(
                 const std::string_view buffer,
                 response &res,
+                std::size_t &bytes_consumed,
+                hpack::dynamic_table &dt) {
+                return parser::parse_response(buffer, res, bytes_consumed, dt);
+            }
+
+            [[nodiscard]]
+            static parser::result decode_response(
+                const std::string_view buffer,
+                response &res,
+                std::size_t &bytes_consumed,
+                connection_context &ctx) {
+                return parser::parse_response(buffer, res, bytes_consumed, ctx.decode_table);
+            }
+
+            [[nodiscard]]
+            static parser::result decode_response(
+                const std::string_view buffer,
+                response &res,
                 std::size_t &bytes_consumed) {
                 return parser::parse_response(buffer, res, bytes_consumed);
             }
@@ -1477,15 +1750,17 @@ namespace wavex::protos::http {
      * @brief HTTP/2 Protocol Codec combining binary frame parser, encoder, decoder, and developer-friendly facade.
      */
     struct http2codec {
-        using parser = wavex::protos::http::http2::parser;
-        using encoder = wavex::protos::http::http2::encoder;
-        using decoder = wavex::protos::http::http2::decoder;
-        using request = wavex::protos::http::http2::request;
-        using response = wavex::protos::http::http2::response;
+        using parser = http2::parser;
+        using encoder = http2::encoder;
+        using decoder = http2::decoder;
+        using request = http2::request;
+        using response = http2::response;
+        using connection_context = http2::connection_context;
+        using dynamic_table = http2::hpack::dynamic_table;
         using result = parser::result;
 
         static std::string_view status_text_for(const unsigned int code) noexcept {
-            return wavex::protos::http::status_text_for(code);
+            return http::status_text_for(code);
         }
 
         // ─── Developer-Friendly Codec Facade (Symmetrical with http1codec) ───
@@ -1495,9 +1770,27 @@ namespace wavex::protos::http {
             return encoder::serialize(res);
         }
 
+        /** @brief Serialize an HTTP/2 response into wire-format binary frames directly into a sink. */
+        template<base::StringSink Out>
+        static void serialize_into(const response &res, Out &out) {
+            encoder::serialize_into(res, out);
+        }
+
         /** @brief Serialize an HTTP/2 request into wire-format binary frames. */
         static std::string serialize_request(const request &req) {
             return encoder::serialize_request(req);
+        }
+
+        /** @brief Parse raw buffer into an HTTP/2 request using a persistent dynamic table. */
+        static result parse_request(const std::string_view buffer, request &req, std::size_t &bytes_consumed,
+                                    dynamic_table &dt) {
+            return parser::parse_request(buffer, req, bytes_consumed, dt);
+        }
+
+        /** @brief Parse raw buffer into an HTTP/2 request using a connection context. */
+        static result parse_request(const std::string_view buffer, request &req, std::size_t &bytes_consumed,
+                                    connection_context &ctx) {
+            return parser::parse_request(buffer, req, bytes_consumed, ctx);
         }
 
         /** @brief Parse raw buffer into an HTTP/2 request. */
@@ -1505,9 +1798,33 @@ namespace wavex::protos::http {
             return parser::parse_request(buffer, req, bytes_consumed);
         }
 
+        /** @brief Parse raw buffer into an HTTP/2 response using a persistent dynamic table. */
+        static result parse_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed,
+                                     dynamic_table &dt) {
+            return parser::parse_response(buffer, res, bytes_consumed, dt);
+        }
+
+        /** @brief Parse raw buffer into an HTTP/2 response using a connection context. */
+        static result parse_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed,
+                                     connection_context &ctx) {
+            return parser::parse_response(buffer, res, bytes_consumed, ctx);
+        }
+
         /** @brief Parse raw buffer into an HTTP/2 response. */
         static result parse_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed) {
             return parser::parse_response(buffer, res, bytes_consumed);
+        }
+
+        /** @brief Decode a raw HTTP/2 response buffer using a persistent dynamic table. */
+        static result decode_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed,
+                                      dynamic_table &dt) {
+            return decoder::decode_response(buffer, res, bytes_consumed, dt);
+        }
+
+        /** @brief Decode a raw HTTP/2 response buffer using a connection context. */
+        static result decode_response(const std::string_view buffer, response &res, std::size_t &bytes_consumed,
+                                      connection_context &ctx) {
+            return decoder::decode_response(buffer, res, bytes_consumed, ctx);
         }
 
         /** @brief Decode a raw HTTP/2 response buffer. */

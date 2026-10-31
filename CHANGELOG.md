@@ -1,0 +1,86 @@
+# Changelog
+
+All notable changes to WaveX are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/), and versions follow [Semantic Versioning](https://semver.org/) (pre-1.0: minor releases may contain breaking changes).
+
+Tagged releases before 0.4.0 (`v0.1.0-alpha` to `v0.3.0-alpha`) are listed under [Releases](https://github.com/Jyotipm05/WaveX/tags).
+
+## [Unreleased] (0.4.0 development)
+
+### Added
+- `portability.yml`: informational Windows/MSVC and macOS/Homebrew LLVM build-and-test jobs (manual and weekly, never blocking PRs). Not yet run.
+- Build time: `ComposedHttpServer::run()` moved out of the header (it instantiated the HTTP/2 and HTTP/3 connection handlers in every translation unit that included `wavex.hpp`: an empty file compiled to 10k symbols / 16 MB); tests share one precompiled `<wavex/wavex.hpp>` (`WAVEX_TEST_PCH`, default ON for GCC/Clang without modules); CMake's per-file module dependency scan is skipped when `WAVEX_USE_MODULE` is OFF (it also needed `clang-scan-deps` on Clang). Debug build with GCC 14 on 2 jobs: 391 s -> 347 s, tests alone 217 s -> 165 s; one test translation unit 8.1 s -> 4.5 s.
+- Multiplexed HTTP/2 server session (`protos/http/http2session.hpp`): concurrent streams on one connection, RFC 9113 flow control in both directions (WINDOW_UPDATE, peer windows and max frame size honored, oversized header blocks split into CONTINUATION), PING / SETTINGS ACK / RST_STREAM / trailers / GOAWAY handling, `MAX_CONCURRENT_STREAMS` (100) with `REFUSED_STREAM`, and graceful shutdown (GOAWAY to idle connections). Reached through the new optional policy hook `protocol_traits<Codec>::serve_connection()` and the protocol-neutral `Server::ConnectionServices`.
+- WebSocket over HTTP/2 (RFC 8441): the HTTP/2 server advertises `SETTINGS_ENABLE_CONNECT_PROTOCOL`; `:protocol` is parsed on HTTP/2 requests; `Http2Router::websocket()` and `ComposedHttpServer::websocket()` (now on both routers).
+- `test_http2_session`: concurrency, flow control, CONTINUATION, streaming, RST_STREAM, RFC 8441, graceful shutdown, client interop.
+- WebSocket (RFC 6455): `protos/websocket/WebSocket.hpp` with a frame codec, handshake helpers (built-in SHA-1/base64, so no OpenSSL dependency), `websocket::connection` sessions (reassembly, auto-pong, close handshake, UTF-8 validation, size limits, thread-safe queued sends, client and server roles) and `websocket::accept()`. `HttpRouter::websocket()` registers endpoints; on HTTP/3 routers the same call serves WebSocket over an extended CONNECT (RFC 9220).
+- WebTransport over HTTP/3: `protos/webtransport/WebTransport.hpp` with sessions, bidirectional and unidirectional streams (client and server initiated), HTTP datagrams (RFC 9297), `CLOSE_WEBTRANSPORT_SESSION` / `DRAIN_WEBTRANSPORT_SESSION` capsules and a per-connection session registry that parks streams arriving before their session. `Http3Router::webtransport()`, `ComposedHttpServer::webtransport()` / `websocket()`. Compatible with the draft-02 wire format used by Chromium.
+- Connection takeover seam: `HttpResponse::upgrade()` plus the optional policy hooks `protocol_traits<Codec>::wants_takeover()` (synchronous, so ordinary requests pay one branch) and `take_over()`, consulted by the connection loop once a response is on the wire; the HTTP/1.x (on `101`) and HTTP/3 (on a 2xx extended CONNECT) policies hand the transport to the installed handler as a `network::AnyStream` (new `Network/AnyStream.hpp`). The server itself still names no protocol.
+- HTTP/3: `:protocol` pseudo-header (extended CONNECT) on requests (`HttpRequest::connect_protocol()`), CONNECT streams left unconsumed after HEADERS as a tunnel, `http3::make_data_tunnel()` for DATA-frame tunnels, SETTINGS `ENABLE_CONNECT_PROTOCOL`, `H3_DATAGRAM`, `WEBTRANSPORT_MAX_SESSIONS` and draft-02 `ENABLE_WEBTRANSPORT`, and parsing of the peer's values.
+- QUIC: RFC 9221 DATAGRAM frames (`DatagramFrame`, `QuicConnection::send_datagram()` / `set_datagram_callback()`, `max_datagram_frame_size` transport parameter in both directions), `QuicStream::unread()` and `StreamBuffer::prepend()` for peeking at a stream's first bytes.
+- Status texts for 101, 426 and 501; `protocol` enum gains `websocket` and `webtransport`.
+- Tests: `test_websocket` (codec, handshake, loopback sessions on `Http1Server`) and `test_webtransport` (capsules, extended CONNECT parsing, DATAGRAM frames, tunnel, demultiplexing, sessions through `Http3Server`).
+- Native HTTP/3 codec, router and server with QPACK, built on a new in-tree QUIC transport (packets, frames, congestion control, loss detection, key update, idle timeout, datagram coalescing).
+- `ComposedHttpServer`: one server hosting HTTP/1.1, HTTP/2 and HTTP/3 together; `ServerState` and `ConnectionTracker` for lifecycle management.
+- `ConnectionMemoryPool` (per-connection pool) and allocator-aware `HttpRequest` / `HttpResponse` (`std::pmr`), including cross-arena move construction.
+- `serialize_into` for HTTP responses, emitting into any `StringSink` without intermediate copies.
+- `SipHash-2-4` connection-ID hashing with a process-wide seed; reusable cipher contexts for QUIC packet protection.
+- `CHANGELOG.md` and a restructured `docs/` tree.
+- GitHub Actions: `ci.yml` (Linux/GCC 14 build + tests on every push and PR), `sanitizers.yml` (TSan and ASan/UBSan nightly and on `dev`), `bench.yml` (manual). All sized for the free 2 vCPU hosted runner; actions are pinned by commit SHA.
+- Benchmark harness (`-DWAVEX_BENCH=ON`): `wavex_bench_server`, a dependency-free `wavex_loadgen` (p50/p99/p99.9, idle connections) and `benchmarks/run.sh` with `ci` and `full` tiers.
+- Tests for `ConnectionTracker` and for the configurable request header / query-parameter limits.
+- Tests for `Server::stop()` with idle keep-alive connections followed by in-process restart, and for elastic scale-down never retiring a worker that still runs connection coroutines.
+- Stall detector: the pool monitor flags a worker stuck inside one task longer than `ThreadPoolConfig::stall_threshold` (default 1 s, 0 disables), logs one warning per stalled task naming the worker, and exposes `ThreadPool::stall_count()`.
+- HTTP/2 server path bounds the decoded HPACK header list (64 KiB by RFC 7541 §4.1 sizes, `http2::kDefaultMaxHeaderListSize`) while decoding, so a small block of indexed fields cannot expand into an unbounded list; `hpack::decoder` takes an optional cap (0 = unlimited, used by the client).
+- HTTP/2 answers an oversized header list with `431` on the failing stream (`http2::result::headers_too_large`, optional `protocol_traits::classify_parse_error` hook). The server also now sets the failing stream id on parse-error responses; before, they went out on stream 0.
+- CI job `linux-clang20` (Clang 20 + libstdc++, build and full test suite). Documented that Clang 18/19 need libc++ because libstdc++ hides `std::expected` from them.
+
+### Changed
+- WebSocket / WebTransport hot paths allocate less: outgoing frames are encoded straight into one double-buffered outbox (no per-frame string, deque node or batch copy), `fill()` no longer allocates a shared flag on every read, the writer is one coroutine instead of two, and `AnyStream::read_some` / `write` hand back the erased operation's awaitable instead of wrapping it in another coroutine. Loopback echo: 3.06 -> 1 heap allocations per message (the remaining one is the message handed to the application).
+- HTTP/2 connections are no longer served one request at a time by the generic loop: after the preface the HTTP/2 policy drives them (see Added). The loop's per-request part (routing, middlewares, error mapping, `prepare_response`) moved into `Server::process_request()`, shared by both paths; HTTP/1.1 and HTTP/3 behavior is unchanged.
+- `protocol_traits<http2codec>::on_connection_start()` only validates and strips the client preface; the session sends the server SETTINGS and acknowledges the client's SETTINGS when they arrive (previously they were acknowledged before being read).
+- `HttpClient` (HTTP/2) opens its receive windows to the maximum in its preface, because it never sends WINDOW_UPDATE and a flow-control-compliant server would otherwise stall after 64 KiB.
+- `ConnectionTracker` uses 16 lock stripes instead of one global mutex.
+- Async logger skips the per-record condition-variable notification when the worker is not asleep.
+- FetchContent dependencies (asio, abseil, RE2, nlohmann/json) are pinned to commit SHAs; the asio fallback uses `FetchContent_MakeAvailable` (CMake 4 rejects `FetchContent_Populate(<name>)`).
+- CTest runs every test under one resource lock so `ctest -j` is safe with the tests' fixed loopback ports, and sets a 120 s timeout.
+- `RequestArena` is now a movable RAII handle over a heap-stable `monotonic_buffer_resource`; the connection loop destroys request objects before the arena.
+- Query and route-parameter buffers use `std::pmr::string`.
+- README split into a short landing page plus guides, architecture, build and reference pages under `docs/`.
+- `CONTRIBUTING.md` prerequisites aligned with the supported toolchains (GCC 16+, Clang 18.1+, MSVC 19.44+, CMake 4.0+).
+
+### Changed (performance)
+- CI build time: the GCC and Clang Debug jobs build with `-g1` instead of `-g` (about 11% less compile time, test binaries about 36% smaller). Backtraces and sanitizer reports keep file and line.
+- CI build time: with the distro RE2 installed (`libre2-dev`), CMake uses it through pkg-config instead of building RE2 and Abseil from source, so a clean build is 101 steps instead of 369. The GCC and Clang CI jobs install it; sanitizer jobs still build RE2 themselves.
+- Worker fairness: a worker polls its `io_context` after at most 16 tasks or 250 µs of task time, so a task backlog can no longer starve the connection I/O that lives on the same worker (`test_worker_io_fairness`; neutral on the pure-I/O benchmark).
+- Accepted TCP sockets are registered with the reactor of the worker that serves them (`ThreadPool::lease_worker()` / `spawn_leased()`, `Server::adopt_on_worker`), instead of every socket's readiness being handled by the single master `io_context` thread. A lease reserves the worker (counts as a live coroutine) so it cannot be retired between accept and connection start. On POSIX the socket is re-registered with `release()`/`assign()`; on Windows IOCP it stays on the master context. Same-machine A/B on the 2 vCPU box (32 active + 1,000 idle, closed loop, 3 rounds): ~19k → ~30-32k requests/s, p50 ~1.55 ms → ~0.95 ms, p99 ~2.6-3.8 ms → ~1.6-2.0 ms.
+
+### Changed (architecture)
+- `Server<Codec, Router>` no longer owns, creates or includes any QUIC type. Extra transports are produced by `protocol_traits<Codec>::make_transport_listener` and held as `network::TransportListener` (new `Network/TransportListener.hpp`); the HTTP/3 policy supplies `network::quic::QuicTransportListener` (new `Network/QUIC/QuicListener.hpp`). `ServerQuic.ipp` is gone; `allow_insecure()` is now a transport-neutral flag with an `allow_insecure_transports()` getter. `is_http3_codec_v` was removed (unused).
+- The connection loop no longer calls HTTP members. 400/413/431/500 responses, the request header/query limit check and the 200/404 default status go through new `protocol_traits` hooks (`write_error`, `exceeds_limits`, `set_default_status`, with `protocol_error` and `request_limits` types); custom protocols need none of them. Alt-Svc advertisement by default is the policy trait `advertises_alt_svc_by_default`. `Server::set_not_found*()` and the log label of a request use the policy hooks `write_not_found` and `request_label`; the request/response contract the loop still needs is `static_assert`ed.
+
+### Fixed
+- WebTransport sessions kept a `weak_ptr` for every stream they ever opened: a dead entry pins its stream's memory block, and incoming streams swept the whole list on every insert (O(n^2)). The list is now swept only when it has doubled, so it stays within twice the live streams (`session::tracked_stream_count()`).
+- `webtransport::http3_context_for()` serialized every connection on one process-wide mutex; the context is now created under the connection's own lock (`QuicConnection::user_context_or_create`).
+- MSVC: `/bigobj` is now passed for all targets; `Server.cpp` failed with C1128 (too many sections) once the HTTP/2 session, WebSocket and WebTransport instantiations were added.
+- HTTP/2 streamed responses: `write_chunk` / `end_chunked` framed DATA on stream 1 regardless of the request's stream, `send_file` wrote raw file bytes instead of DATA frames, the headers frame of a streamed response carried END_STREAM, and `start_chunked` added `Transfer-Encoding` / `Connection` (malformed in HTTP/2 and HTTP/3). Streaming now frames per stream for HTTP/2 and HTTP/3.
+- Connections beyond the 1024th were dropped: `ConnectionMemoryPool` used `std::pmr::synchronized_pool_resource`, which in libstdc++ takes one `pthread_key` per instance, and Linux allows only 1024 keys, so the constructor threw `EAGAIN`. The pool is now unsynchronized (a connection coroutine never runs concurrently with itself).
+- `Server::stop()` is now a full in-process quiesce so the same `Server` can `run()` again without leaking or racing: sockets are canceled and closed on their owning worker (not from the caller's thread), the reactor is kept alive by a work guard until every connection has drained (bounded at 2 s), and only then are the worker pools stopped. The graceful-shutdown timeout path uses the same drain.
+- Elastic scale-down could retire a worker that still ran connection coroutines and strand them; workers now track live coroutines and are only retired when empty.
+- ThreadSanitizer-clean test suite (TSan CI job is now strict):
+  - `ThreadPool::dispatch()` pushed from arbitrary threads into a worker's single-owner `LocalQueue`, racing the owner's `pop()` and other dispatchers (lost or corrupted tasks). External submissions now go through the mutex-protected injector; local rings are filled only by their owner (stealing).
+  - Retired workers were destroyed while peers could still hold a raw pointer to them from the steal loop. They are parked and freed only once no thread is in the steal loop after they were unpublished.
+  - `Logger::flush()` could wait forever: the worker notified `cv_flush_` without taking `flush_mutex_`, so the wakeup could fall between the waiter's predicate check and its wait.
+  - QUIC acceptor / `QuicServer`: `close()`/`stop()` closed the UDP socket from another thread while the io thread was receiving; the flags are now atomic and socket access is serialized.
+  - `Server::stop()` closed the TCP acceptor from the caller's thread; the close now runs on the reactor thread. `Server::is_acceptor_open()` reads an atomic mirror, and the `quic_server_` pointer handoff between `run()` and `stop()` is mutex-guarded (also in `ComposedHttpServer`).
+  - `spawn_blocking` released its work guard from the posted completion handler, letting `io_context::run()` return and the caller destroy the context while the worker was still inside `post()`; the worker now releases the guard after `post()` returns.
+- Tests are always built with assertions enabled (`-UNDEBUG`), because some asserts wrap the call under test and Release builds silently removed them.
+- `Server::set_max_headers()` and `set_max_query_params()` were stored but never enforced; requests over either limit now get `431` (HTTP/1.x; HTTP/2 and HTTP/3 still rely on HPACK/QPACK limits).
+- `HttpRequest::set_params` kept a pointer into a vector that was destroyed at the end of its `else` block when a route had more than 32 percent-encoded parameters (use-after-scope).
+- Async logger: WARN/ERROR/FATAL headroom was only reserved in the queue, not in the buffer pool, so priority records could be dropped while the worker was still holding popped buffers.
+- Missing standard includes in `Logger.hpp` (`<atomic>`, `<thread>`, `<condition_variable>`, `<cstring>`; listed under `#if !defined(_MSC_VER)` because MSVC's headers already pull them in) that failed to compile on GCC; `ClientRequest::method` no longer shadows the `method` type (rejected by GCC 14).
+- Flaky tests: logger overflow tests assumed the worker lags the producer, and the chunked-server test raced the listener start-up. The two `example.com` client tests now run only with `WAVEX_TEST_NETWORK=1`.
+- `send_file()` no longer blocks a worker thread: open, `stat` and every disk read run on the blocking pool.
+- Use-after-release hazard when a request was still alive after `arena.release()` in the 431 path.
+- HTTP/3 and QUIC hardening: Content-Length verification, stream-count limits, flow control, crypto-stream reassembly limits, reserved HTTP/2 frame rejection, max field section size.
+- Documentation: corrected the `CLI/CLI.hpp` include path, the `-h` (help) short-option clash in the CLI example, the `set_max_request_size` / `set_max_memory_buffer` setter names, and the preset names used for configure, build and test.
+- `ComposedHttpServer`: the HTTP/3 uni-stream handler read the connection context and then set it in two steps, so two streams arriving together could each create one and lose the other's state. It now uses `QuicConnection::user_context_or_create`, like WebTransport.

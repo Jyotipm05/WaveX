@@ -1,0 +1,96 @@
+# WaveX QUIC Transport & Cryptographic Invariants
+
+This rule governs RFC 9000, RFC 9001, and RFC 9002 compliance, wire framing, header protection, and connection lifetime across WaveX QUIC components.
+
+---
+
+## 1. Optional Dependency Guarding
+- All QUIC and HTTP/3 headers and `.cpp` translation units must be guarded with `#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL`.
+- In mock/fallback non-SSL builds, stub implementations must maintain clean zero-tag framing without invoking OpenSSL symbols.
+
+---
+
+## 2. Packet Number Offset & Header Protection (RFC 9001 §5.4)
+- **Encryption (`protect_packet`)**:
+  - `hdr.packet_number_len` must default to 4 if 0.
+  - For long headers: `hdr.length = plaintext.size() + 16 + hdr.packet_number_len;`
+  - Pack header to `header_bytes`, then compute `const std::size_t pn_offset = header_bytes.size() - hdr.packet_number_len;`
+  - AES-128-GCM encrypt with `header_bytes` as Additional Authenticated Data (AAD).
+  - Apply AES-128-ECB header protection sample from `ciphertext_out.data() + pn_offset + 4` with `EVP_CIPHER_CTX_set_padding(hp_ctx, 0)`.
+  - Mask first byte (`0x0f` mask for long header, `0x1f` for short header) and packet number bytes at `ciphertext_out[pn_offset + i]`.
+- **Decryption (`unprotect_packet`)**:
+  - Unpack initial header to obtain `hdr.pn_offset`.
+  - Sample 16 bytes from `packet_bytes.data() + hdr.pn_offset + 4` with `EVP_CIPHER_CTX_set_padding(hp_ctx, 0)`.
+  - Unmask byte 0 and read `pn_len = (first_byte & 0x03) + 1`.
+  - Unmask packet number bytes at `packet_bytes[hdr.pn_offset + i]`.
+  - Reconstruct `unmasked_hdr` of length `hdr.pn_offset + pn_len` and supply it as AAD to `EVP_DecryptUpdate`.
+
+---
+
+## 3. ConnectionId Boundaries & Parsing
+- Maximum Connection ID length is 20 bytes (`MAX_CONNECTION_ID_LEN`).
+- `ConnectionId::from_hex(hex_str)` MUST validate that `hex_str.size()` is even, <= 40, and consists strictly of hex characters; otherwise it must return an empty `ConnectionId{}`.
+
+---
+
+## 4. Stream ID Demultiplexing & Background Draining (RFC 9000 §2.1)
+- `(sid & 0x03) == 0x00`: Client-initiated bidirectional -> Dispatched to HTTP/3 request router.
+- `(sid & 0x03) == 0x02`: Client-initiated unidirectional -> Drained in background (Peer Control / QPACK). Never treated as request streams and never written to.
+- `(sid & 0x03) == 0x03`: Server-initiated unidirectional -> Stream 3 (Control/SETTINGS), Stream 7 (QPACK encoder), Stream 11 (QPACK decoder).
+
+---
+
+## 5. Stream Reassembly by Offset
+- Incoming `StreamFrame` payloads must be reassembled by `frame.offset` via contiguous window buffering or ordered chunk collation.
+- Detect and log `FINAL_SIZE_ERROR` if peer transmits data beyond a previously communicated FIN offset.
+
+---
+
+## 6. Timer Lifecycle, PTO Backoff & Connection Shutdown
+- `QuicConnection::close()` MUST proactively cancel `loss_timer_` (`loss_timer_.cancel(ec)`) and set `state_ = ConnectionState::Closed`.
+- `on_loss_detection_timeout()` must immediately return if `state_ == ConnectionState::Closed` before attempting frame retransmissions or rearming the timer.
+- In automated unit tests, coroutines awaiting stream events or connection handshakes must explicitly stop their associated `asio::io_context` upon completion to prevent PTO backoff timers from stalling test executors.
+
+---
+
+## 7. Address Validation & Handshake Packet Buffering (RFC 9000 §8.1)
+- Receiving a client `Handshake` packet validates the client's network address (`peer_address_validated_ = true`), unblocking the 3× anti-amplification limit.
+- If handshake keys (`handshake_keys_peer_`) are not yet available, incoming `Handshake` packets must be safely buffered in `buffered_handshake_packets_` (capped to 16) without failing the connection.
+- Handshake packets must never trigger Initial packet handling or advance connection state until properly decrypted.
+
+---
+
+## 8. State Machine Fallbacks & Initial Handshake Response Gating
+- Server Initial handshake responses (including mock/non-TLS fallbacks) MUST be strictly gated on `has_received_initial_`:
+  ```cpp
+  if (is_server_ && state_ == ConnectionState::Initial && has_received_initial_) {
+      send_initial_handshake_response();
+      state_ = ConnectionState::Connected;
+  }
+  ```
+- NEVER invoke `send_initial_handshake_response()` upon receiving non-Initial packets (such as buffered `Handshake` or 1-RTT datagrams). Doing so emits spurious Initial ACK and HANDSHAKE_DONE frames, corrupting the connection state and polluting outbound packet queues.
+
+---
+
+## 9. Stream Session Demultiplexing & Connection Context Binding
+
+- QUIC streams share the parent connection's protocol session state (e.g., HTTP/3 QPACK dynamic table, peer `SETTINGS`, and `GOAWAY` stream limit).
+- Unidirectional streams (`(sid & 0x03) == 0x02`) processed by `handle_unidirectional_stream` must mutate the connection-level `user_context()` (downcast to `http3::connection_context`).
+- Bidirectional request streams (`(sid & 0x03) == 0x00`) dispatched to server routers must retrieve the connection-level session context via `protocol_traits<Codec>::get_connection_context(stream, fallback)` so dynamic table entries inserted by encoder streams are visible during request header decompression.
+- Server listeners/acceptors must register unidirectional stream handlers that bind the connection `user_context` and dispatch instructions asynchronously, preventing unbounded buffering or dynamic table desynchronization.
+
+
+---
+
+## 10. DATAGRAM Frames (RFC 9221)
+- `max_datagram_frame_size` (transport parameter 0x20) is advertised from `local_max_datagram_frame_size_` (default 65535, 0 disables) and the peer's value is parsed in `on_tls_transport_params` (now a non-static member).
+- A DATAGRAM frame received while we advertised 0 (or larger than our limit) is a `PROTOCOL_VIOLATION`.
+- Received payloads are collected under the connection lock (`received_datagrams_`) and delivered to `set_datagram_callback()` only after the lock is released, like `on_stream_created_`.
+- `send_datagram()` builds one 1-RTT packet; the packet is tracked for congestion control and ACKs but `retransmit_frame()` ignores `DatagramFrame`, so lost datagrams stay lost. It refuses payloads larger than `max_datagram_payload()` (path MTU and peer limit).
+- New `Frame` variant members must be handled in `serialize_frame`, `process_frames`, `retransmit_frame` (or deliberately ignored) and `frame_allowed_in` (DATAGRAM: 0-RTT/1-RTT only).
+
+## 11. Stream Peeking & WebTransport Demultiplexing
+- `(sid & 0x03) == 0x00` streams may carry WebTransport data instead of a request: the first varint is `0x41` (WT_STREAM). Listeners call `webtransport::dispatch_bidirectional_stream()`; when it returns false the stream is an HTTP/3 request and every peeked byte has been restored with `QuicStream::unread()`.
+- Client unidirectional streams of type `0x54` belong to WebTransport and are routed from `handle_unidirectional_stream`.
+- Never send FIN (`QuicStream::close()`) on a peer-initiated unidirectional stream: it is receive-only (RFC 9000 §19.8). `webtransport::stream::close()` skips it for that reason.
+- HTTP/3 SETTINGS emitted by `initialize_http3_session()` include `ENABLE_CONNECT_PROTOCOL`, `H3_DATAGRAM` (only with DATAGRAM negotiated), `WEBTRANSPORT_MAX_SESSIONS` and draft-02 `ENABLE_WEBTRANSPORT`.

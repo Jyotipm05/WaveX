@@ -427,7 +427,145 @@ void test_symmetrical_codec_api() {
     check(h2_res.stream_id() == 42, "Http2Response stream_id getter/setter");
 }
 
+// ─── Test 11: HPACK Dynamic Table Persistence Across Connection Requests ─────
+
+void test_hpack_dynamic_table_persistence() {
+    std::cout << "\n[Test 11] HPACK Dynamic Table Multi-Request Persistence (Connection Context)\n";
+
+    wavex::protos::http::http2codec::connection_context conn_ctx;
+
+    // ── Request 1: Literal header with incremental indexing (RFC 7541 §6.2.1)
+    std::string block1;
+    block1.push_back(static_cast<char>(0x82)); // :method: GET
+    block1.push_back(static_cast<char>(0x84)); // :path: /
+    block1.push_back(static_cast<char>(0x40)); // 01000000: literal with incremental indexing, new name
+    block1.push_back(static_cast<char>(14));   // name length = 14
+    block1.append("x-custom-token");
+    block1.push_back(static_cast<char>(9));    // value length = 9
+    block1.append("secret123");
+
+    h2::frame_header hdr1;
+    hdr1.length = static_cast<uint32_t>(block1.size());
+    hdr1.type = h2::frame_type::HEADERS;
+    hdr1.flags = h2::flags::END_HEADERS | h2::flags::END_STREAM;
+    hdr1.stream_id = 1;
+
+    std::array<uint8_t, h2::frame_header::HEADER_SIZE> hdr1_bytes{};
+    h2::pack_frame_header(hdr1, hdr1_bytes);
+
+    std::string wire1;
+    wire1.append(reinterpret_cast<const char *>(hdr1_bytes.data()), hdr1_bytes.size());
+    wire1.append(block1);
+
+    h2::request req1;
+    std::size_t consumed1 = 0;
+    auto res1 = wavex::protos::http::http2codec::parse_request(wire1, req1, consumed1, conn_ctx);
+    check(res1 == wavex::protos::http::http2codec::result::success, "Request 1 with incremental indexing parsed successfully");
+    check(req1.stream_id == 1, "Request 1 stream ID is 1");
+    auto h1 = req1.get_header("x-custom-token");
+    check(h1.has_value() && *h1 == "secret123", "Request 1 decoded x-custom-token header");
+    check(conn_ctx.decode_table.size() == 1, "Dynamic table stored 1 entry after request 1");
+
+    // ── Request 2: Uses Indexed Header Field referencing index 62 (first dynamic entry)
+    // Static table size is 61 (indices 1..61). Dynamic table entry 0 is index 62.
+    // 0x80 | 62 = 0xBE (10111110)
+    std::string block2;
+    block2.push_back(static_cast<char>(0x82)); // :method: GET
+    block2.push_back(static_cast<char>(0x84)); // :path: /
+    block2.push_back(static_cast<char>(0x80 | 62)); // Indexed field: index 62
+
+    h2::frame_header hdr2;
+    hdr2.length = static_cast<uint32_t>(block2.size());
+    hdr2.type = h2::frame_type::HEADERS;
+    hdr2.flags = h2::flags::END_HEADERS | h2::flags::END_STREAM;
+    hdr2.stream_id = 3;
+
+    std::array<uint8_t, h2::frame_header::HEADER_SIZE> hdr2_bytes{};
+    h2::pack_frame_header(hdr2, hdr2_bytes);
+
+    std::string wire2;
+    wire2.append(reinterpret_cast<const char *>(hdr2_bytes.data()), hdr2_bytes.size());
+    wire2.append(block2);
+
+    // 1. Parse with connection_context (persisted dynamic table)
+    h2::request req2;
+    std::size_t consumed2 = 0;
+    auto res2 = wavex::protos::http::http2codec::parse_request(wire2, req2, consumed2, conn_ctx);
+    check(res2 == wavex::protos::http::http2codec::result::success, "Request 2 on same connection parsed index 62 successfully");
+    check(req2.stream_id == 3, "Request 2 stream ID is 3");
+    auto h2 = req2.get_header("x-custom-token");
+    check(h2.has_value() && *h2 == "secret123", "Request 2 retrieved dynamic table entry for index 62");
+
+    // 2. Standalone parse without persistent dynamic table fails on index 62
+    h2::request req2_isolated;
+    std::size_t consumed2_iso = 0;
+    auto res2_isolated = wavex::protos::http::http2codec::parse_request(wire2, req2_isolated, consumed2_iso);
+    check(res2_isolated == wavex::protos::http::http2codec::result::error, "Standalone parse without persistent dynamic table fails on index 62");
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
+
+void test_hpack_header_list_limit() {
+    std::cout << "\n[Test 12] HPACK decoder bounds the decoded header list\n";
+
+    // Each 0x82 (indexed ":method: GET") is 1 byte on the wire but 7 + 3 + 32 = 42 bytes of list size.
+    const std::string small_block(10, static_cast<char>(0x82));
+    const std::string bomb(2000, static_cast<char>(0x82)); // 2 KB on the wire, 84 000 decoded
+
+    const auto decode = [](const std::string &block, const std::size_t limit, std::size_t &fields) {
+        h2::hpack::dynamic_table dt;
+        const h2::hpack::decoder dec(dt, limit);
+        std::vector<std::pair<std::string, std::string> > out;
+        const bool ok = dec.decode_header_block(block, out);
+        fields = out.size();
+        return ok;
+    };
+
+    std::size_t n = 0;
+    check(decode(small_block, h2::kDefaultMaxHeaderListSize, n) && n == 10, "a small block decodes under the cap");
+    check(!decode(bomb, h2::kDefaultMaxHeaderListSize, n), "an expansion bomb is rejected at the default cap");
+    check(n < 2000, "...before the whole list is materialised");
+    check(decode(bomb, 0, n) && n == 2000, "limit 0 keeps the decoder unlimited (client side)");
+    check(!decode(small_block, 42 * 9, n), "a custom cap just below the list size rejects");
+    check(decode(small_block, 42 * 10, n), "a cap exactly at the list size accepts");
+}
+
+void test_oversized_headers_report_431() {
+    std::cout << "\n[Test 13] Oversized request header list is reported as headers_too_large\n";
+
+    const auto frame = [](const std::string &block) {
+        h2::frame_header hdr;
+        hdr.length = static_cast<uint32_t>(block.size());
+        hdr.type = h2::frame_type::HEADERS;
+        hdr.flags = h2::flags::END_HEADERS | h2::flags::END_STREAM;
+        hdr.stream_id = 5;
+        std::array<uint8_t, h2::frame_header::HEADER_SIZE> bytes{};
+        h2::pack_frame_header(hdr, bytes);
+        return std::string(reinterpret_cast<const char *>(bytes.data()), bytes.size()) + block;
+    };
+
+    std::string ok_block;
+    ok_block.push_back(static_cast<char>(0x82)); // :method GET
+    ok_block.push_back(static_cast<char>(0x84)); // :path /
+    ok_block.push_back(static_cast<char>(0x86)); // :scheme http
+    const std::string bomb_block(2000, static_cast<char>(0x82));
+
+    h2::request ok_req;
+    std::size_t consumed = 0;
+    check(h2::parser::parse_request(frame(ok_block), ok_req, consumed) == h2::parser::result::success,
+          "a normal request still parses");
+
+    h2::request big_req;
+    const auto r = h2::parser::parse_request(frame(bomb_block), big_req, consumed);
+    check(r == h2::parser::result::headers_too_large, "an expansion bomb yields headers_too_large (not a bare error)");
+    check(big_req.stream_id == 5, "...with the failing stream id recorded, so the server can answer on it");
+
+    using wavex::protos::protocol_error;
+    using H2 = wavex::protos::protocol_traits<wavex::protos::http::http2codec>;
+    check(H2::classify_parse_error(r) == protocol_error::limits_exceeded, "traits map it to limits_exceeded (431)");
+    check(H2::classify_parse_error(h2::parser::result::error) == protocol_error::bad_request,
+          "other parse failures stay bad_request");
+}
 
 int main() {
     std::cout << "========================================================\n";
@@ -444,6 +582,9 @@ int main() {
     test_client_preface_parsing();
     test_http2_request_response_types();
     test_symmetrical_codec_api();
+    test_hpack_dynamic_table_persistence();
+    test_hpack_header_list_limit();
+    test_oversized_headers_report_431();
 
     std::cout << "\n--------------------------------------------------------\n";
     std::cout << "Tests Summary: " << tests_passed << " / " << tests_run << " passed.\n";

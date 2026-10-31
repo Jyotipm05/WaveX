@@ -1,0 +1,136 @@
+/**
+ * @file QuicServer.hpp
+ * @brief Asynchronous UDP server hosting QUIC connections and dispatching streams.
+ */
+
+#pragma once
+
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+
+#include <array>
+#include <atomic>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+
+#include <asio/awaitable.hpp>
+#include <asio/io_context.hpp>
+#include <asio/ip/udp.hpp>
+
+#include <wavex/Network/QUIC/ConnectionId.hpp>
+#include <wavex/Network/QUIC/QuicConnection.hpp>
+#include <wavex/Network/QUIC/QuicStream.hpp>
+
+namespace wavex::network::quic {
+    /**
+     * @class QuicServer
+     * @brief Asynchronous UDP server hosting QUIC connections and dispatching streams.
+     */
+    class QuicServer {
+    public:
+        // ─── 1. Nested Types & Definitions (TOP) ───────────────────────────
+        using StreamHandler = std::function<asio::awaitable<void>(std::shared_ptr<QuicStream>)>;
+        using UniStreamHandler = std::function<asio::awaitable<void>(std::shared_ptr<QuicStream>)>;
+        /// RFC 9000 §14.1: minimum UDP payload of a datagram carrying a client Initial packet.
+        static constexpr std::size_t kMinInitialDatagramSize = 1200;
+
+    private:
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        asio::io_context &io_;
+        SSL_CTX *shared_ssl_ctx_{nullptr};
+        asio::ip::udp::socket socket_;
+        asio::ip::udp::endpoint sender_endpoint_{};
+        std::unordered_map<ConnectionId, std::shared_ptr<QuicConnection> > connections_{};
+        mutable std::mutex mtx_{};
+        mutable std::mutex sock_mtx_{}; // serializes socket_ use: stop() runs on a different thread than do_receive()
+        std::array<uint8_t, 65536> recv_buf_{};
+        StreamHandler stream_handler_{};
+        UniStreamHandler uni_stream_handler_{};
+        std::string tls_cert_file_{};
+        std::string tls_key_file_{};
+        uint64_t max_field_section_size_{65536};
+        std::size_t server_cid_len_{8};
+        std::atomic<bool> stopped_{false};
+        std::atomic<bool> running_{false};
+
+    public:
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        QuicServer(asio::io_context &io, uint16_t port);
+
+        QuicServer(asio::io_context &io, std::string_view host, uint16_t port);
+
+        ~QuicServer();
+
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
+        void set_connection_id_length(const std::size_t len) noexcept {
+            std::lock_guard lock(mtx_);
+            server_cid_len_ = (std::min)(len, MAX_CONNECTION_ID_LEN);
+        }
+
+        [[nodiscard]] auto connection_id_length() const noexcept -> std::size_t {
+            std::lock_guard lock(mtx_);
+            return server_cid_len_;
+        }
+
+        void set_max_field_section_size(const uint64_t max_size) noexcept {
+            std::lock_guard lock(mtx_);
+            max_field_section_size_ = max_size;
+        }
+
+        [[nodiscard]] auto max_field_section_size() const noexcept -> uint64_t {
+            std::lock_guard lock(mtx_);
+            return max_field_section_size_;
+        }
+
+        void set_stream_handler(StreamHandler handler) {
+            std::lock_guard lock(mtx_);
+            stream_handler_ = std::move(handler);
+        }
+
+        void set_uni_stream_handler(UniStreamHandler handler) {
+            std::lock_guard lock(mtx_);
+            uni_stream_handler_ = std::move(handler);
+        }
+
+        void set_tls_credentials(std::string cert_file, std::string key_file);
+
+        void start();
+
+        void stop();
+
+        [[nodiscard]] auto is_open() const noexcept -> bool { return socket_.is_open(); }
+
+        [[nodiscard]] auto connection_count() const noexcept -> std::size_t {
+            std::lock_guard lock(mtx_);
+            return connections_.size();
+        }
+
+        [[nodiscard]] auto local_endpoint() const -> asio::ip::udp::endpoint {
+            asio::error_code ec;
+            auto ep = socket_.local_endpoint(ec);
+            if (ec) return {};
+            if (ep.address().is_unspecified()) {
+                ep.address(asio::ip::address_v4::loopback());
+            }
+            return ep;
+        }
+
+        [[nodiscard]] auto local_port() const noexcept -> uint16_t {
+            asio::error_code ec;
+            const auto ep = socket_.local_endpoint(ec);
+            return ec ? 0 : ep.port();
+        }
+
+    private:
+        void init_shared_ssl_ctx();
+
+        void do_receive();
+
+        void flush_outbound(const std::shared_ptr<QuicConnection> &conn);
+    };
+} // namespace wavex::network::quic
+
+#endif // WAVEX_HAS_SSL

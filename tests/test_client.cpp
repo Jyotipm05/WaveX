@@ -2,6 +2,7 @@
  * @file test_client.cpp
  * @brief Unit & integration tests for HttpClient, HttpRequest (client), and HttpResponse (client).
  */
+#include <cstdlib>
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -14,8 +15,6 @@
 #include <nlohmann/json.hpp>
 
 #include <wavex/wavex.hpp>
-
-import wavex;
 
 using HttpRequest = wavex::protos::http::Http1Request;
 using HttpResponse = wavex::protos::http::Http1Response;
@@ -321,8 +320,8 @@ void test_http_client_integration() {
 
     asio::co_spawn(client_ioc, [&]() -> asio::awaitable<void> {
         // 1. GET request via HttpClient::get
-        auto get_res = co_await wavex::client::HttpClient::get("http://127.0.0.1:8086/api/client_test");
-        if (get_res.status_code() == 200 && get_res.get_body().find("WaveX") != std::string::npos) {
+        if (const auto get_res = co_await wavex::client::HttpClient::get("http://127.0.0.1:8086/api/client_test");
+            get_res.status_code() == 200 && get_res.get_body().find("WaveX") != std::string::npos) {
             get_success = true;
         }
 
@@ -368,13 +367,12 @@ void test_external_example_server() {
             // ── Programmatic assertions (no raw bytes on stdout) ─────────────
             std::cout << "  Raw response: " << res.raw_response().size()
                     << (" bytes (see "
-            PROJECT_DIR
-            "/tmp/wavex_raw_response.txt)\n"
-            )
-            ;
+                        PROJECT_DIR
+                        "/tmp/wavex_raw_response.txt)\n"
+                    );
             std::cout << "  Parsed summary: (see "
-            PROJECT_DIR
-            "/tmp/wavex_parsed_response.txt)\n";
+                    PROJECT_DIR
+                    "/tmp/wavex_parsed_response.txt)\n";
 
             const auto &hdrs = res.header_views();
 
@@ -476,7 +474,7 @@ void test_http_client_advanced_features() {
         std::string q;
         for (const auto &[k, v]: req.query) {
             if (!q.empty()) q += "&";
-            q += k + "=" + v;
+            q.append(k).append("=").append(v);
         }
         res.status(200).send("Query: " + q);
         co_return;
@@ -507,10 +505,12 @@ void test_http_client_advanced_features() {
 
     // 3. HTTP/2 Server (h2c cleartext)
     auto &h2_router = wavex::engine::Http2Router::instance();
-    h2_router.get("/api/h2_test", [](const wavex::protos::http::Http2Request &, wavex::protos::http::Http2Response &res) -> asio::awaitable<void> {
-        res.status(200).send("HTTP2 Direct h2c OK");
-        co_return;
-    });
+    h2_router.get("/api/h2_test",
+                  [](const wavex::protos::http::Http2Request &,
+                     wavex::protos::http::Http2Response &res) -> asio::awaitable<void> {
+                      res.status(200).send("HTTP2 Direct h2c OK");
+                      co_return;
+                  });
 
     wavex::server::Http2Server h2_server(h2_router, "127.0.0.1", 8088);
     std::thread h2_thread([&h2_server] { h2_server.run(); });
@@ -571,13 +571,14 @@ void test_http_client_advanced_features() {
         }
 
         // G. Templated concrete Http1Response
-        auto h1_typed = co_await wavex::client::HttpClient::get<wavex::protos::http::Http1Response>("http://127.0.0.1:8087/api/ipv4_direct");
+        auto h1_typed = co_await wavex::client::HttpClient::get<wavex::protos::http::Http1Response>(
+            "http://127.0.0.1:8087/api/ipv4_direct");
         if (h1_typed.status_code() == 200 && h1_typed.get_body().find("IPv4 Direct OK") != std::string::npos) {
             templated_h1_ok = true;
         }
 
         // H. HTTP/2 Cleartext (h2c) with prior knowledge
-        wavex::client::ClientOptions h2_opts{
+        const wavex::client::ClientOptions h2_opts{
             .version = wavex::client::HttpVersion::Http2
         };
         auto h2_res = co_await wavex::client::HttpClient::get("http://127.0.0.1:8088/api/h2_test", h2_opts);
@@ -625,8 +626,14 @@ int main() {
     test_http_request_client_serialization();
     test_http_response_client_parsing();
     test_http_client_integration();
-    test_external_example_server();
-    test_external_response_output();
+    // These two need the public internet (example.com), so they are opt-in:
+    // CI and offline machines skip them unless WAVEX_TEST_NETWORK=1.
+    if (const char *net = std::getenv("WAVEX_TEST_NETWORK"); net != nullptr && *net != '\0' && *net != '0') {
+        test_external_example_server();
+        test_external_response_output();
+    } else {
+        std::cout << "\n[Tests 4-5] SKIPPED: set WAVEX_TEST_NETWORK=1 to run the example.com requests\n";
+    }
     test_http_client_advanced_features();
 
     std::cout << "\n" << tests_passed << "/" << tests_run << " tests passed.\n";

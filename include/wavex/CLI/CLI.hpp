@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2026 Jyotipriya Mondal
+// Copyright (c) 2026 Jyotipriya Mondal
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -34,14 +34,28 @@ namespace wavex::cli {
      * @brief Definition and state of a CLI option/flag.
      */
     struct Option {
-        std::string name; ///< Long option name (e.g. "port")
-        std::string description; ///< Help description
-        std::string default_value; ///< Default value string
-        std::string value; ///< Parsed string value
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        std::string name{}; ///< Long option name (e.g. "port")
+        std::string description{}; ///< Help description
+        std::string default_value{}; ///< Default value string
+        std::string value{}; ///< Parsed string value
         OptionType type{OptionType::Value}; ///< Enum type
         char short_name{'\0'}; ///< Short option character (e.g. 'p')
         bool required{false}; ///< Indicates if required
         bool specified{false}; ///< Indicates if specified in command line
+
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        Option() = default;
+
+        ~Option() = default;
+
+        Option(const Option &) = default;
+
+        Option &operator=(const Option &) = default;
+
+        Option(Option &&) noexcept = default;
+
+        Option &operator=(Option &&) noexcept = default;
     };
 
     /**
@@ -49,10 +63,25 @@ namespace wavex::cli {
      * @brief Result of command line parsing.
      */
     struct ParseResult {
-        std::string error_message;
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        std::string error_message{};
         bool success{true};
         bool help_requested{false};
 
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        ParseResult() = default;
+
+        ~ParseResult() = default;
+
+        ParseResult(const ParseResult &) = default;
+
+        ParseResult &operator=(const ParseResult &) = default;
+
+        ParseResult(ParseResult &&) noexcept = default;
+
+        ParseResult &operator=(ParseResult &&) noexcept = default;
+
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
         [[nodiscard]] bool ok() const { return success && !help_requested; }
     };
 
@@ -61,12 +90,35 @@ namespace wavex::cli {
      * @brief High-performance, zero-dependency CLI argument parser for WaveX.
      */
     class CliParser {
+    private:
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        std::unordered_map<std::string, Option> options_{};
+        std::unordered_map<char, std::string> short_index_{};
+        std::string program_name_{};
+        std::string description_{};
+        std::vector<std::string> option_order_{};
+        std::vector<Option> positionals_{};
+        std::vector<std::string> extra_positionals_{};
+
     public:
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         explicit CliParser(std::string program_name = "", std::string description = "")
             : program_name_(std::move(program_name)), description_(std::move(description)) {
             // Auto-register built-in help flag
             add_flag("help", 'h', "Display this help message and exit");
         }
+
+        ~CliParser() = default;
+
+        CliParser(const CliParser &) = default;
+
+        CliParser &operator=(const CliParser &) = default;
+
+        CliParser(CliParser &&) noexcept = default;
+
+        CliParser &operator=(CliParser &&) noexcept = default;
+
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
 
         /// Set program name
         CliParser &set_program_name(std::string name) {
@@ -83,7 +135,7 @@ namespace wavex::cli {
         /**
          * @brief Add a boolean flag option (e.g., --verbose or -v).
          */
-        CliParser &add_flag(std::string name, char short_name, std::string description) {
+        CliParser &add_flag(std::string name, const char short_name, std::string description) {
             Option opt;
             opt.name = std::move(name);
             opt.short_name = short_name;
@@ -102,8 +154,8 @@ namespace wavex::cli {
         /**
          * @brief Add a key-value option (e.g., --port 8080 or -p 8080).
          */
-        CliParser &add_option(std::string name, char short_name, std::string description,
-                              std::string default_value = "", bool required = false) {
+        CliParser &add_option(std::string name, const char short_name, std::string description,
+                              std::string default_value = "", const bool required = false) {
             Option opt;
             opt.name = std::move(name);
             opt.short_name = short_name;
@@ -117,14 +169,14 @@ namespace wavex::cli {
         }
 
         CliParser &add_option(std::string name, std::string description,
-                              std::string default_value = "", bool required = false) {
+                              std::string default_value = "", const bool required = false) {
             return add_option(std::move(name), '\0', std::move(description), std::move(default_value), required);
         }
 
         /**
          * @brief Add a positional argument.
          */
-        CliParser &add_positional(std::string name, std::string description, bool required = false) {
+        CliParser &add_positional(std::string name, std::string description, const bool required = false) {
             Option opt;
             opt.name = std::move(name);
             opt.description = std::move(description);
@@ -137,7 +189,7 @@ namespace wavex::cli {
         /**
          * @brief Parse command line arguments from argc and argv.
          */
-        ParseResult parse(int argc, const char *const argv[]) {
+        ParseResult parse(const int argc, const char *const argv[]) {
             if (argc > 0 && program_name_.empty()) {
                 program_name_ = argv[0];
             }
@@ -178,7 +230,7 @@ namespace wavex::cli {
                     std::string_view val_part;
                     bool has_eq = false;
 
-                    if (auto eq_pos = name_part.find('='); eq_pos != std::string_view::npos) {
+                    if (const auto eq_pos = name_part.find('='); eq_pos != std::string_view::npos) {
                         val_part = name_part.substr(eq_pos + 1);
                         name_part = name_part.substr(0, eq_pos);
                         has_eq = true;
@@ -197,7 +249,7 @@ namespace wavex::cli {
                     } else {
                         if (has_eq) {
                             opt->value = std::string(val_part);
-                        } else if (i + 1 < args.size() && !args[i + 1].starts_with("-")) {
+                        } else if (i + 1 < args.size() && !args[i + 1].starts_with('-')) {
                             opt->value = std::string(args[++i]);
                         } else {
                             res.success = false;
@@ -207,8 +259,8 @@ namespace wavex::cli {
                     }
                 }
                 // Short option: -n or -n=value or -n value
-                else if (arg.starts_with("-") && arg.size() > 1) {
-                    char short_char = arg[1];
+                else if (arg.starts_with('-') && arg.size() > 1) {
+                    const char short_char = arg[1];
                     auto *opt = find_short_option_mut(short_char);
                     if (!opt) {
                         res.success = false;
@@ -226,7 +278,7 @@ namespace wavex::cli {
                             } else {
                                 opt->value = std::string(arg.substr(2));
                             }
-                        } else if (i + 1 < args.size() && !args[i + 1].starts_with("-")) {
+                        } else if (i + 1 < args.size() && !args[i + 1].starts_with('-')) {
                             opt->value = std::string(args[++i]);
                         } else {
                             res.success = false;
@@ -291,8 +343,8 @@ namespace wavex::cli {
         /**
          * @brief Get option value as int with fallback.
          */
-        [[nodiscard]] int get_int(const std::string &name, int default_val = 0) const {
-            std::string val = get_string(name);
+        [[nodiscard]] int get_int(const std::string &name, const int default_val = 0) const {
+            const std::string val = get_string(name);
             if (val.empty()) return default_val;
             try {
                 return std::stoi(val);
@@ -304,8 +356,8 @@ namespace wavex::cli {
         /**
          * @brief Get option value as size_t with fallback.
          */
-        [[nodiscard]] std::size_t get_size_t(const std::string &name, std::size_t default_val = 0) const {
-            std::string val = get_string(name);
+        [[nodiscard]] std::size_t get_size_t(const std::string &name, const std::size_t default_val = 0) const {
+            const std::string val = get_string(name);
             if (val.empty()) return default_val;
             try {
                 return static_cast<std::size_t>(std::stoull(val));
@@ -318,15 +370,15 @@ namespace wavex::cli {
          * @brief Get option value as boolean.
          */
         [[nodiscard]] bool get_bool(const std::string &name) const {
-            std::string val = get_string(name);
+            const std::string val = get_string(name);
             return (val == "true" || val == "1" || val == "yes" || val == "ON");
         }
 
         /**
          * @brief Get option value as double with fallback.
          */
-        [[nodiscard]] double get_double(const std::string &name, double default_val = 0.0) const {
-            std::string val = get_string(name);
+        [[nodiscard]] double get_double(const std::string &name, const double default_val = 0.0) const {
+            const std::string val = get_string(name);
             if (val.empty()) return default_val;
             try {
                 return std::stod(val);
@@ -373,7 +425,7 @@ namespace wavex::cli {
                     oss << " <val>";
                 }
 
-                size_t padding = (opt.name.size() + 10 < 28) ? 28 - (opt.name.size() + 10) : 2;
+                const size_t padding = (opt.name.size() + 10 < 28) ? 28 - (opt.name.size() + 10) : 2;
                 oss << std::string(padding, ' ') << opt.description;
 
                 if (!opt.default_value.empty() && opt.type == OptionType::Value) {
@@ -389,7 +441,7 @@ namespace wavex::cli {
                 oss << "\nPositional Arguments:\n";
                 for (const auto &pos: positionals_) {
                     oss << "  " << pos.name;
-                    size_t padding = (pos.name.size() < 20) ? 20 - pos.name.size() : 2;
+                    const size_t padding = (pos.name.size() < 20) ? 20 - pos.name.size() : 2;
                     oss << std::string(padding, ' ') << pos.description;
                     if (pos.required) oss << " [REQUIRED]";
                     oss << "\n";
@@ -408,7 +460,7 @@ namespace wavex::cli {
 
     private:
         void register_option(Option opt) {
-            std::string name = opt.name;
+            const std::string name = opt.name;
             if (opt.short_name != '\0') {
                 short_index_[opt.short_name] = name;
             }
@@ -417,29 +469,20 @@ namespace wavex::cli {
         }
 
         [[nodiscard]] const Option *find_option(const std::string &name) const {
-            auto it = options_.find(name);
+            const auto it = options_.find(name);
             return (it != options_.end()) ? &it->second : nullptr;
         }
 
         [[nodiscard]] Option *find_option_mut(const std::string &name) {
-            auto it = options_.find(name);
+            const auto it = options_.find(name);
             return (it != options_.end()) ? &it->second : nullptr;
         }
 
-        [[nodiscard]] Option *find_short_option_mut(char c) {
-            auto it = short_index_.find(c);
-            if (it != short_index_.end()) {
+        [[nodiscard]] Option *find_short_option_mut(const char c) {
+            if (const auto it = short_index_.find(c); it != short_index_.end()) {
                 return find_option_mut(it->second);
             }
             return nullptr;
         }
-
-        std::string program_name_;
-        std::string description_;
-        std::unordered_map<std::string, Option> options_;
-        std::unordered_map<char, std::string> short_index_;
-        std::vector<std::string> option_order_;
-        std::vector<Option> positionals_;
-        std::vector<std::string> extra_positionals_;
     };
 } // namespace wavex::cli

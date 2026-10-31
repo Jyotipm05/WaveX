@@ -22,16 +22,16 @@
 #include <utility>
 #include <optional>
 #include <chrono>
-#include <cctype>
 #include <type_traits>
 
 #include <asio/awaitable.hpp>
-#include <asio/co_spawn.hpp>
 #include <nlohmann/json.hpp>
 
+
 #include <wavex/Base/Response.hpp>
-#include <wavex/Base/Uri.hpp>
-#include <wavex/Base/Url.hpp>
+#include <wavex/Utils/Multipart.hpp>
+#include <wavex/Utils/Compression.hpp>
+#include <wavex/Utils/FsUtils.hpp>
 #include <wavex/protos/http/HttpRequest.hpp>
 #include <wavex/protos/http/HttpResponse.hpp>
 #include <wavex/protos/http/http.hpp>
@@ -48,9 +48,9 @@ namespace wavex::client {
      * @brief Target HTTP protocol version for client requests.
      */
     enum class HttpVersion {
-        Auto,     ///< Auto-negotiate via ALPN on TLS (h2/http1.1); default to HTTP/1.1 on plain TCP
-        Http1_1,  ///< Enforce HTTP/1.1 (skip HTTP/2 framing overhead)
-        Http2     ///< Enforce HTTP/2 (ALPN "h2" on TLS; prior-knowledge h2c on plain TCP)
+        Auto, ///< Auto-negotiate via ALPN on TLS (h2/http1.1); default to HTTP/1.1 on plain TCP
+        Http1_1, ///< Enforce HTTP/1.1 (skip HTTP/2 framing overhead)
+        Http2 ///< Enforce HTTP/2 (ALPN "h2" on TLS; prior-knowledge h2c on plain TCP)
     };
 
     /**
@@ -58,37 +58,47 @@ namespace wavex::client {
      * @brief Configuration options for HttpClient requests.
      */
     struct ClientOptions {
-        HttpVersion version = HttpVersion::Auto; ///< Protocol version strategy
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
         std::chrono::milliseconds timeout{30000}; ///< Request timeout (default: 30s)
-        bool verify_peer = false; ///< Verify TLS server certificates (default: false for development/self-signed)
-        std::string ca_file; ///< Optional path to CA bundle
-        std::string cert_file; ///< Optional client certificate for mTLS
-        std::string key_file; ///< Optional client private key for mTLS
+        std::string ca_file{}; ///< Optional path to CA bundle
+        std::string cert_file{}; ///< Optional client certificate for mTLS
+        std::string key_file{}; ///< Optional client private key for mTLS
+        HttpVersion version{HttpVersion::Auto}; ///< Protocol version strategy
+        bool verify_peer{false}; ///< Verify TLS server certificates (default: false for development/self-signed)
     };
 
     /// Key-value query parameters alias
-    using QueryParams = std::vector<std::pair<std::string, std::string>>;
+    using QueryParams = std::vector<std::pair<std::string, std::string> >;
 
     /**
      * @class ClientRequest
      * @brief Fluent, protocol-agnostic HTTP request builder.
      */
     class ClientRequest {
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        std::string target_{};
+        QueryParams queries_{};
+        std::vector<std::pair<std::string, std::string> > headers_{};
+        std::string body_{};
+        utils::MultipartFormData multipart_builder_{};
+        protos::http::method method_{protos::http::method::GET};
+
     public:
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         ClientRequest() = default;
 
         ClientRequest(const method m, const std::string_view target_url)
-            : method_(m), target_(target_url) {
+            : target_(target_url), method_(m) {
         }
 
         explicit ClientRequest(const std::string_view target_url)
-            : method_(method::GET), target_(target_url) {
+            : target_(target_url) {
         }
 
         /// Construct from concrete Http1Request
         explicit ClientRequest(const Http1Request &req) {
-            method_ = req.raw().method_type;
             target_ = req.target();
+            method_ = req.raw().method_type;
             for (const auto &[k, v]: req.raw().headers) {
                 headers_.emplace_back(std::string(k), std::string(v));
             }
@@ -97,13 +107,25 @@ namespace wavex::client {
 
         /// Construct from concrete Http2Request
         explicit ClientRequest(const Http2Request &req) {
-            method_ = req.raw().method_type;
             target_ = req.target();
+            method_ = req.raw().method_type;
             for (const auto &[k, v]: req.raw().headers) {
                 headers_.emplace_back(std::string(k), std::string(v));
             }
             body_ = req.body();
         }
+
+        ~ClientRequest() = default;
+
+        ClientRequest(const ClientRequest &) = default;
+
+        ClientRequest &operator=(const ClientRequest &) = default;
+
+        ClientRequest(ClientRequest &&) noexcept = default;
+
+        ClientRequest &operator=(ClientRequest &&) noexcept = default;
+
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
 
         ClientRequest &method(const protos::http::method m) noexcept {
             method_ = m;
@@ -133,7 +155,7 @@ namespace wavex::client {
         }
 
         template<typename T>
-        requires (!std::is_convertible_v<T, std::string_view>)
+            requires (!std::is_convertible_v<T, std::string_view>)
         ClientRequest &query(const std::string_view key, const T &value) {
             queries_.emplace_back(std::string(key), std::to_string(value));
             return *this;
@@ -149,63 +171,60 @@ namespace wavex::client {
         [[nodiscard]] const QueryParams &queries() const noexcept { return queries_; }
 
         /// Set a header (overwrites if exists, case-insensitively)
-        ClientRequest &set_header(const std::string_view key, const std::string_view value) {
-            for (auto &[k, v]: headers_) {
-                if (detail_case_equal(k, key)) {
-                    v = std::string(value);
-                    return *this;
-                }
-            }
-            headers_.emplace_back(std::string(key), std::string(value));
-            return *this;
-        }
+        ClientRequest &set_header(std::string_view key, std::string_view value);
 
-        [[nodiscard]] std::optional<std::string_view> header(const std::string_view key) const noexcept {
-            for (const auto &[k, v]: headers_) {
-                if (detail_case_equal(k, key)) return v;
-            }
-            return std::nullopt;
-        }
+        [[nodiscard]] std::optional<std::string_view> header(std::string_view key) const noexcept;
 
         [[nodiscard]] const std::vector<std::pair<std::string, std::string> > &headers() const noexcept {
             return headers_;
         }
 
         /// Set body with optional Content-Type
-        ClientRequest &set_body(const std::string_view body, const std::string_view content_type = "") {
-            body_ = std::string(body);
-            if (!content_type.empty()) {
-                set_header("Content-Type", content_type);
-            }
-            return *this;
-        }
+        ClientRequest &set_body(std::string_view body, std::string_view content_type = "");
 
         /// Set JSON body (sets Content-Type to application/json automatically)
-        ClientRequest &json(const nlohmann::json &j) {
-            body_ = j.dump();
-            set_header("Content-Type", "application/json");
-            return *this;
-        }
+        ClientRequest &json(const nlohmann::json &j);
 
         [[nodiscard]] const std::string &body() const noexcept { return body_; }
 
-    private:
-        static bool detail_case_equal(const std::string_view a, const std::string_view b) noexcept {
-            if (a.size() != b.size()) return false;
-            for (size_t i = 0; i < a.size(); ++i) {
-                if (std::tolower(static_cast<unsigned char>(a[i])) !=
-                    std::tolower(static_cast<unsigned char>(b[i]))) {
-                    return false;
-                }
-            }
-            return true;
+        /// Attach a pre-composed multipart/form-data payload
+        ClientRequest &multipart(const utils::MultipartFormData &form);
+
+        /// Add a form field to the multipart payload
+        ClientRequest &add_field(std::string_view name, std::string_view value);
+
+        /// Add an in-memory file to the multipart payload
+        ClientRequest &add_file(std::string_view name,
+                                std::string_view filename,
+                                std::string_view data,
+                                std::string_view content_type = "");
+
+        /// Add a file from disk to the multipart payload
+        ClientRequest &add_file_from_path(std::string_view name,
+                                          const std::string &filepath,
+                                          std::string_view content_type = "");
+
+        template<typename PathLike>
+            requires (!std::is_convertible_v<PathLike, const std::string &>)
+        ClientRequest &add_file_from_path(const std::string_view name,
+                                          const PathLike &filepath,
+                                          const std::string_view content_type = "") {
+            return add_file_from_path(name, utils::fs_utils::to_u8_path_string(filepath), content_type);
         }
 
-        protos::http::method method_{protos::http::method::GET};
-        std::string target_;
-        QueryParams queries_;
-        std::vector<std::pair<std::string, std::string> > headers_;
-        std::string body_;
+        /// Set raw binary body from a file on disk
+        ClientRequest &file_body(const std::string &filepath,
+                                 std::string_view content_type = "");
+
+        template<typename PathLike>
+            requires (!std::is_convertible_v<PathLike, const std::string &>)
+        ClientRequest &file_body(const PathLike &filepath,
+                                 const std::string_view content_type = "") {
+            return file_body(utils::fs_utils::to_u8_path_string(filepath), content_type);
+        }
+
+        /// Compress request body using gzip or deflate
+        ClientRequest &compress(utils::CompressionFormat format = utils::CompressionFormat::Gzip);
     };
 
     /**
@@ -216,8 +235,29 @@ namespace wavex::client {
      * to Http1Response and Http2Response for 100% backward compatibility.
      */
     class ClientResponse final : public base::Response {
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        std::string status_text_{};
+        std::string body_{};
+        std::string raw_buffer_{}; ///< Stores full HTTP/1.1 wire bytes for raw_response()
+        std::vector<std::pair<std::string, std::string> > headers_storage_{};
+        unsigned int status_code_{0};
+        HttpVersion version_{HttpVersion::Auto};
+
     public:
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
         ClientResponse() = default;
+
+        ~ClientResponse() = default;
+
+        ClientResponse(const ClientResponse &) = default;
+
+        ClientResponse &operator=(const ClientResponse &) = default;
+
+        ClientResponse(ClientResponse &&) noexcept = default;
+
+        ClientResponse &operator=(ClientResponse &&) noexcept = default;
+
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
 
         // Internal setters used by HttpClient engine
         ClientResponse &status_code(const unsigned int code) noexcept {
@@ -259,7 +299,7 @@ namespace wavex::client {
 
         [[nodiscard]] std::optional<std::string_view> header(const std::string_view name) const noexcept {
             for (const auto &[k, v]: headers_storage_) {
-                if (k.size() == name.size()) {
+                if (k.size() == name.size()) [[unlikely]] {
                     bool match = true;
                     for (size_t i = 0; i < k.size(); ++i) {
                         if (std::tolower(static_cast<unsigned char>(k[i])) !=
@@ -268,7 +308,7 @@ namespace wavex::client {
                             break;
                         }
                     }
-                    if (match) return v;
+                    if (match) [[likely]] return v;
                 }
             }
             return std::nullopt;
@@ -295,13 +335,31 @@ namespace wavex::client {
             return raw_buffer_;
         }
 
-        [[nodiscard]] nlohmann::json json() const {
-            return nlohmann::json::parse(body_);
+        [[nodiscard]] nlohmann::json json() const;
+
+        /**
+         * @brief Decompresses response body using Content-Encoding header or fallback format.
+         * @param format Default compression algorithm if Content-Encoding is unspecified.
+         */
+        [[nodiscard]] std::optional<std::string> decompressed_body(
+            utils::CompressionFormat format = utils::CompressionFormat::Gzip) const;
+
+        /**
+         * @brief Saves response body to a file on disk.
+         * @param dest_path Target file path.
+         * @return True if written successfully, false otherwise.
+         */
+        [[nodiscard]] bool save_to_file(const std::string &dest_path) const;
+
+        template<typename PathLike>
+            requires (!std::is_convertible_v<PathLike, const std::string &>)
+        bool save_to_file(const PathLike &dest_path) const {
+            return save_to_file(utils::fs_utils::to_u8_path_string(dest_path));
         }
 
         // Implicit conversions for backward compatibility
-        operator wavex::protos::http::Http1Response() const {
-            wavex::protos::http::Http1Response res;
+        explicit operator wavex::protos::http::Http1Response() const {
+            Http1Response res;
             res.status(status_code_);
             for (const auto &[k, v]: headers_storage_) {
                 res.set(k, v);
@@ -310,8 +368,8 @@ namespace wavex::client {
             return res;
         }
 
-        operator wavex::protos::http::Http2Response() const {
-            wavex::protos::http::Http2Response res;
+        explicit operator wavex::protos::http::Http2Response() const {
+            Http2Response res;
             res.status(status_code_);
             for (const auto &[k, v]: headers_storage_) {
                 res.set(k, v);
@@ -319,14 +377,6 @@ namespace wavex::client {
             res.send(body_);
             return res;
         }
-
-    private:
-        unsigned int status_code_{0};
-        std::string status_text_;
-        std::string body_;
-        std::string raw_buffer_;          ///< Stores full HTTP/1.1 wire bytes for raw_response()
-        std::vector<std::pair<std::string, std::string> > headers_storage_;
-        HttpVersion version_{HttpVersion::Auto};
     };
 
     /**
@@ -349,29 +399,29 @@ namespace wavex::client {
         /**
          * @brief Backward-compatible send overload for Http1Request.
          */
-        static asio::awaitable<Http1Response> send(Http1Request req, const ClientOptions &options = {}) {
-            ClientRequest creq(req);
-            ClientResponse c_res = co_await send(creq, options);
+        static asio::awaitable<Http1Response> send(const Http1Request req, const ClientOptions &options = {}) {
+            const ClientRequest c_req(req);
+            const ClientResponse c_res = co_await send(c_req, options);
             co_return static_cast<Http1Response>(c_res);
         }
 
         /**
          * @brief Send overload for Http2Request.
          */
-        static asio::awaitable<Http2Response> send(Http2Request req, const ClientOptions &options = {}) {
-            ClientRequest creq(req);
+        static asio::awaitable<Http2Response> send(const Http2Request req, const ClientOptions &options = {}) {
+            const ClientRequest c_req(req);
             ClientOptions opts = options;
             if (opts.version == HttpVersion::Auto) {
                 opts.version = HttpVersion::Http2;
             }
-            ClientResponse c_res = co_await send(creq, opts);
+            const ClientResponse c_res = co_await send(c_req, opts);
             co_return static_cast<Http2Response>(c_res);
         }
 
         // ─── GET ─────────────────────────────────────────────────────────────
         template<typename ResponseType = ClientResponse>
         static asio::awaitable<ResponseType> get(const std::string_view url, const ClientOptions &options = {}) {
-            ClientRequest req(method::GET, url);
+            const ClientRequest req(method::GET, url);
             ClientResponse c_res = co_await send(req, options);
             if constexpr (std::is_same_v<ResponseType, ClientResponse>) {
                 co_return c_res;
@@ -410,7 +460,7 @@ namespace wavex::client {
 
 
         template<typename ResponseType = ClientResponse, typename JsonBody>
-        requires (std::is_same_v<std::remove_cvref_t<JsonBody>, nlohmann::json>)
+            requires (std::is_same_v<std::remove_cvref_t<JsonBody>, nlohmann::json>)
         static asio::awaitable<ResponseType> post(const std::string_view url, JsonBody &&json_body,
                                                   const ClientOptions &options = {}) {
             ClientRequest req(method::POST, url);
@@ -440,7 +490,7 @@ namespace wavex::client {
 
 
         template<typename ResponseType = ClientResponse, typename JsonBody>
-        requires (std::is_same_v<std::remove_cvref_t<JsonBody>, nlohmann::json>)
+            requires (std::is_same_v<std::remove_cvref_t<JsonBody>, nlohmann::json>)
         static asio::awaitable<ResponseType> put(const std::string_view url, JsonBody &&json_body,
                                                  const ClientOptions &options = {}) {
             ClientRequest req(method::PUT, url);
@@ -456,7 +506,7 @@ namespace wavex::client {
         // ─── DELETE ──────────────────────────────────────────────────────────
         template<typename ResponseType = ClientResponse>
         static asio::awaitable<ResponseType> del(const std::string_view url, const ClientOptions &options = {}) {
-            ClientRequest req(method::DELETE, url);
+            const ClientRequest req(method::DELETE, url);
             ClientResponse c_res = co_await send(req, options);
             if constexpr (std::is_same_v<ResponseType, ClientResponse>) {
                 co_return c_res;

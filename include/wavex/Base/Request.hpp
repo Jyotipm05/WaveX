@@ -11,14 +11,27 @@
  * Provides base abstractions for HTTP/WS request parsing and state management.
  * Protocol-specific implementations (HttpRequest, etc.) derive from this cleanly:
  * `class HttpRequest final : public base::Request`.
+ *
+ * Memory model:
+ *   `params` and `query` are backed by FlatMap<std::string_view, std::string_view>.
+ *   All string_view keys and values point into the connection stream buffer or the
+ *   request arena — they are valid for the lifetime of the current request only.
+ *
+ * string_view safety contract:
+ *   - Safe (ephemeral, in-turn use): Passing a view to a filter, validator, format
+ *     conversion, or a DB query executed within the same coroutine turn.
+ *   - Unsafe (escaping use): Capturing a view into spawn_blocking, a global cache,
+ *     or a struct that outlives the request. Convert to std::string at that boundary:
+ *       std::string(req.param("id"))
  */
 
 #pragma once
 
-#include <string>
+#include <memory_resource>
 #include <string_view>
-#include <unordered_map>
 #include <utility>
+
+#include <wavex/Base/FlatMap.hpp>
 
 namespace wavex::base {
     /**
@@ -29,10 +42,48 @@ namespace wavex::base {
      * `class HttpRequest final : public base::Request`.
      */
     class Request {
+    public:
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
+        /// Pointer to the PMR memory resource (e.g. RequestArena or default resource).
+        /// Guaranteed non-null: defaults to std::pmr::get_default_resource().
+        std::pmr::memory_resource *arena_mr_{std::pmr::get_default_resource()};
+
+        /// Path parameters populated by the router (e.g. :id -> "123")
+        /// Keys and values are string_view slices into the request stream buffer.
+        FlatMap<std::string_view, std::string_view> params;
+
+        /// Query string parameters (e.g. ?key=val -> {"key": "val"})
+        /// Keys and values are string_view slices into arena-backed decoded strings.
+        FlatMap<std::string_view, std::string_view> query;
+
     protected:
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        Request() = default;
+
+        explicit Request(std::pmr::memory_resource *mr) noexcept
+            : arena_mr_(mr ? mr : std::pmr::get_default_resource()) {}
+
         ~Request() = default;
 
+        Request(const Request &) = default;
+        Request &operator=(const Request &) = default;
+        Request(Request &&) noexcept = default;
+        Request &operator=(Request &&) noexcept = default;
+
+        Request(const Request &other, std::pmr::memory_resource *mr) noexcept
+            : arena_mr_(mr ? mr : std::pmr::get_default_resource()),
+              params(other.params),
+              query(other.query) {}
+
+        Request(Request &&other, std::pmr::memory_resource *mr) noexcept
+            : arena_mr_(mr ? mr : std::pmr::get_default_resource()),
+              params(std::move(other.params)),
+              query(std::move(other.query)) {}
+
     public:
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
+        /// Access the request arena memory resource (guaranteed non-null)
+        [[nodiscard]] std::pmr::memory_resource *arena() const noexcept { return arena_mr_; }
         /// The request path/target, e.g. "/user/123"
         template<typename Self>
         [[nodiscard]] decltype(auto) path(this Self &&self) {
@@ -51,10 +102,42 @@ namespace wavex::base {
             return std::forward<Self>(self).body_impl();
         }
 
-        /// Path parameters populated by the router (e.g. :id -> "123")
-        std::unordered_map<std::string, std::string> params;
+        /// Check if request payload is multipart/form-data
+        template<typename Self>
+        [[nodiscard]] decltype(auto) is_multipart(this Self &&self) {
+            if constexpr (requires { std::forward<Self>(self).is_multipart_impl(); }) {
+                return std::forward<Self>(self).is_multipart_impl();
+            } else {
+                return false;
+            }
+        }
 
-        /// Query string parameters (e.g. ?key=val -> {"key": "val"})
-        std::unordered_map<std::string, std::string> query;
+        /**
+         * @brief Zero-copy path parameter accessor.
+         *
+         * Returns a string_view into the request stream buffer or arena.
+         * Valid only for the duration of the current request coroutine turn.
+         * For escaping use, convert: std::string(req.param("id"))
+         *
+         * @param name  Parameter name as registered in the route (e.g. "id" for :id).
+         * @return      View of the matched parameter value, or empty view if absent.
+         */
+        [[nodiscard]] std::string_view param(const std::string_view name) const noexcept {
+            return params.get(name);
+        }
+
+        /**
+         * @brief Zero-copy query string parameter accessor.
+         *
+         * Returns a string_view into the request stream buffer or arena.
+         * Valid only for the duration of the current request coroutine turn.
+         * For escaping use, convert: std::string(req.query_param("page"))
+         *
+         * @param name  Query parameter key (e.g. "page" for ?page=2).
+         * @return      View of the decoded query value, or empty view if absent.
+         */
+        [[nodiscard]] std::string_view query_param(const std::string_view name) const noexcept {
+            return query.get(name);
+        }
     };
 } // namespace wavex::base

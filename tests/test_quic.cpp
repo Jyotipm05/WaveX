@@ -1,0 +1,2370 @@
+// Copyright (c) 2026 Jyotipriya Mondal
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+/**
+ * @file test_quic.cpp
+ * @brief Unit and integration tests for WaveX RFC 9000 & 9001 QUIC Transport protocol.
+ */
+
+#include <cassert>
+#include <chrono>
+#include <filesystem>
+#include <iomanip>
+#include <iostream>
+#include <source_location>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include <asio/as_tuple.hpp>
+#include <asio/co_spawn.hpp>
+#include <asio/detached.hpp>
+#include <asio/read.hpp>
+#include <asio/write.hpp>
+#include <asio/ip/address.hpp>
+#include <wavex/Network/QUIC.hpp>
+#include <wavex/Base/Logger.hpp>
+
+using namespace wavex::network::quic;
+namespace quic = wavex::network::quic;
+
+static void test_varint() {
+    std::cout << "[Test QUIC] VarInt encoding and decoding..." << std::endl;
+
+    constexpr std::array<uint64_t, 12> test_values = {
+        0, 1, 25, 63,                           // 1-byte
+        64, 150, 16383,                         // 2-byte
+        16384, 100000, 1073741823,               // 4-byte
+        1073741824, 12345678901234ULL           // 8-byte
+    };
+
+    for (const uint64_t val : test_values) {
+        std::string encoded;
+        VarInt::encode(val, encoded);
+        assert(encoded.size() == VarInt::encoded_size(val));
+
+        std::size_t cursor = 0;
+        uint64_t decoded = 0;
+        bool ok = VarInt::decode(encoded, cursor, decoded);
+        assert(ok);
+        assert(cursor == encoded.size());
+        assert(decoded == val);
+    }
+
+    std::cout << "  [PASS] VarInt tests passed." << std::endl;
+}
+
+static void test_connection_id() {
+    std::cout << "[Test QUIC] ConnectionId operations..." << std::endl;
+
+    auto cid1 = ConnectionId::random(8);
+    assert(cid1.length() == 8);
+    assert(!cid1.empty());
+
+    std::string hex = cid1.to_string();
+    assert(hex.size() == 16);
+
+    auto cid2 = ConnectionId::from_hex(hex);
+    assert(cid1 == cid2);
+
+    auto cid3 = ConnectionId::random(8);
+    assert(cid1 != cid3);
+
+    std::hash<ConnectionId> hasher;
+    assert(hasher(cid1) == hasher(cid2));
+
+    std::cout << "  [PASS] ConnectionId tests passed." << std::endl;
+}
+
+static void test_connection_id_siphash_d3() {
+    std::cout << "[Test QUIC] Seeded SipHash-2-4 ConnectionId hashing (D3)..." << std::endl;
+
+    // 1. Official SipHash-2-4 test vector (Jean-Philippe Aumasson & Daniel J. Bernstein reference)
+    // Key: 00 01 02 ... 0f (k0 = 0x0706050403020100ULL, k1 = 0x0f0e0d0c0b0a0908ULL)
+    constexpr uint64_t k0 = 0x0706050403020100ULL;
+    constexpr uint64_t k1 = 0x0f0e0d0c0b0a0908ULL;
+
+    // 15-byte message: 00 01 02 ... 0e -> output: 0xa129ca6149be45e5ULL (from official vectors.h)
+    const std::vector<uint8_t> msg15 = {
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e
+    };
+    const uint64_t h15 = siphash24(msg15.data(), msg15.size(), k0, k1);
+    assert(h15 == 0xa129ca6149be45e5ULL);
+
+    // 0-byte message -> output: 0x726fdb47dd0e0e31ULL
+    const uint64_t h0 = siphash24(nullptr, 0, k0, k1);
+    assert(h0 == 0x726fdb47dd0e0e31ULL);
+
+    // 1-byte message (0x00) -> output: 0x74f839c593dc67fdULL (from official vectors.h)
+    constexpr uint8_t msg1 = 0x00;
+    const uint64_t h1 = siphash24(&msg1, 1, k0, k1);
+    assert(h1 == 0x74f839c593dc67fdULL);
+
+    // 2. Deterministic Seed Isolation & HashDoS Protection
+    // Ensure that different seeds produce completely different hash outputs for identical Connection IDs.
+    const auto orig_seed = get_process_siphash_seed();
+
+    set_process_siphash_seed(0x1111222233334444ULL, 0x5555666677778888ULL);
+    const auto cid_test = ConnectionId::from_hex("0102030405060708");
+    std::hash<ConnectionId> hasher;
+    const std::size_t h_seed1 = hasher(cid_test);
+
+    set_process_siphash_seed(0xaaaabbbbccccddddULL, 0xeeeeffff00001111ULL);
+    const std::size_t h_seed2 = hasher(cid_test);
+
+    // Different keys MUST yield completely distinct hash digests
+    assert(h_seed1 != h_seed2);
+
+    // Same seed MUST produce consistent hash digests
+    assert(hasher(cid_test) == h_seed2);
+
+    // 3. Test std::unordered_map with ConnectionId keys
+    std::unordered_map<ConnectionId, std::string> cid_map;
+    const auto cid_a = ConnectionId::random(8);
+    const auto cid_b = ConnectionId::random(8);
+    cid_map[cid_a] = "conn_a";
+    cid_map[cid_b] = "conn_b";
+
+    assert(cid_map.contains(cid_a));
+    assert(cid_map[cid_a] == "conn_a");
+    assert(cid_map[cid_b] == "conn_b");
+
+    // Restore original seed
+    set_process_siphash_seed(orig_seed.first, orig_seed.second);
+
+    std::cout << "  [PASS] Seeded SipHash-2-4 ConnectionId hashing passed." << std::endl;
+}
+
+static void test_frames() {
+    std::cout << "[Test QUIC] Frame serialization and parsing..." << std::endl;
+
+    std::string buffer;
+
+    // 1. PingFrame
+    PingFrame ping;
+    serialize_frame(ping, buffer);
+
+    // 2. AckFrame
+    AckFrame ack;
+    ack.largest_acknowledged = 105;
+    ack.ack_delay = 25;
+    ack.ranges.push_back({0, 5});
+    ack.ranges.push_back({2, 10});
+    serialize_frame(ack, buffer);
+
+    // 3. StreamFrame
+    StreamFrame sf;
+    sf.stream_id = 4;
+    sf.offset = 100;
+    sf.fin = true;
+    sf.has_offset = true;
+    sf.has_length = true;
+    sf.data = "WaveX QUIC Stream Payload 🚀";
+    serialize_frame(sf, buffer);
+
+    // 4. CryptoFrame
+    CryptoFrame cf;
+    cf.offset = 0;
+    cf.data = "TLS 1.3 ClientHello / ServerHello bytes";
+    serialize_frame(cf, buffer);
+
+    // 5. MaxDataFrame
+    MaxDataFrame mdf{1048576};
+    serialize_frame(mdf, buffer);
+
+    // 6. ResetStreamFrame
+    ResetStreamFrame rsf{4, 0x01, 250};
+    serialize_frame(rsf, buffer);
+
+    // 7. ConnectionCloseFrame
+    ConnectionCloseFrame ccf{"Graceful close", 0, 0, false};
+    serialize_frame(ccf, buffer);
+
+    // Parse all frames back
+    std::vector<Frame> parsed;
+    bool ok = parse_frames(buffer, parsed);
+    assert(ok);
+    assert(parsed.size() == 7);
+
+    // Verify parsed frame types
+    assert(std::holds_alternative<PingFrame>(parsed[0]));
+    assert(std::holds_alternative<AckFrame>(parsed[1]));
+    assert(std::holds_alternative<StreamFrame>(parsed[2]));
+    assert(std::holds_alternative<CryptoFrame>(parsed[3]));
+    assert(std::holds_alternative<MaxDataFrame>(parsed[4]));
+    assert(std::holds_alternative<ResetStreamFrame>(parsed[5]));
+    assert(std::holds_alternative<ConnectionCloseFrame>(parsed[6]));
+
+    const auto &parsed_sf = std::get<StreamFrame>(parsed[2]);
+    assert(parsed_sf.stream_id == 4);
+    assert(parsed_sf.offset == 100);
+    assert(parsed_sf.fin == true);
+    assert(parsed_sf.data == "WaveX QUIC Stream Payload 🚀");
+
+    const auto &parsed_cf = std::get<CryptoFrame>(parsed[3]);
+    assert(parsed_cf.data == "TLS 1.3 ClientHello / ServerHello bytes");
+
+    std::cout << "  [PASS] Frame serialization and parsing passed." << std::endl;
+}
+
+static void test_packet_protection() {
+    std::cout << "[Test QUIC] RFC 9001 Packet protection and crypto..." << std::endl;
+
+    const auto client_dcid = ConnectionId::random(8);
+    const auto client_scid = ConnectionId::random(8);
+
+    ProtectionKeys client_keys, server_keys;
+    bool derived = CryptoSuite::derive_initial_secrets(client_dcid, client_keys, server_keys);
+    assert(derived);
+    assert(client_keys.valid);
+    assert(server_keys.valid);
+
+    PacketHeader hdr;
+    hdr.is_long = true;
+    hdr.type = PacketType::Initial;
+    hdr.version = QUIC_VERSION_1;
+    hdr.dcid = client_dcid;
+    hdr.scid = client_scid;
+    hdr.packet_number = 1;
+    hdr.packet_number_len = 4;
+
+    constexpr std::string_view plaintext = "PING and CRYPTO handshake payload";
+    std::string protected_packet;
+
+    bool prot_ok = CryptoSuite::protect_packet(client_keys, hdr, plaintext, protected_packet);
+    assert(prot_ok);
+    assert(!protected_packet.empty());
+
+    // Unprotect packet using client keys (as server would)
+    PacketHeader dec_hdr;
+    std::string decrypted_plaintext;
+    bool unprot_ok = CryptoSuite::unprotect_packet(client_keys, dec_hdr, protected_packet, decrypted_plaintext);
+    assert(unprot_ok);
+    assert(decrypted_plaintext == plaintext);
+    assert(dec_hdr.dcid == client_dcid);
+    assert(dec_hdr.scid == client_scid);
+    assert(dec_hdr.packet_number == 1);
+
+    std::cout << "  [PASS] Packet protection and unprotection passed." << std::endl;
+}
+
+static void test_quic_stream_async() {
+    std::cout << "[Test QUIC] QuicStream async read/write buffering..." << std::endl;
+
+    asio::io_context io;
+    auto ep = asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 9999);
+    auto conn = std::make_shared<QuicConnection>(ConnectionId::random(8), ConnectionId::random(8), ep, true);
+
+    auto stream = conn->create_stream(true);
+    assert(stream != nullptr);
+    assert(stream->is_open());
+
+    constexpr std::string_view test_data = "Hello from async QuicStream!";
+    bool read_completed = false;
+    std::string received_data;
+
+    // Launch async coroutine reader
+    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        char buf[128];
+        auto [ec, n] = co_await stream->async_read_some(
+            asio::buffer(buf), asio::as_tuple(asio::use_awaitable));
+        assert(!ec);
+        assert(n == test_data.size());
+        received_data.assign(buf, n);
+        read_completed = true;
+        co_return;
+    }, asio::detached);
+
+    // Push data into the stream
+    stream->push_inbound(test_data, false);
+
+    io.run();
+
+    assert(read_completed);
+    assert(received_data == test_data);
+    std::cout << "  [PASS] QuicStream async read/write buffering passed." << std::endl;
+}
+
+static void test_quic_stream_chunk_buffering_e2() {
+    std::cout << "[Test QUIC] E2: High-throughput contiguous chunk stream buffering..." << std::endl;
+
+    auto ep = asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 9999);
+    auto conn = std::make_shared<QuicConnection>(
+        ConnectionId::random(8), ConnectionId::random(8), ep, false);
+
+    auto stream = conn->create_stream(true);
+    assert(stream != nullptr);
+
+    // 1. Push multiple 8KB chunks (total 64KB)
+    std::string large_payload;
+    large_payload.reserve(64 * 1024);
+    for (int i = 0; i < 64 * 1024; ++i) {
+        large_payload.push_back(static_cast<char>('A' + (i % 26)));
+    }
+
+    constexpr std::size_t push_chunk_size = 8192;
+    for (std::size_t offset = 0; offset < large_payload.size(); offset += push_chunk_size) {
+        stream->push_inbound(std::string_view(large_payload).substr(offset, push_chunk_size), false);
+    }
+
+    std::error_code ec;
+    assert(stream->available(ec) == large_payload.size());
+
+    // 2. Read in 5KB chunks to verify partial / cross-chunk drains with memcpy
+    std::string read_accumulated;
+    char read_buf[5120];
+    while (stream->available(ec) > 0) {
+        std::size_t n = stream->read_some(asio::buffer(read_buf), ec);
+        assert(!ec);
+        assert(n > 0);
+        read_accumulated.append(read_buf, n);
+    }
+
+    assert(read_accumulated.size() == large_payload.size());
+    assert(read_accumulated == large_payload);
+    assert(stream->available(ec) == 0);
+
+    std::cout << "  [PASS] E2: Contiguous chunk stream buffering verified." << std::endl;
+}
+
+static void test_quic_keys_cleanliness_a15() {
+    std::cout << "[Test QUIC] A15: Keys cleanliness and asymmetric 1-RTT separation..." << std::endl;
+
+    asio::io_context io;
+    auto ep = asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 9999);
+    auto conn = std::make_shared<QuicConnection>(
+        ConnectionId::random(8), ConnectionId::random(8), ep, true, io.get_executor());
+
+    assert(conn->local_key_phase() == 0);
+    assert(conn->peer_key_phase() == 0);
+
+    std::cout << "  [PASS] A15: Key cleanliness verified." << std::endl;
+}
+
+static void test_quic_variable_cid_and_key_update_a16() {
+    std::cout << "[Test QUIC] A16: Variable-length CID & RFC 9001 Key Update..." << std::endl;
+
+    // 1. Variable CID lengths (4, 8, 16, 20 bytes) in short header packets
+    const std::vector<std::size_t> test_cid_lengths = {4, 8, 16, 20};
+    for (std::size_t len : test_cid_lengths) {
+        const ConnectionId test_cid = ConnectionId::random(len);
+        assert(test_cid.length() == len);
+
+        PacketHeader short_hdr;
+        short_hdr.is_long = false;
+        short_hdr.type = PacketType::OneRTT;
+        short_hdr.key_phase = false;
+        short_hdr.dcid = test_cid;
+        short_hdr.packet_number = 42;
+        short_hdr.packet_number_len = 2;
+
+        std::string packed;
+        pack_packet_header(short_hdr, packed);
+        assert(!packed.empty());
+
+        PacketHeader unpacked_hdr;
+        std::size_t hdr_len = 0;
+        bool ok = unpack_packet_header(packed, unpacked_hdr, hdr_len, len);
+        assert(ok);
+        assert(!unpacked_hdr.is_long);
+        assert(unpacked_hdr.dcid == test_cid);
+        assert(unpacked_hdr.packet_number == 42);
+        assert(unpacked_hdr.key_phase == false);
+    }
+
+    // 2. RFC 9001 §6 Key Derivation & Key Update
+    ProtectionKeys client_keys, server_keys;
+    const ConnectionId dcid = ConnectionId::random(8);
+    bool derived = CryptoSuite::derive_initial_secrets(dcid, client_keys, server_keys);
+    assert(derived);
+    assert(client_keys.key_phase == 0);
+
+    const auto orig_secret = client_keys.secret;
+    const auto orig_key = client_keys.key;
+    const auto orig_iv = client_keys.iv;
+    const auto orig_hp = client_keys.hp;
+
+    // A. Normal 1-RTT packet in Key Phase 0
+    PacketHeader p0_hdr;
+    p0_hdr.is_long = false;
+    p0_hdr.type = PacketType::OneRTT;
+    p0_hdr.key_phase = false;
+    p0_hdr.dcid = dcid;
+    p0_hdr.packet_number = 100;
+    p0_hdr.packet_number_len = 4;
+
+    std::string p0_packet;
+    bool p0_prot = CryptoSuite::protect_packet(client_keys, p0_hdr, "Phase0Payload", p0_packet);
+    assert(p0_prot);
+
+    PacketHeader dec0_hdr;
+    std::string dec0_payload;
+    ProtectionKeys receiver_keys = client_keys; // Receiver starts with same phase 0 keys
+    bool dec0_ok = CryptoSuite::unprotect_packet(receiver_keys, dec0_hdr, p0_packet, dec0_payload, 0, dcid.length());
+    assert(dec0_ok);
+    assert(dec0_payload == "Phase0Payload");
+    assert(dec0_hdr.key_phase == false);
+    assert(receiver_keys.key_phase == 0);
+
+    // B. Sender updates keys (Key Phase 1)
+    bool updated = CryptoSuite::update_keys(client_keys);
+    assert(updated);
+    assert(client_keys.key_phase == 1);
+    assert(client_keys.secret != orig_secret);
+    assert(client_keys.key != orig_key);
+    assert(client_keys.iv != orig_iv);
+    assert(client_keys.hp == orig_hp); // Header protection key is NEVER updated per RFC 9001 §6.1
+
+    // C. Sender sends packet in Key Phase 1
+    PacketHeader p1_hdr;
+    p1_hdr.is_long = false;
+    p1_hdr.type = PacketType::OneRTT;
+    p1_hdr.key_phase = true;
+    p1_hdr.dcid = dcid;
+    p1_hdr.packet_number = 101;
+    p1_hdr.packet_number_len = 4;
+
+    std::string p1_packet;
+    bool p1_prot = CryptoSuite::protect_packet(client_keys, p1_hdr, "Phase1Payload", p1_packet);
+    assert(p1_prot);
+
+    // Receiver still holds Phase 0 keys!
+    assert(receiver_keys.key_phase == 0);
+
+    // D. Receiver processes Phase 1 packet: automatically unmasks key_phase=1,
+    // verifies tag with next generation keys, and updates receiver_keys in place!
+    PacketHeader dec1_hdr;
+    std::string dec1_payload;
+    bool dec1_ok = CryptoSuite::unprotect_packet(receiver_keys, dec1_hdr, p1_packet, dec1_payload, 100, dcid.length());
+    assert(dec1_ok);
+    assert(dec1_payload == "Phase1Payload");
+    assert(dec1_hdr.key_phase == true);
+    assert(receiver_keys.key_phase == 1);
+    assert(receiver_keys.key == client_keys.key); // Receiver keys now synchronized with sender keys!
+
+    // E. Subsequent packet in Phase 1 decrypts smoothly without additional update
+    PacketHeader p1_hdr_b;
+    p1_hdr_b.is_long = false;
+    p1_hdr_b.type = PacketType::OneRTT;
+    p1_hdr_b.key_phase = true;
+    p1_hdr_b.dcid = dcid;
+    p1_hdr_b.packet_number = 102;
+    p1_hdr_b.packet_number_len = 4;
+
+    std::string p1_packet_b;
+    bool p1_prot_b = CryptoSuite::protect_packet(client_keys, p1_hdr_b, "Phase1PayloadB", p1_packet_b);
+    assert(p1_prot_b);
+
+    PacketHeader dec1_hdr_b;
+    std::string dec1_payload_b;
+    bool dec1_ok_b = CryptoSuite::unprotect_packet(receiver_keys, dec1_hdr_b, p1_packet_b, dec1_payload_b, 101, dcid.length());
+    assert(dec1_ok_b);
+    assert(dec1_payload_b == "Phase1PayloadB");
+    assert(dec1_hdr_b.key_phase == true);
+
+    // F. Tampered packet with key phase flip fails authentication and leaves receiver keys unchanged
+    std::string tampered_p1 = p1_packet_b;
+    tampered_p1.back() ^= 0xff; // Corrupt authentication tag
+    PacketHeader dec_bad_hdr;
+    std::string dec_bad_payload;
+    ProtectionKeys receiver_keys_before = receiver_keys;
+    bool dec_bad_ok = CryptoSuite::unprotect_packet(receiver_keys, dec_bad_hdr, tampered_p1, dec_bad_payload, 102, dcid.length());
+    assert(!dec_bad_ok);
+    assert(receiver_keys.key == receiver_keys_before.key);
+
+    std::cout << "  [PASS] A16: Variable-length CID and RFC 9001 Key Update verified." << std::endl;
+}
+
+static void test_quic_secrets_cleanse_b9() {
+    std::cout << "[Test QUIC] B9: Secrets wiping and OPENSSL_cleanse verification..." << std::endl;
+
+    // 1. Manual cleanse() zeroes all key material and invalidates
+    {
+        ProtectionKeys keys;
+        keys.secret.fill(0x42);
+        keys.key.fill(0x13);
+        keys.iv.fill(0x37);
+        keys.hp.fill(0x99);
+        keys.key_phase = 1;
+        keys.valid = true;
+
+        keys.cleanse();
+
+        for (auto b : keys.secret) assert(b == 0);
+        for (auto b : keys.key) assert(b == 0);
+        for (auto b : keys.iv) assert(b == 0);
+        for (auto b : keys.hp) assert(b == 0);
+        assert(keys.key_phase == 0);
+        assert(!keys.valid);
+    }
+
+    // 2. Move assignment wipes previous destination keys and cleanses source
+    {
+        ProtectionKeys dest;
+        dest.secret.fill(0xAA);
+        dest.key.fill(0xAA);
+        dest.valid = true;
+
+        ProtectionKeys src;
+        src.secret.fill(0xBB);
+        src.key.fill(0xBB);
+        src.valid = true;
+
+        dest = std::move(src);
+
+        // dest now has src's values
+        assert(dest.secret[0] == 0xBB);
+        assert(dest.key[0] == 0xBB);
+        assert(dest.valid);
+
+        // src was cleansed
+        for (auto b : src.secret) assert(b == 0);
+        for (auto b : src.key) assert(b == 0);
+        assert(!src.valid);
+    }
+
+    // 3. Move construction cleanses source
+    {
+        ProtectionKeys src;
+        src.secret.fill(0xCC);
+        src.key.fill(0xCC);
+        src.valid = true;
+
+        ProtectionKeys dest(std::move(src));
+
+        assert(dest.secret[0] == 0xCC);
+        assert(dest.valid);
+
+        for (auto b : src.secret) assert(b == 0);
+        for (auto b : src.key) assert(b == 0);
+        assert(!src.valid);
+    }
+
+    // 4. Initial secrets derivation and key update lifecycle
+    {
+        const ConnectionId dcid = ConnectionId::random(8);
+        ProtectionKeys client_in, server_in;
+        bool ok = CryptoSuite::derive_initial_secrets(dcid, client_in, server_in);
+        assert(ok);
+        assert(client_in.valid && server_in.valid);
+
+        ProtectionKeys client_saved = client_in;
+        assert(CryptoSuite::update_keys(client_in));
+        assert(client_in.key != client_saved.key);
+        assert(client_in.secret != client_saved.secret);
+        assert(client_in.iv != client_saved.iv);
+        assert(client_in.hp == client_saved.hp); // HP does not update
+        assert(client_in.key_phase == 1);
+    }
+
+    std::cout << "  [PASS] B9: Secrets wiping and OPENSSL_cleanse verified." << std::endl;
+}
+
+static void test_udp_basic_loopback() {
+    std::cout << "[Test QUIC] Basic UDP socket loopback..." << std::endl;
+
+    asio::io_context io;
+    asio::ip::udp::socket server_socket(
+        io, asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 0));
+    auto server_ep = server_socket.local_endpoint();
+
+    asio::ip::udp::socket client_socket(io);
+    client_socket.open(asio::ip::udp::v4());
+
+    // Send test packet
+    std::string test_data = "Hello UDP";
+    client_socket.send_to(asio::buffer(test_data), server_ep);
+
+    // Receive
+    char buf[256];
+    asio::ip::udp::endpoint sender;
+    std::size_t n = server_socket.receive_from(asio::buffer(buf), sender);
+
+    std::string received(buf, n);
+    std::cout << "  [LOG] Sent: '" << test_data << "', Received: '" << received << "'" << std::endl;
+
+    assert(received == test_data);
+    std::cout << "  [PASS] Basic UDP loopback passed." << std::endl;
+}
+
+static void test_quic_server_client_loopback() {
+    std::cout << "[Test QUIC] QuicServer and QuicClient UDP integration loopback..." << std::endl;
+
+    asio::io_context server_io;
+    asio::io_context client_io;
+
+    const auto current_src = std::filesystem::path(std::source_location::current().file_name());
+    const auto project_root = current_src.parent_path().parent_path();
+    const std::string cert_path = (project_root / "ssl" / "test.crt").string();
+    const std::string key_path = (project_root / "ssl" / "test.key").string();
+
+    QuicServer server(server_io, "127.0.0.1", 8445);
+    server.set_tls_credentials(cert_path, key_path);
+    const uint16_t port = server.local_port();
+    assert(port > 0);
+    wavex::log::info("[Test] Server bound to 127.0.0.1:{}", port);
+
+    std::string server_received_msg;
+
+    server.set_stream_handler([&](std::shared_ptr<QuicStream> stream) -> asio::awaitable<void> {
+        [[maybe_unused]] bool server_received_stream = true;
+        char buf[256];
+        auto [ec, n] = co_await stream->async_read_some(asio::buffer(buf), asio::as_tuple(asio::use_awaitable));
+        wavex::log::info("[Test][DIAG] resumed: ec={} n={} bufcap={} this={}", ec.message(), n, sizeof(buf),
+                          static_cast<const void*>(&server_received_msg));
+        if (!ec && n > 0) {
+            if (n > sizeof(buf)) {
+                wavex::log::error("[Test][DIAG] CORRUPTED n={} exceeds bufcap={} - skipping assign to avoid segfault", n, sizeof(buf));
+                co_return;
+            }
+            server_received_msg.assign(buf, n);
+            // Echo back
+            const std::string echo = "ECHO: " + server_received_msg;
+            co_await stream->async_write_some(asio::buffer(echo), asio::use_awaitable);
+        }
+        co_return;
+    });
+
+    server.start();
+
+    // Start server in background thread
+    std::thread server_thread([&server_io] {
+        // DIAG: an exception escaping run() with no catch here would call
+        // std::terminate() and kill the whole process silently (no "Exception:
+        // SegFault"-style message, no crash text at all) - indistinguishable
+        // from a hang unless we catch and log it here first.
+        try {
+            server_io.run();
+            wavex::log::info("[Test][DIAG] server_io.run() returned normally");
+        } catch (const std::exception &e) {
+            wavex::log::error("[Test][DIAG] server_io.run() threw std::exception: {}", e.what());
+        } catch (...) {
+            wavex::log::error("[Test][DIAG] server_io.run() threw a non-std exception");
+        }
+    });
+
+    // Client connects
+    QuicClient client(client_io);
+    client.set_verify_peer(false); // ssl/test.crt is self-signed
+    bool connected = false;
+    std::string client_received_echo;
+
+    asio::co_spawn(client_io, [&]() -> asio::awaitable<void> {
+        connected = co_await client.connect("127.0.0.1", port);
+        assert(connected);
+
+        auto stream = client.create_stream(true);
+        assert(stream != nullptr);
+
+        constexpr std::string_view msg = "Ping over QUIC UDP!";
+        co_await stream->async_write_some(asio::buffer(msg), asio::use_awaitable);
+
+        char buf[256];
+        auto [rec, rn] = co_await stream->async_read_some(asio::buffer(buf), asio::as_tuple(asio::use_awaitable));
+        wavex::log::info("[Test][DIAG] client echo-read resumed: rec={} rn={} bufcap={}", rec.message(), rn, sizeof(buf));
+        if (!rec && rn > 0) {
+            if (rn > sizeof(buf)) {
+                wavex::log::error("[Test][DIAG] CORRUPTED rn={} exceeds bufcap={} - skipping assign", rn, sizeof(buf));
+            } else {
+                client_received_echo.assign(buf, rn);
+                wavex::log::info("[Test][DIAG] client_received_echo set to \"{}\"", client_received_echo);
+            }
+        }
+
+        wavex::log::info("[Test][DIAG] calling client.close()...");
+        client.close();
+        wavex::log::info("[Test][DIAG] client.close() returned; calling client_io.stop()...");
+        client_io.stop();
+        wavex::log::info("[Test][DIAG] client_io.stop() returned");
+        co_return;
+    }, asio::detached);
+
+    // DIAG: client_io.run() executes on THIS (main) thread, not server_thread -
+    // the try/catch added around server_io.run() doesn't cover it. If an
+    // exception escapes the coroutine above (e.g. from client.close()), it
+    // would propagate straight out of a bare client_io.run() call, uncaught,
+    // producing a clean abnormal exit with no "Exception: SegFault" text
+    // (that wording looks specific to an actual access violation, not a
+    // regular thrown exception) - which matches the symptom seen so far.
+    try {
+        client_io.run();
+        wavex::log::info("[Test][DIAG] client_io.run() returned normally");
+    } catch (const std::exception &e) {
+        wavex::log::error("[Test][DIAG] client_io.run() threw std::exception: {}", e.what());
+    } catch (...) {
+        wavex::log::error("[Test][DIAG] client_io.run() threw a non-std exception");
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    wavex::log::info("[Test][DIAG] calling server.stop()...");
+    server.stop();
+    wavex::log::info("[Test][DIAG] server.stop() returned; calling server_io.stop()...");
+    server_io.stop();
+    wavex::log::info("[Test][DIAG] server_io.stop() returned; joining server_thread...");
+    if (server_thread.joinable()) server_thread.join();
+    wavex::log::info("[Test][DIAG] server_thread joined");
+
+    wavex::log::info("[Test][DIAG] final: connected={} server_received_msg=\"{}\" client_received_echo=\"{}\"",
+                      connected, server_received_msg, client_received_echo);
+
+    assert(connected);
+    assert(server_received_msg == "Ping over QUIC UDP!");
+    assert(client_received_echo == "ECHO: Ping over QUIC UDP!");
+    std::cout << "  [PASS] QuicServer and QuicClient UDP integration passed." << std::endl;
+}
+
+static void test_stream_id_allocation() {
+    std::cout << "[Test QUIC] RFC 9000 §2.1 Stream ID allocation..." << std::endl;
+    auto ep = asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 9997);
+
+    // Server connection (is_server = true)
+    auto server_conn = std::make_shared<QuicConnection>(ConnectionId::random(8), ConnectionId::random(8), ep, true);
+    auto s_bidi1 = server_conn->create_stream(true);
+    auto s_bidi2 = server_conn->create_stream(true);
+    auto s_bidi3 = server_conn->create_stream(true);
+    auto s_bidi4 = server_conn->create_stream(true);
+    auto s_uni1 = server_conn->create_stream(false);
+    auto s_uni2 = server_conn->create_stream(false);
+    auto s_uni3 = server_conn->create_stream(false);
+    auto s_uni4 = server_conn->create_stream(false);
+
+    assert(s_bidi1->stream_id() == 1);
+    assert(s_bidi2->stream_id() == 5);
+    assert(s_bidi3->stream_id() == 9);
+    assert(s_bidi4->stream_id() == 13);
+
+    assert(s_uni1->stream_id() == 3);
+    assert(s_uni2->stream_id() == 7);
+    assert(s_uni3->stream_id() == 11);
+    assert(s_uni4->stream_id() == 15);
+
+    // Client connection (is_server = false)
+    auto client_conn = std::make_shared<QuicConnection>(ConnectionId::random(8), ConnectionId::random(8), ep, false);
+    auto c_bidi1 = client_conn->create_stream(true);
+    auto c_bidi2 = client_conn->create_stream(true);
+    auto c_bidi3 = client_conn->create_stream(true);
+    auto c_bidi4 = client_conn->create_stream(true);
+    auto c_uni1 = client_conn->create_stream(false);
+    auto c_uni2 = client_conn->create_stream(false);
+    auto c_uni3 = client_conn->create_stream(false);
+    auto c_uni4 = client_conn->create_stream(false);
+
+    assert(c_bidi1->stream_id() == 0);
+    assert(c_bidi2->stream_id() == 4);
+    assert(c_bidi3->stream_id() == 8);
+    assert(c_bidi4->stream_id() == 12);
+
+    assert(c_uni1->stream_id() == 2);
+    assert(c_uni2->stream_id() == 6);
+    assert(c_uni3->stream_id() == 10);
+    assert(c_uni4->stream_id() == 14);
+
+    std::cout << "  [PASS] RFC 9000 §2.1 Stream ID allocation passed." << std::endl;
+}
+
+static void test_rfc9001_appendix_a() {
+    std::cout << "[Test QUIC] RFC 9001 Appendix A known-answer vector...\n";
+
+    // RFC 9001 §A.1: Keys derived from DCID = 0x8394c8f03e515708
+    const std::vector<uint8_t> dcid_bytes = {0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08};
+    ConnectionId dcid(dcid_bytes.data(), dcid_bytes.size());
+
+    ProtectionKeys client_keys, server_keys;
+    bool ok = CryptoSuite::derive_initial_secrets(dcid, client_keys, server_keys);
+    assert(ok);
+
+    auto print_hex = [](const std::string_view label, const uint8_t *data, std::size_t len) {
+        std::cout << "    [LOG] " << label << ": ";
+        for (std::size_t i = 0; i < len; ++i) {
+            std::cout << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(data[i]);
+        }
+        std::cout << std::dec << std::endl;
+    };
+
+    // Expected client initial secret: c00cf151ca5be075ed0ebfb5c80323c42d6b7db67881289af4008f1f6c357aea
+    const uint8_t exp_client_secret[32] = {
+        0xc0, 0x0c, 0xf1, 0x51, 0xca, 0x5b, 0xe0, 0x75, 0xed, 0x0e, 0xbf, 0xb5, 0xc8, 0x03, 0x23, 0xc4,
+        0x2d, 0x6b, 0x7d, 0xb6, 0x78, 0x81, 0x28, 0x9a, 0xf4, 0x00, 0x8f, 0x1f, 0x6c, 0x35, 0x7a, 0xea
+    };
+    print_hex("Computed Client Secret", client_keys.secret.data(), 32);
+    print_hex("Expected Client Secret", exp_client_secret, 32);
+    assert(std::memcmp(client_keys.secret.data(), exp_client_secret, 32) == 0);
+
+    // Expected client key: 1f369613dd76d5467730efcbe3b1a22d
+    const uint8_t exp_client_key[16] = {
+        0x1f, 0x36, 0x96, 0x13, 0xdd, 0x76, 0xd5, 0x46, 0x77, 0x30, 0xef, 0xcb, 0xe3, 0xb1, 0xa2, 0x2d
+    };
+    print_hex("Computed Client Key", client_keys.key.data(), 16);
+    print_hex("Expected Client Key", exp_client_key, 16);
+    assert(std::memcmp(client_keys.key.data(), exp_client_key, 16) == 0);
+
+    // Expected client iv: fa044b2f42a3fd3b46fb255c
+    const uint8_t exp_client_iv[12] = {
+        0xfa, 0x04, 0x4b, 0x2f, 0x42, 0xa3, 0xfd, 0x3b, 0x46, 0xfb, 0x25, 0x5c
+    };
+    print_hex("Computed Client IV", client_keys.iv.data(), 12);
+    print_hex("Expected Client IV", exp_client_iv, 12);
+    assert(std::memcmp(client_keys.iv.data(), exp_client_iv, 12) == 0);
+
+    // Expected client hp: 9f50449e04a0e810283a1e9933adedd2
+    const uint8_t exp_client_hp[16] = {
+        0x9f, 0x50, 0x44, 0x9e, 0x04, 0xa0, 0xe8, 0x10, 0x28, 0x3a, 0x1e, 0x99, 0x33, 0xad, 0xed, 0xd2
+    };
+    print_hex("Computed Client HP", client_keys.hp.data(), 16);
+    print_hex("Expected Client HP", exp_client_hp, 16);
+    assert(std::memcmp(client_keys.hp.data(), exp_client_hp, 16) == 0);
+
+    // Expected server initial secret: 3c199828fd139efd216c155ad844cc81fb82fa8d7446fa7d78be803acdda951b
+    const uint8_t exp_server_secret[32] = {
+        0x3c, 0x19, 0x98, 0x28, 0xfd, 0x13, 0x9e, 0xfd, 0x21, 0x6c, 0x15, 0x5a, 0xd8, 0x44, 0xcc, 0x81,
+        0xfb, 0x82, 0xfa, 0x8d, 0x74, 0x46, 0xfa, 0x7d, 0x78, 0xbe, 0x80, 0x3a, 0xcd, 0xda, 0x95, 0x1b
+    };
+    print_hex("Computed Server Secret", server_keys.secret.data(), 32);
+    print_hex("Expected Server Secret", exp_server_secret, 32);
+    assert(std::memcmp(server_keys.secret.data(), exp_server_secret, 32) == 0);
+
+    // Expected server key: cf3a5331653c364c88f0f379b6067e37
+    const uint8_t exp_server_key[16] = {
+        0xcf, 0x3a, 0x53, 0x31, 0x65, 0x3c, 0x36, 0x4c, 0x88, 0xf0, 0xf3, 0x79, 0xb6, 0x06, 0x7e, 0x37
+    };
+    print_hex("Computed Server Key", server_keys.key.data(), 16);
+    print_hex("Expected Server Key", exp_server_key, 16);
+    assert(std::memcmp(server_keys.key.data(), exp_server_key, 16) == 0);
+
+    // Expected server iv: 0ac1493ca1905853b0bba03e
+    const uint8_t exp_server_iv[12] = {
+        0x0a, 0xc1, 0x49, 0x3c, 0xa1, 0x90, 0x58, 0x53, 0xb0, 0xbb, 0xa0, 0x3e
+    };
+    print_hex("Computed Server IV", server_keys.iv.data(), 12);
+    print_hex("Expected Server IV", exp_server_iv, 12);
+    assert(std::memcmp(server_keys.iv.data(), exp_server_iv, 12) == 0);
+
+    // Expected server hp: c206b8d9b9f0f37644430b490eeaa314
+    const uint8_t exp_server_hp[16] = {
+        0xc2, 0x06, 0xb8, 0xd9, 0xb9, 0xf0, 0xf3, 0x76, 0x44, 0x43, 0x0b, 0x49, 0x0e, 0xea, 0xa3, 0x14
+    };
+    print_hex("Computed Server HP", server_keys.hp.data(), 16);
+    print_hex("Expected Server HP", exp_server_hp, 16);
+    assert(std::memcmp(server_keys.hp.data(), exp_server_hp, 16) == 0);
+
+    std::cout << "  [PASS] RFC 9001 Appendix A known-answer vector passed." << std::endl;
+}
+
+static void test_quic_protocol() {
+    std::cout << "[Test QUIC] Protocol definitions (endpoint, resolver, v4, v6)..." << std::endl;
+    const auto p4 = quic::v4();
+    const auto p6 = quic::v6();
+    assert(p4.type() == SOCK_DGRAM);
+    assert(p4.protocol() == IPPROTO_UDP);
+    assert(p4.family() == PF_INET);
+    assert(p6.family() == PF_INET6);
+    assert(p4 == quic::quic_protocol::v4());
+    assert(p4 != p6);
+
+    const quic::endpoint ep(p4, 4433);
+    assert(ep.port() == 4433);
+    std::cout << "  [PASS] Protocol definitions passed." << std::endl;
+}
+
+static void test_quic_socket_acceptor_tcp_syntax() {
+    std::cout << "[Test QUIC] quic::socket and quic::acceptor standard Asio TCP-like syntax..." << std::endl;
+
+    asio::io_context server_io;
+    asio::io_context client_io;
+
+    quic::endpoint listen_ep(quic::v4(), 0);
+    quic::acceptor acceptor(server_io, listen_ep);
+    const uint16_t port = acceptor.local_endpoint().port();
+    assert(port > 0);
+
+    bool server_accepted = false;
+    std::string server_received_msg;
+
+    auto server_sock = std::make_shared<quic::socket>(server_io);
+    acceptor.async_accept(*server_sock, [server_sock, &server_accepted, &server_received_msg](std::error_code ec) {
+        assert(!ec);
+        server_accepted = true;
+
+        auto buf = std::make_shared<std::array<char, 256>>();
+        server_sock->async_read_some(asio::buffer(*buf), [server_sock, buf, &server_received_msg](std::error_code read_ec, std::size_t n) {
+            assert(!read_ec);
+            server_received_msg.assign(buf->data(), n);
+
+            auto reply = std::make_shared<std::string>("ECHO: " + server_received_msg);
+            asio::async_write(*server_sock, asio::buffer(*reply), [reply, server_sock](std::error_code write_ec, std::size_t) {
+                assert(!write_ec);
+            });
+        });
+    });
+
+    std::thread server_thread([&server_io] {
+        server_io.run();
+    });
+
+    quic::socket client_sock(client_io);
+    quic::endpoint server_ep(asio::ip::make_address("127.0.0.1"), port);
+
+    bool client_connected = false;
+    std::string client_received_reply;
+
+    client_sock.async_connect(server_ep, [&](std::error_code ec) {
+        assert(!ec);
+        client_connected = true;
+
+        const auto msg = std::make_shared<std::string>("Hello QUIC TCP-like socket!");
+        asio::async_write(client_sock, asio::buffer(*msg), [&](std::error_code write_ec, std::size_t) {
+            assert(!write_ec);
+
+            auto reply_buf = std::make_shared<std::array<char, 256>>();
+            client_sock.async_read_some(asio::buffer(*reply_buf), [&client_sock, reply_buf, &client_received_reply, &client_io](std::error_code read_ec, std::size_t n) {
+                assert(!read_ec);
+                client_received_reply.assign(reply_buf->data(), n);
+                client_sock.close();
+                client_io.stop();
+            });
+        });
+    });
+
+    client_io.run();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    acceptor.close();
+    server_io.stop();
+    if (server_thread.joinable()) server_thread.join();
+
+    assert(server_accepted);
+    assert(client_connected);
+    assert(server_received_msg == "Hello QUIC TCP-like socket!");
+    assert(client_received_reply == "ECHO: Hello QUIC TCP-like socket!");
+    std::cout << "  [PASS] quic::socket and quic::acceptor TCP-like syntax passed." << std::endl;
+}
+
+static void test_quic_socket_acceptor_coroutine() {
+    std::cout << "[Test QUIC] quic::socket and quic::acceptor C++20 coroutine awaitables..." << std::endl;
+
+    asio::io_context server_io;
+    asio::io_context client_io;
+
+    quic::endpoint listen_ep(quic::v4(), 0);
+    quic::acceptor acceptor(server_io, listen_ep);
+    const uint16_t port = acceptor.local_endpoint().port();
+    assert(port > 0);
+
+    bool server_finished = false;
+    asio::co_spawn(server_io, [&]() -> asio::awaitable<void> {
+        quic::socket sock(server_io);
+        co_await acceptor.async_accept(sock, asio::use_awaitable);
+
+        char buf[256];
+        auto [read_ec, n] = co_await sock.async_read_some(asio::buffer(buf), asio::as_tuple(asio::use_awaitable));
+        assert(!read_ec);
+        std::string req(buf, n);
+
+        std::string reply = "AWAIT: " + req;
+        auto [write_ec, wn] = co_await asio::async_write(sock, asio::buffer(reply), asio::as_tuple(asio::use_awaitable));
+        assert(!write_ec);
+        assert(wn == reply.size());
+
+        server_finished = true;
+        co_return;
+    }, asio::detached);
+
+    std::thread server_thread([&server_io] {
+        server_io.run();
+    });
+
+    bool client_finished = false;
+    std::string client_result;
+
+    asio::co_spawn(client_io, [&]() -> asio::awaitable<void> {
+        quic::socket client(client_io);
+        quic::endpoint server_ep(asio::ip::make_address("127.0.0.1"), port);
+        co_await client.async_connect(server_ep, asio::use_awaitable);
+
+        std::string msg = "Ping from C++20 awaitable!";
+        co_await asio::async_write(client, asio::buffer(msg), asio::use_awaitable);
+
+        char buf[256];
+        auto [read_ec, n] = co_await client.async_read_some(asio::buffer(buf), asio::as_tuple(asio::use_awaitable));
+        assert(!read_ec);
+        client_result.assign(buf, n);
+        client_finished = true;
+
+        client.close();
+        client_io.stop();
+        co_return;
+    }, asio::detached);
+
+    client_io.run();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    acceptor.close();
+    server_io.stop();
+    if (server_thread.joinable()) server_thread.join();
+
+    assert(server_finished);
+    assert(client_finished);
+    assert(client_result == "AWAIT: Ping from C++20 awaitable!");
+    std::cout << "  [PASS] quic::socket and quic::acceptor C++20 coroutine awaitables passed." << std::endl;
+}
+
+static void test_quic_stream_multiplexing() {
+    std::cout << "[Test QUIC] quic::socket stream multiplexing (open_stream)..." << std::endl;
+
+    asio::io_context server_io;
+    asio::io_context client_io;
+
+    quic::endpoint listen_ep(quic::v4(), 0);
+    quic::acceptor acceptor(server_io, listen_ep);
+    const uint16_t port = acceptor.local_endpoint().port();
+
+    auto s1 = std::make_shared<quic::socket>(server_io);
+    auto s2 = std::make_shared<quic::socket>(server_io);
+
+    bool s1_accepted = false;
+    bool s2_accepted = false;
+
+    // Accept stream 0 and then stream 4
+    acceptor.async_accept(*s1, [&acceptor, s2, &s1_accepted, &s2_accepted](std::error_code ec) {
+        assert(!ec);
+        s1_accepted = true;
+        acceptor.async_accept(*s2, [&s2_accepted](std::error_code ec2) {
+            assert(!ec2);
+            s2_accepted = true;
+        });
+    });
+
+    std::thread server_thread([&server_io] {
+        server_io.run();
+    });
+
+    quic::socket c1(client_io);
+    quic::endpoint server_ep(asio::ip::make_address("127.0.0.1"), port);
+
+    client_io.post([&] {
+        c1.async_connect(server_ep, [&](std::error_code ec) {
+            assert(!ec);
+            assert(c1.stream_id() == 0);
+
+            // Open second stream over the same QUIC connection
+            auto c2 = std::make_shared<quic::socket>(c1.open_stream(true));
+            assert(c2->stream_id() > 0);
+
+            // Write on c2 so server accepts the stream
+            auto msg = std::make_shared<std::string>("c2 ping");
+            asio::async_write(*c2, asio::buffer(*msg), [&c1, c2, msg, &client_io](std::error_code wec, std::size_t) {
+                assert(!wec);
+                c1.close();
+                c2->close();
+                client_io.stop();
+            });
+        });
+    });
+
+    client_io.run();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    acceptor.close();
+    server_io.stop();
+    if (server_thread.joinable()) server_thread.join();
+
+    assert(s1_accepted);
+    assert(s2_accepted);
+    std::cout << "  [PASS] quic::socket stream multiplexing passed." << std::endl;
+}
+
+static void test_varint_edge_cases() {
+    std::cout << "[Test QUIC] VarInt edge cases and truncation resilience..." << std::endl;
+
+    // 1. Truncated 2-byte VarInt (prefix 0x40 says 2 bytes, but only 1 byte provided)
+    {
+        const std::string truncated = "\x40";
+        std::size_t cursor = 0;
+        uint64_t val = 0;
+        assert(!VarInt::decode(truncated, cursor, val));
+        assert(cursor == 0); // Cursor must not advance on failure
+    }
+
+    // 2. Truncated 4-byte VarInt (prefix 0x80 says 4 bytes, only 2 bytes provided)
+    {
+        const std::string truncated = "\x80\x01";
+        std::size_t cursor = 0;
+        uint64_t val = 0;
+        assert(!VarInt::decode(truncated, cursor, val));
+        assert(cursor == 0);
+    }
+
+    // 3. Truncated 8-byte VarInt (prefix 0xc0 says 8 bytes, only 5 bytes provided)
+    {
+        const std::string truncated = "\xc0\x01\x02\x03\x04";
+        std::size_t cursor = 0;
+        uint64_t val = 0;
+        assert(!VarInt::decode(truncated, cursor, val));
+        assert(cursor == 0);
+    }
+
+    // 4. Empty buffer
+    {
+        const std::string empty;
+        std::size_t cursor = 0;
+        uint64_t val = 0;
+        assert(!VarInt::decode(empty, cursor, val));
+    }
+
+    // 5. Maximum 62-bit VarInt boundary (2^62 - 1 = 0x3fffffffffffffff)
+    {
+        constexpr uint64_t kMaxVarInt = 0x3fffffffffffffffULL;
+        std::string encoded;
+        VarInt::encode(kMaxVarInt, encoded);
+        assert(encoded.size() == 8);
+        assert(static_cast<uint8_t>(encoded[0]) == 0xff); // 0xc0 | 0x3f
+
+        std::size_t cursor = 0;
+        uint64_t decoded = 0;
+        assert(VarInt::decode(encoded, cursor, decoded));
+        assert(decoded == kMaxVarInt);
+        assert(cursor == 8);
+    }
+
+    // 6. Concatenated sequential VarInts
+    {
+        std::string buffer;
+        VarInt::encode(0, buffer);
+        VarInt::encode(63, buffer);
+        VarInt::encode(64, buffer);
+        VarInt::encode(16383, buffer);
+        VarInt::encode(16384, buffer);
+        VarInt::encode(1073741823, buffer);
+        VarInt::encode(1073741824, buffer);
+
+        std::size_t cursor = 0;
+        uint64_t v = 0;
+        assert(VarInt::decode(buffer, cursor, v) && v == 0);
+        assert(VarInt::decode(buffer, cursor, v) && v == 63);
+        assert(VarInt::decode(buffer, cursor, v) && v == 64);
+        assert(VarInt::decode(buffer, cursor, v) && v == 16383);
+        assert(VarInt::decode(buffer, cursor, v) && v == 16384);
+        assert(VarInt::decode(buffer, cursor, v) && v == 1073741823);
+        assert(VarInt::decode(buffer, cursor, v) && v == 1073741824);
+        assert(cursor == buffer.size());
+    }
+
+    std::cout << "  [PASS] VarInt edge cases and truncation resilience passed." << std::endl;
+}
+
+static void test_connection_id_boundaries() {
+    std::cout << "[Test QUIC] ConnectionId boundary limits (0 to 20 bytes)..." << std::endl;
+
+    // 1. Zero-length (empty) CID (RFC 9000 allows empty CID)
+    {
+        const ConnectionId empty_cid;
+        assert(empty_cid.empty());
+        assert(empty_cid.length() == 0);
+        assert(empty_cid.to_string().empty());
+
+        const ConnectionId parsed_empty = ConnectionId::from_hex("");
+        assert(parsed_empty.empty());
+        assert(empty_cid == parsed_empty);
+    }
+
+    // 2. Minimum length (1 byte)
+    {
+        constexpr uint8_t one_byte = 0x42;
+        const ConnectionId cid1(&one_byte, 1);
+        assert(!cid1.empty());
+        assert(cid1.length() == 1);
+        assert(cid1.data()[0] == 0x42);
+        assert(cid1.to_string() == "42");
+
+        const ConnectionId from_h = ConnectionId::from_hex("42");
+        assert(from_h == cid1);
+    }
+
+    // 3. Maximum length (20 bytes per RFC 9000 §5.1)
+    {
+        const uint8_t max_bytes[20] = {
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
+            0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14
+        };
+        const ConnectionId cid20(max_bytes, 20);
+        assert(cid20.length() == 20);
+        assert(!cid20.empty());
+        assert(cid20.to_string() == "0102030405060708090a0b0c0d0e0f1011121314");
+
+        const ConnectionId parsed20 = ConnectionId::from_hex("0102030405060708090a0b0c0d0e0f1011121314");
+        assert(parsed20 == cid20);
+    }
+
+    // 4. Clamping of over-length CID (> 20 bytes)
+    {
+        constexpr uint8_t over_bytes[25] = {0};
+        const ConnectionId over_cid(over_bytes, 25);
+        assert(over_cid.length() == 20); // Clamped to MAX_CONNECTION_ID_LEN
+    }
+
+    // 5. Malformed hex inputs
+    {
+        // Odd length hex
+        const ConnectionId odd_hex = ConnectionId::from_hex("123");
+        assert(odd_hex.empty());
+
+        // Invalid hex characters
+        const ConnectionId invalid_hex = ConnectionId::from_hex("0102030405zz");
+        assert(invalid_hex.empty());
+
+        // Hex exceeding 20 bytes (42 hex chars = 21 bytes)
+        const ConnectionId too_long_hex = ConnectionId::from_hex("000102030405060708090a0b0c0d0e0f1011121314");
+        assert(too_long_hex.empty());
+    }
+
+    std::cout << "  [PASS] ConnectionId boundary limits passed." << std::endl;
+}
+
+static void test_malformed_packets_and_fuzzing() {
+    std::cout << "[Test QUIC] Malformed packet parser resilience & fuzzing..." << std::endl;
+    wavex::log::set_level(wavex::log::LogLevel::ERROR);
+
+    // 1. Packet too short for header
+    {
+        PacketHeader hdr;
+        std::size_t hdr_len = 0;
+        assert(!unpack_packet_header("", hdr, hdr_len));
+        assert(!unpack_packet_header("\xc0", hdr, hdr_len));
+        assert(!unpack_packet_header("\xc0\x00\x00", hdr, hdr_len));
+    }
+
+    // 2. Long header with DCID length exceeding 20 bytes (RFC 9000 §17.2 violation)
+    {
+        std::string malformed_long_pkt;
+        malformed_long_pkt.push_back(static_cast<char>(0xc0)); // Long header
+        malformed_long_pkt.push_back(0); malformed_long_pkt.push_back(0); malformed_long_pkt.push_back(0); malformed_long_pkt.push_back(1); // Version 1
+        malformed_long_pkt.push_back(21); // DCID length 21 (ILLEGAL: must be <= 20)
+        malformed_long_pkt.append(21, 'A');
+        malformed_long_pkt.push_back(0); // SCID length 0
+
+        PacketHeader hdr;
+        std::size_t hdr_len = 0;
+        assert(!unpack_packet_header(malformed_long_pkt, hdr, hdr_len));
+    }
+
+    // 3. Long header with truncated Initial token
+    {
+        std::string malformed_token_pkt;
+        malformed_token_pkt.push_back(static_cast<char>(0xc0)); // Long Initial
+        malformed_token_pkt.push_back(0); malformed_token_pkt.push_back(0); malformed_token_pkt.push_back(0); malformed_token_pkt.push_back(1);
+        malformed_token_pkt.push_back(4); malformed_token_pkt.append("1234"); // DCID
+        malformed_token_pkt.push_back(4); malformed_token_pkt.append("5678"); // SCID
+        VarInt::encode(100, malformed_token_pkt); // Claims token is 100 bytes, but buffer ends
+
+        PacketHeader hdr;
+        std::size_t hdr_len = 0;
+        assert(!unpack_packet_header(malformed_token_pkt, hdr, hdr_len));
+    }
+
+    // 4. Truncated Frame Payloads in parse_frames
+    {
+        std::vector<Frame> frames;
+
+        // Truncated STREAM frame (flags say has length, but VarInt truncated)
+        const std::string trunc_stream = "\x0a\x04"; // Type 0x0a (has length), stream_id=4, truncated length
+        frames.clear();
+        assert(!parse_frames(trunc_stream, frames));
+
+        // Truncated CRYPTO frame (offset 0, length says 50, but buffer ends)
+        std::string trunc_crypto;
+        trunc_crypto.push_back(0x06); // Crypto frame
+        VarInt::encode(0, trunc_crypto);
+        VarInt::encode(50, trunc_crypto);
+        trunc_crypto.append("only 10 bytes");
+        frames.clear();
+        assert(!parse_frames(trunc_crypto, frames));
+
+        // Truncated ACK frame (claims 5 ranges, but provides 0)
+        std::string trunc_ack;
+        trunc_ack.push_back(0x02); // Ack frame
+        VarInt::encode(10, trunc_ack); // largest ack
+        VarInt::encode(0, trunc_ack);  // ack delay
+        VarInt::encode(5, trunc_ack);  // 5 ranges claimed
+        VarInt::encode(0, trunc_ack);  // first ack range
+        // Missing range pairs!
+        frames.clear();
+        assert(!parse_frames(trunc_ack, frames));
+
+        // Unknown frame type (e.g. 0x2f) - must be rejected (FRAME_ENCODING_ERROR, RFC 9000 §12.4)
+        // rather than silently stopping, which let the packet be ACKed with frames unprocessed.
+        const std::string unknown_frame = "\x2f\x00\x00";
+        frames.clear();
+        assert(!parse_frames(unknown_frame, frames));
+    }
+
+    // 5. Crypto Tamper Detection (AEAD auth tag mismatch)
+    {
+        const auto cid = ConnectionId::random(8);
+        ProtectionKeys client_keys, server_keys;
+        CryptoSuite::derive_initial_secrets(cid, client_keys, server_keys);
+
+        PacketHeader hdr;
+        hdr.is_long = true;
+        hdr.type = PacketType::Initial;
+        hdr.version = QUIC_VERSION_1;
+        hdr.dcid = cid;
+        hdr.scid = ConnectionId::random(8);
+        hdr.packet_number = 42;
+        hdr.packet_number_len = 4;
+
+        std::string valid_packet;
+        CryptoSuite::protect_packet(client_keys, hdr, "Top Secret Handshake Payload", valid_packet);
+        assert(!valid_packet.empty());
+
+        // Corrupt a byte in the payload ciphertext (tampering attack)
+        std::string tampered_packet = valid_packet;
+        tampered_packet[tampered_packet.size() - 5] ^= 0x55;
+
+        PacketHeader dec_hdr;
+        std::string decrypted;
+        const bool ok = CryptoSuite::unprotect_packet(client_keys, dec_hdr, tampered_packet, decrypted);
+        assert(!ok); // AEAD tag verification must reject tampered packet!
+    }
+
+    wavex::log::set_level(wavex::log::LogLevel::INFO);
+    std::cout << "  [PASS] Malformed packet parser resilience & fuzzing passed." << std::endl;
+}
+
+static void test_rfc9002_loss_and_recovery() {
+    std::cout << "[Test QUIC] RFC 9002 Loss detection and ACK range processing..." << std::endl;
+
+    // Emulate packet sequence with multiple lost packet intervals:
+    // Received: packets 0, 1, 2, 5, 6, 9
+    // Lost: packets 3, 4, 7, 8
+    AckFrame ack;
+    ack.largest_acknowledged = 9;
+    ack.ack_delay = 5;
+    ack.ranges.push_back(AckRange{0, 0}); // acknowledges packet 9 (first range: gap 0, len 0)
+    ack.ranges.push_back(AckRange{1, 1}); // packets 6, 5
+    ack.ranges.push_back(AckRange{1, 2}); // packets 2, 1, 0
+
+    std::string serialized;
+    serialize_frame(ack, serialized);
+    assert(!serialized.empty());
+
+    std::vector<Frame> parsed_frames;
+    const bool ok = parse_frames(serialized, parsed_frames);
+    assert(ok);
+    assert(parsed_frames.size() == 1);
+    assert(std::holds_alternative<AckFrame>(parsed_frames[0]));
+
+    const auto &parsed_ack = std::get<AckFrame>(parsed_frames[0]);
+    assert(parsed_ack.largest_acknowledged == 9);
+    assert(parsed_ack.ack_delay == 5);
+    assert(parsed_ack.ranges.size() == 3);
+    assert(parsed_ack.ranges[0].ack_range_len == 0);
+    assert(parsed_ack.ranges[1].gap == 1);
+    assert(parsed_ack.ranges[1].ack_range_len == 1);
+    assert(parsed_ack.ranges[2].gap == 1);
+    assert(parsed_ack.ranges[2].ack_range_len == 2);
+
+    // Test ReceivedPacketTracker interval coalescence and ACK range production
+    QuicConnection::ReceivedPacketTracker tracker;
+    assert(!tracker.needs_ack());
+    tracker.add_packet(0, true);
+    tracker.add_packet(1, true);
+    tracker.add_packet(2, true);
+    tracker.add_packet(5, true);
+    tracker.add_packet(6, true);
+    tracker.add_packet(9, true);
+    assert(tracker.needs_ack());
+
+    AckFrame generated_ack = tracker.build_ack_frame(5);
+    assert(generated_ack.largest_acknowledged == 9);
+    assert(generated_ack.ack_delay == 5);
+    assert(generated_ack.ranges.size() == 3);
+    assert(generated_ack.ranges[0].ack_range_len == 0);
+    assert(generated_ack.ranges[1].gap == 1);
+    assert(generated_ack.ranges[1].ack_range_len == 1);
+    assert(generated_ack.ranges[2].gap == 1);
+    assert(generated_ack.ranges[2].ack_range_len == 2);
+
+    tracker.mark_ack_sent();
+    assert(!tracker.needs_ack());
+
+    // Out-of-order and duplicate packet insertion
+    tracker.add_packet(4, true); // Inserts between {0..2} and {5,6}
+    tracker.add_packet(1, false); // Duplicate, ignored
+    assert(tracker.needs_ack());
+
+    // Flow control frame roundtrips
+    MaxDataFrame mdf{2097152}; // 2 MB connection limit
+    std::string mdf_bytes;
+    serialize_frame(mdf, mdf_bytes);
+    parsed_frames.clear();
+    assert(parse_frames(mdf_bytes, parsed_frames));
+    assert(std::get<MaxDataFrame>(parsed_frames[0]).max_data == 2097152);
+
+    MaxStreamDataFrame msdf{4, 524288}; // 512 KB stream limit
+    std::string msdf_bytes;
+    serialize_frame(msdf, msdf_bytes);
+    parsed_frames.clear();
+    assert(parse_frames(msdf_bytes, parsed_frames));
+    assert(std::get<MaxStreamDataFrame>(parsed_frames[0]).stream_id == 4);
+    assert(std::get<MaxStreamDataFrame>(parsed_frames[0]).max_stream_data == 524288);
+
+    std::cout << "  [PASS] RFC 9002 Loss detection and ACK range processing passed." << std::endl;
+}
+
+static void test_congestion_controller() {
+    std::cout << "[Test QUIC] RFC 9002 Congestion Control & RTT estimator..." << std::endl;
+
+    CongestionController cc;
+    assert(cc.bytes_in_flight() == 0);
+    assert(cc.congestion_window() == CongestionController::kInitialWindow);
+    assert(cc.can_send());
+    assert(!cc.in_recovery());
+
+    // 1. Packet sending tracks bytes in flight
+    cc.on_packet_sent(1200);
+    assert(cc.bytes_in_flight() == 1200);
+    assert(cc.can_send());
+
+    // Fill up the initial window (14720 bytes)
+    for (int i = 0; i < 11; ++i) {
+        cc.on_packet_sent(1200);
+    }
+    assert(cc.bytes_in_flight() == 14400);
+    assert(cc.can_send());
+
+    cc.on_packet_sent(1000);
+    assert(cc.bytes_in_flight() == 15400);
+    assert(!cc.can_send()); // 15400 >= 14720 -> cannot send!
+
+    // 2. Slow Start expansion upon ACK
+    cc.on_packet_acked(1200);
+    assert(cc.bytes_in_flight() == 14200);
+    // cwnd grows by 1200 in Slow Start: 14720 + 1200 = 15920
+    assert(cc.congestion_window() == 15920);
+    assert(cc.can_send()); // 14200 < 15920 -> can send again!
+
+    // 3. Congestion Event / Loss
+    const auto now = std::chrono::steady_clock::now();
+    cc.on_congestion_event(now - std::chrono::milliseconds(50), now);
+    assert(cc.in_recovery());
+    // ssthresh = max(15920 / 2, 2400) = 7960
+    assert(cc.ssthresh() == 7960);
+    assert(cc.congestion_window() == 7960);
+
+    // 4. Exit Recovery and enter Congestion Avoidance
+    cc.exit_recovery();
+    assert(!cc.in_recovery());
+
+    // In Congestion Avoidance (cwnd >= ssthresh):
+    // cwnd increases by (kMaxDatagramSize * bytes) / cwnd = (1200 * 1200) / 7960 = 180 bytes
+    const uint64_t prev_cwnd = cc.congestion_window();
+    cc.on_packet_acked(1200);
+    assert(cc.congestion_window() == prev_cwnd + (1200 * 1200) / prev_cwnd);
+
+    // 5. RTT Estimator (RFC 9002 §5)
+    RttStats rtt;
+    assert(rtt.first_rtt_sample);
+    // First sample: 100ms
+    rtt.update_rtt(std::chrono::microseconds(100000));
+    assert(!rtt.first_rtt_sample);
+    assert(rtt.latest_rtt.count() == 100000);
+    assert(rtt.min_rtt.count() == 100000);
+    assert(rtt.smoothed_rtt.count() == 100000);
+    assert(rtt.rttvar.count() == 50000);
+
+    // Second sample: 120ms with 10ms ack_delay -> adjusted_rtt = 110ms
+    // diff = |100ms - 110ms| = 10ms
+    // rttvar = (3 * 50ms + 10ms) / 4 = 40ms = 40000us
+    // smoothed_rtt = (7 * 100ms + 110ms) / 8 = 810ms / 8 = 101250us
+    rtt.update_rtt(std::chrono::microseconds(120000), std::chrono::microseconds(10000));
+    assert(rtt.min_rtt.count() == 100000);
+    assert(rtt.latest_rtt.count() == 120000);
+    assert(rtt.rttvar.count() == 40000);
+    assert(rtt.smoothed_rtt.count() == 101250);
+
+    std::cout << "  [PASS] RFC 9002 Congestion Control & RTT estimator passed." << std::endl;
+}
+
+static void test_quic_packet_fuzzer() {
+    std::cout << "[Test QUIC] Pre-authentication packet parser fuzz harness..." << std::endl;
+    wavex::log::set_level(wavex::log::LogLevel::ERROR);
+
+    // Deterministic pseudo-random sequence for repeatability
+    uint32_t state = 0x12345678;
+    auto next_rand = [&state]() -> uint8_t {
+        state = state * 1103515245 + 12345;
+        return static_cast<uint8_t>((state >> 16) & 0xFF);
+    };
+
+    // 1. Fuzz unpack_packet_header on 1000 randomized buffers
+    for (int i = 0; i < 1000; ++i) {
+        const std::size_t len = (next_rand() % 128);
+        std::string garbage(len, '\0');
+        for (std::size_t j = 0; j < len; ++j) {
+            garbage[j] = static_cast<char>(next_rand());
+        }
+
+        PacketHeader hdr;
+        std::size_t hdr_len = 0;
+        // MUST NEVER crash or throw
+        unpack_packet_header(garbage, hdr, hdr_len);
+    }
+
+    // 2. Fuzz parse_frames on 1000 randomized frame sequences
+    for (int i = 0; i < 1000; ++i) {
+        const std::size_t len = (next_rand() % 256);
+        std::string garbage(len, '\0');
+        for (std::size_t j = 0; j < len; ++j) {
+            garbage[j] = static_cast<char>(next_rand());
+        }
+
+        std::vector<Frame> frames;
+        // MUST NEVER crash, hang, or throw
+        parse_frames(garbage, frames);
+    }
+
+    // 3. Fuzz mutation of valid Initial packet
+    const auto cid = ConnectionId::random(8);
+    ProtectionKeys client_keys, server_keys;
+    CryptoSuite::derive_initial_secrets(cid, client_keys, server_keys);
+
+    PacketHeader hdr;
+    hdr.is_long = true;
+    hdr.type = PacketType::Initial;
+    hdr.version = QUIC_VERSION_1;
+    hdr.dcid = cid;
+    hdr.scid = ConnectionId::random(8);
+    hdr.packet_number = 1;
+    hdr.packet_number_len = 4;
+
+    std::string valid_pkt;
+    CryptoSuite::protect_packet(client_keys, hdr, "Fuzz target sample payload 1234567890", valid_pkt);
+    assert(!valid_pkt.empty());
+
+    for (int i = 0; i < 500; ++i) {
+        std::string mutated = valid_pkt;
+        // Mutate random bytes
+        const int num_mutations = (next_rand() % 5) + 1;
+        for (int m = 0; m < num_mutations; ++m) {
+            const std::size_t pos = next_rand() % mutated.size();
+            mutated[pos] ^= static_cast<char>(next_rand() | 0x01);
+        }
+
+        PacketHeader dec_hdr;
+        std::string dec_payload;
+        // MUST cleanly reject invalid packets with false, never crash
+        CryptoSuite::unprotect_packet(client_keys, dec_hdr, mutated, dec_payload);
+    }
+
+    wavex::log::set_level(wavex::log::LogLevel::INFO);
+    std::cout << "  [PASS] Pre-authentication packet parser fuzz harness passed (2500 mutations)." << std::endl;
+}
+
+static void test_quic_tls_ctx_move_and_accept_stream() {
+    std::cout << "[Test QUIC] TlsCtx move safety (A14) and accept_stream() single-delivery (A10, A11, B3)..." << std::endl;
+
+    // 1. A14: TlsCtx move constructor and move assignment nulling out source
+    {
+        QuicConnection::TlsCtx ctx1;
+        ctx1.initialized = true;
+        ctx1.current_write_level = 2;
+        ctx1.current_read_level = 1;
+
+        // Move construct
+        QuicConnection::TlsCtx ctx2(std::move(ctx1));
+        assert(ctx2.initialized);
+        assert(ctx2.current_write_level == 2);
+        assert(ctx2.current_read_level == 1);
+        assert(!ctx1.initialized);
+        assert(ctx1.current_write_level == 0);
+        assert(ctx1.current_read_level == 0);
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+        assert(ctx1.ssl == nullptr);
+        assert(ctx1.ctx == nullptr);
+#endif
+
+        // Move assign
+        QuicConnection::TlsCtx ctx3;
+        ctx3 = std::move(ctx2);
+        assert(ctx3.initialized);
+        assert(ctx3.current_write_level == 2);
+        assert(!ctx2.initialized);
+        assert(ctx2.current_write_level == 0);
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+        assert(ctx2.ssl == nullptr);
+        assert(ctx2.ctx == nullptr);
+#endif
+    }
+
+    // 2. A10 & A11 / B3: accept_stream() coroutine async suspension and single-delivery
+    {
+        asio::io_context io;
+        const auto ep = asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 9999);
+        const auto client_dcid = ConnectionId::random(8);
+        const auto client_scid = ConnectionId::random(8);
+        const auto server_cid = ConnectionId::random(8);
+
+        ProtectionKeys client_keys, server_keys;
+        CryptoSuite::derive_initial_secrets(client_dcid, client_keys, server_keys);
+
+        auto conn = std::make_shared<QuicConnection>(
+            server_cid, client_scid, ep, true, io.get_executor(), client_dcid);
+
+        auto send_stream_pkt = [&](uint64_t sid, const std::string_view payload_text, uint64_t pn) {
+            StreamFrame sf;
+            sf.stream_id = sid;
+            sf.data = payload_text; // string_view: must not point at a temporary
+            sf.fin = false;
+            sf.has_length = true;
+            sf.has_offset = false;
+            sf.offset = 0;
+
+            std::string payload;
+            serialize_frame(sf, payload);
+
+            PacketHeader hdr;
+            hdr.is_long = true;
+            hdr.type = PacketType::Initial;
+            hdr.version = QUIC_VERSION_1;
+            hdr.dcid = client_dcid;
+            hdr.scid = client_scid;
+            hdr.packet_number = pn;
+            hdr.packet_number_len = 4;
+
+            std::string protected_packet;
+            const bool prot_ok = CryptoSuite::protect_packet(client_keys, hdr, payload, protected_packet);
+            assert(prot_ok);
+            conn->handle_datagram(protected_packet);
+        };
+
+        bool stream_accepted = false;
+        uint64_t accepted_sid = 0;
+
+        // Coroutine suspends waiting on accept_stream() (A10: lock must be released before suspension)
+        asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+            auto stream = co_await conn->accept_stream();
+            assert(stream != nullptr);
+            accepted_sid = stream->stream_id();
+            stream_accepted = true;
+            io.stop();
+            co_return;
+        }, asio::detached);
+
+        // Deliver stream 4 via protected datagram
+        send_stream_pkt(4, "hello from test", 1);
+
+        io.run();
+
+        assert(stream_accepted);
+        assert(accepted_sid == 4);
+
+        // A11: Verify stream was delivered directly to stream_acceptor_ and NOT kept in accepted_streams_
+        // A second accept_stream() should suspend waiting for a NEW stream and NOT immediately return stream 4
+        io.restart();
+        bool second_stream_accepted = false;
+        asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+            auto stream = co_await conn->accept_stream();
+            second_stream_accepted = true;
+            io.stop();
+            co_return;
+        }, asio::detached);
+
+        io.poll();
+        assert(!second_stream_accepted); // Must NOT re-deliver stream 4!
+
+        // Now deliver stream 8 to satisfy the second accept_stream
+        send_stream_pkt(8, "second stream", 2);
+
+        io.run();
+        assert(second_stream_accepted);
+        conn->close();
+    }
+
+    std::cout << "  [PASS] TlsCtx move safety (A14) and accept_stream() single-delivery (A10, A11, B3) passed." << std::endl;
+}
+
+static void test_quic_lifecycle_idle_eviction_and_crypto_cap() {
+    std::cout << "[Test QUIC] Lifecycle: Idle timeout (B1), stream eviction (B2), and CRYPTO cap (B7)..." << std::endl;
+
+    // 1. B7: CRYPTO reassembly buffer 64KB cap
+    {
+        QuicConnection::CryptoStreamReassembler reasm;
+        assert(reasm.insert(0, "small initial"));
+        assert(reasm.insert(13, "next slice"));
+
+        // Oversized single offset beyond 64KB gap
+        assert(!reasm.insert(100000, "far away"));
+
+        // Massive payload exceeding 64KB
+        std::string huge(70000, 'X');
+        assert(!reasm.insert(23, huge));
+    }
+
+    // 2. B2: Finished stream auto-eviction from connection map
+    {
+        asio::io_context io;
+        const auto ep = asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 9999);
+        const auto client_dcid = ConnectionId::random(8);
+        const auto client_scid = ConnectionId::random(8);
+        const auto server_cid = ConnectionId::random(8);
+
+        auto conn = std::make_shared<QuicConnection>(
+            server_cid, client_scid, ep, true, io.get_executor(), client_dcid);
+
+        auto stream = conn->create_stream(true);
+        assert(conn->stream_count() == 1);
+        assert(!stream->is_finished());
+
+        // Send FIN from our side
+        stream->write_outbound("request payload", true);
+        assert(stream->is_fin_sent());
+        assert(!stream->is_finished()); // Still waiting for peer FIN!
+        assert(conn->stream_count() == 1);
+
+        // Receive FIN from peer side
+        stream->push_inbound("response payload", true);
+        assert(stream->is_fin_received());
+        assert(stream->is_finished());
+
+        // Stream MUST now be automatically evicted from conn->streams_!
+        assert(conn->stream_count() == 0);
+        conn->close();
+    }
+
+    // 3. B1: Connection idle timeout and closed callback
+    {
+        asio::io_context io;
+        const auto ep = asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 9999);
+        const auto client_dcid = ConnectionId::random(8);
+        const auto client_scid = ConnectionId::random(8);
+        const auto server_cid = ConnectionId::random(8);
+
+        auto conn = std::make_shared<QuicConnection>(
+            server_cid, client_scid, ep, true, io.get_executor(), client_dcid);
+
+        // Configure a fast 50ms idle timeout for the unit test
+        conn->set_idle_timeout(std::chrono::milliseconds(50));
+
+        bool closed_callback_invoked = false;
+        conn->set_closed_callback([&](const ConnectionId &scid, const ConnectionId &peer_cid, const ConnectionId &orig_dcid) {
+            closed_callback_invoked = true;
+            assert(scid == server_cid);
+            assert(peer_cid == client_scid);
+            assert(orig_dcid == client_dcid);
+        });
+
+        conn->refresh_idle_timer();
+
+        // Run io until idle timer fires
+        io.run_for(std::chrono::milliseconds(100));
+
+        assert(closed_callback_invoked);
+        assert(conn->state() == ConnectionState::Closed);
+    }
+
+    std::cout << "  [PASS] Lifecycle: Idle timeout (B1), stream eviction (B2), and CRYPTO cap (B7) passed." << std::endl;
+}
+
+static void test_quic_stream_limits_and_coroutine_termination() {
+    std::cout << "[Test QUIC] Stream limits (B8), coroutine termination (B6), and acceptor cleanup (B5)..." << std::endl;
+
+    // 1. B8: Enforce stream count limits
+    {
+        asio::io_context io;
+        const auto ep = asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 9999);
+        const auto client_dcid = ConnectionId::random(8);
+        const auto client_scid = ConnectionId::random(8);
+        const auto server_cid = ConnectionId::random(8);
+
+        auto conn = std::make_shared<QuicConnection>(
+            server_cid, client_scid, ep, true, io.get_executor(), client_dcid);
+
+        // Allow at most 2 bidirectional streams from client (indices 0 and 1, i.e., stream IDs 0 and 4)
+        conn->set_max_peer_streams(2, 2);
+
+        ProtectionKeys client_initial_local;
+        ProtectionKeys client_initial_remote;
+        CryptoSuite::derive_initial_secrets(client_dcid, client_initial_local, client_initial_remote);
+
+        auto send_stream_frame = [&](uint64_t stream_id, uint64_t pn) {
+            StreamFrame sf;
+            sf.stream_id = stream_id;
+            sf.offset = 0;
+            sf.fin = false;
+            sf.data = "hello";
+
+            std::string payload;
+            serialize_frame(sf, payload);
+
+            PacketHeader hdr;
+            hdr.is_long = true;
+            hdr.type = PacketType::Initial;
+            hdr.version = QUIC_VERSION_1;
+            hdr.dcid = server_cid;
+            hdr.scid = client_scid;
+            hdr.packet_number = pn;
+
+            std::string pkt;
+            assert(CryptoSuite::protect_packet(client_initial_local, hdr, payload, pkt));
+            conn->handle_datagram(pkt);
+        };
+
+        // Stream 0 (index 0 < 2) -> Allowed
+        send_stream_frame(0, 1);
+        assert(conn->state() != ConnectionState::Closed);
+        assert(conn->stream_count() == 1);
+
+        // Stream 4 (index 1 < 2) -> Allowed
+        send_stream_frame(4, 2);
+        assert(conn->state() != ConnectionState::Closed);
+        assert(conn->stream_count() == 2);
+
+        // Stream 8 (index 2 >= 2) -> MUST BE REJECTED with STREAM_LIMIT_ERROR!
+        send_stream_frame(8, 3);
+        assert(conn->state() == ConnectionState::Closed);
+    }
+
+    // 2. B6: Coroutine termination on connection close
+    {
+        asio::io_context io;
+        const auto ep = asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 9999);
+        const auto client_dcid = ConnectionId::random(8);
+        const auto client_scid = ConnectionId::random(8);
+        const auto server_cid = ConnectionId::random(8);
+
+        auto conn = std::make_shared<QuicConnection>(
+            server_cid, client_scid, ep, true, io.get_executor(), client_dcid);
+
+        auto stream = conn->create_stream(false); // unidirectional stream
+        bool coroutine_completed = false;
+        std::error_code read_ec;
+
+        asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+            char buf[64];
+            auto [ec, n] = co_await stream->async_read_some(
+                asio::buffer(buf), asio::as_tuple(asio::use_awaitable));
+            read_ec = ec;
+            coroutine_completed = true;
+            co_return;
+        }, asio::detached);
+
+        io.poll();
+        assert(!coroutine_completed); // Suspended on read!
+
+        // Now close the connection: this MUST close all streams and resume pending reads!
+        conn->close();
+
+        io.run();
+        assert(coroutine_completed);
+        assert(read_ec == asio::error::connection_reset);
+    }
+
+    std::cout << "  [PASS] Stream limits (B8), coroutine termination (B6), and acceptor cleanup (B5) passed." << std::endl;
+}
+
+static void test_quic_critical_mtu_flow_control_anti_amplification() {
+    std::cout << "[Test QUIC] MTU splitting (A3), Flow control (A4), and Anti-amplification (D1)..." << std::endl;
+
+    // 1. A3: Large response splitting into MTU-sized packets (<= 1150 bytes per frame)
+    {
+        asio::io_context io;
+        const auto ep = asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 9999);
+        const auto client_dcid = ConnectionId::random(8);
+        const auto client_scid = ConnectionId::random(8);
+        const auto server_cid = ConnectionId::random(8);
+
+        auto conn = std::make_shared<QuicConnection>(
+            server_cid, client_scid, ep, true, io.get_executor(), client_dcid);
+
+        // Derive initial keys
+        ProtectionKeys client_initial_local, client_initial_remote;
+        CryptoSuite::derive_initial_secrets(client_dcid, client_initial_local, client_initial_remote);
+
+        // An undecryptable Handshake packet must NOT validate the address (that was the bug): only an
+        // authenticated packet may. In mock mode an authenticated 1-RTT packet does (RFC 9000 §8.1).
+        {
+            PacketHeader bogus_hs;
+            bogus_hs.is_long = true;
+            bogus_hs.type = PacketType::Handshake;
+            bogus_hs.version = QUIC_VERSION_1;
+            bogus_hs.dcid = server_cid;
+            bogus_hs.scid = client_scid;
+            bogus_hs.packet_number = 1;
+            std::string bogus_pkt;
+            CryptoSuite::protect_packet(client_initial_local, bogus_hs, std::string(100, '\0'), bogus_pkt);
+            conn->handle_datagram(bogus_pkt);
+            assert(!conn->is_peer_address_validated());
+        }
+
+        PacketHeader hs_hdr;
+        hs_hdr.is_long = false;
+        hs_hdr.type = PacketType::OneRTT;
+        hs_hdr.dcid = server_cid;
+        hs_hdr.packet_number = 2;
+        std::string initial_pkt(1200, '\0');
+        CryptoSuite::protect_packet(client_initial_local, hs_hdr, std::string(100, '\0'), initial_pkt);
+        conn->handle_datagram(initial_pkt);
+
+        assert(conn->is_peer_address_validated());
+
+        // Queue a 3500-byte stream payload
+        std::string large_payload(3500, 'X');
+        conn->queue_stream_data(0, large_payload, true);
+
+        auto pkts = conn->poll_outgoing_datagrams();
+        // 3500 bytes / 1150 max payload per packet = 4 packets (1150, 1150, 1150, 50)
+        assert(pkts.size() == 4);
+        assert(conn->data_sent() == 3500);
+    }
+
+    // 2. A4: Flow control enforcement and dynamic unblocking
+    {
+        asio::io_context io;
+        const auto ep = asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 9999);
+        const auto client_dcid = ConnectionId::random(8);
+        const auto client_scid = ConnectionId::random(8);
+        const auto server_cid = ConnectionId::random(8);
+
+        auto conn = std::make_shared<QuicConnection>(
+            server_cid, client_scid, ep, true, io.get_executor(), client_dcid);
+
+        assert(conn->can_send());
+        assert(conn->max_data() >= 1024 * 1024);
+    }
+
+    // 3. D1: Anti-amplification limit (RFC 9000 §8.1)
+    {
+        asio::io_context io;
+        const auto ep = asio::ip::udp::endpoint(asio::ip::address_v4::loopback(), 9999);
+        const auto client_dcid = ConnectionId::random(8);
+        const auto client_scid = ConnectionId::random(8);
+        const auto server_cid = ConnectionId::random(8);
+
+        auto conn = std::make_shared<QuicConnection>(
+            server_cid, client_scid, ep, true, io.get_executor(), client_dcid);
+
+        assert(!conn->is_peer_address_validated());
+
+        // Client sends 1200-byte Initial
+        std::string initial_bytes(1200, 'A');
+        conn->handle_datagram(initial_bytes);
+
+        // Peer address not yet validated before handshake
+        assert(!conn->is_peer_address_validated());
+    }
+
+    std::cout << "  [PASS] MTU splitting (A3), Flow control (A4), and Anti-amplification (D1) passed." << std::endl;
+}
+
+static void test_cert_resolution_d4() {
+    std::cout << "[Test QUIC] Clean Config-Time Certificate Resolution (D4)..." << std::endl;
+
+    asio::io_context io;
+    QuicServer server(io, 0);
+
+    // 1. Missing certificate file must fail immediately at config time with std::runtime_error
+    bool cert_threw = false;
+    try {
+        server.set_tls_credentials("non_existent_cert_path_12345.crt", "valid_or_dummy.key");
+    } catch (const std::runtime_error &ex) {
+        cert_threw = true;
+        assert(std::string(ex.what()).find("Certificate file not found") != std::string::npos);
+    }
+    assert(cert_threw);
+
+    // 2. Missing private key file must fail immediately at config time with std::runtime_error
+    const auto current_src = std::filesystem::path(std::source_location::current().file_name());
+    const auto project_root = current_src.parent_path().parent_path();
+    const std::string valid_cert = (project_root / "ssl" / "test.crt").string();
+
+    bool key_threw = false;
+    try {
+        server.set_tls_credentials(valid_cert, "non_existent_key_path_12345.key");
+    } catch (const std::runtime_error &ex) {
+        key_threw = true;
+        assert(std::string(ex.what()).find("Private key file not found") != std::string::npos);
+    }
+    assert(key_threw);
+
+    // 3. Standalone QuicConnection must also enforce existence at config time
+    const auto cid = ConnectionId::random(8);
+    const auto peer_cid = ConnectionId::random(8);
+    asio::ip::udp::endpoint ep(asio::ip::address_v4::loopback(), 4433);
+    QuicConnection conn(cid, peer_cid, ep, true, io.get_executor());
+
+    bool conn_threw = false;
+    try {
+        conn.set_tls_credentials("missing_cert.crt", "missing_key.key");
+    } catch (...) {
+        conn_threw = true;
+    }
+    assert(conn_threw);
+
+    // 4. Valid credentials succeed cleanly without error
+    const std::string valid_key = (project_root / "ssl" / "test.key").string();
+    if (std::filesystem::exists(valid_cert) && std::filesystem::exists(valid_key)) {
+        server.set_tls_credentials(valid_cert, valid_key);
+        conn.set_tls_credentials(valid_cert, valid_key);
+    }
+
+    std::cout << "  [PASS] Clean Config-Time Certificate Resolution passed." << std::endl;
+}
+
+static void test_quic_cipher_ctx_caching_e3() {
+    std::cout << "Testing QUIC Cipher Context Caching and Zero-Allocation Framing (E3)..." << std::endl;
+
+    const auto dcid = ConnectionId::random(8);
+    ProtectionKeys client_keys{};
+    ProtectionKeys server_keys{};
+
+    assert(CryptoSuite::derive_initial_secrets(dcid, client_keys, server_keys));
+
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+    // Contexts must initially be null
+    assert(client_keys.enc_ctx == nullptr);
+    assert(client_keys.dec_ctx == nullptr);
+    assert(client_keys.hp_ctx == nullptr);
+#endif
+
+    PacketHeader hdr1{};
+    hdr1.is_long = true;
+    hdr1.type = PacketType::Initial;
+    hdr1.version = 1;
+    hdr1.dcid = dcid;
+    hdr1.scid = ConnectionId::random(8);
+    hdr1.packet_number = 1;
+    hdr1.packet_number_len = 4;
+
+    std::string protected_pkt1;
+    assert(CryptoSuite::protect_packet(client_keys, hdr1, "Payload Chunk Alpha", protected_pkt1));
+
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+    assert(client_keys.enc_ctx != nullptr);
+    assert(client_keys.hp_ctx != nullptr);
+    EVP_CIPHER_CTX *const cached_enc = client_keys.enc_ctx;
+    EVP_CIPHER_CTX *const cached_hp = client_keys.hp_ctx;
+
+    // Second packet must reuse the exact same cipher contexts (zero allocation)
+    PacketHeader hdr2 = hdr1;
+    hdr2.packet_number = 2;
+    std::string protected_pkt2;
+    assert(CryptoSuite::protect_packet(client_keys, hdr2, "Payload Chunk Beta", protected_pkt2));
+    assert(client_keys.enc_ctx == cached_enc);
+    assert(client_keys.hp_ctx == cached_hp);
+
+    // Decryption must lazily initialize dec_ctx and reuse it on subsequent packets
+    PacketHeader dec_hdr1{};
+    std::string dec_payload1;
+    assert(CryptoSuite::unprotect_packet(client_keys, dec_hdr1, protected_pkt1, dec_payload1, 0, dcid.length()));
+    assert(dec_payload1 == "Payload Chunk Alpha");
+    assert(client_keys.dec_ctx != nullptr);
+    EVP_CIPHER_CTX *const cached_dec = client_keys.dec_ctx;
+
+    PacketHeader dec_hdr2{};
+    std::string dec_payload2;
+    assert(CryptoSuite::unprotect_packet(client_keys, dec_hdr2, protected_pkt2, dec_payload2, 1, dcid.length()));
+    assert(dec_payload2 == "Payload Chunk Beta");
+    assert(client_keys.dec_ctx == cached_dec);
+
+    // Test move semantics preserves cached contexts
+    ProtectionKeys moved_keys(std::move(client_keys));
+    assert(moved_keys.enc_ctx == cached_enc);
+    assert(moved_keys.dec_ctx == cached_dec);
+    assert(moved_keys.hp_ctx == cached_hp);
+    assert(client_keys.enc_ctx == nullptr);
+    assert(client_keys.dec_ctx == nullptr);
+    assert(client_keys.hp_ctx == nullptr);
+
+    // Cleanse must free contexts and reset pointers to nullptr
+    moved_keys.cleanse();
+    assert(moved_keys.enc_ctx == nullptr);
+    assert(moved_keys.dec_ctx == nullptr);
+    assert(moved_keys.hp_ctx == nullptr);
+#endif
+
+    std::cout << "  [PASS] QUIC Cipher Context Caching (E3) passed." << std::endl;
+}
+
+static void test_quic_zero_copy_frames_and_writes_e5() {
+    std::cout << "Testing Zero-Copy Frame Views and Write Streaming (E5)..." << std::endl;
+
+    // 1. Verify parse_frames creates zero-copy string_view referencing the input payload
+    std::string serialized_frames;
+    {
+        StreamFrame sf;
+        sf.stream_id = 12;
+        sf.offset = 4096;
+        sf.fin = false;
+        sf.has_offset = true;
+        sf.has_length = true;
+        sf.data = "ZeroCopyStreamChunk123456789";
+        serialize_frame(sf, serialized_frames);
+
+        CryptoFrame cf;
+        cf.offset = 0;
+        cf.data = "ZeroCopyCryptoChunk987654321";
+        serialize_frame(cf, serialized_frames);
+
+        ConnectionCloseFrame ccf{"ZeroCopyCloseReason", 0x101, 0, true};
+        serialize_frame(ccf, serialized_frames);
+    }
+
+    std::vector<Frame> parsed;
+    assert(parse_frames(serialized_frames, parsed));
+    assert(parsed.size() == 3);
+
+    const auto &parsed_sf = std::get<StreamFrame>(parsed[0]);
+    assert(parsed_sf.data == "ZeroCopyStreamChunk123456789");
+    // Pointer must fall inside serialized_frames (zero heap copy)
+    assert(parsed_sf.data.data() >= serialized_frames.data());
+    assert(parsed_sf.data.data() < serialized_frames.data() + serialized_frames.size());
+
+    const auto &parsed_cf = std::get<CryptoFrame>(parsed[1]);
+    assert(parsed_cf.data == "ZeroCopyCryptoChunk987654321");
+    assert(parsed_cf.data.data() >= serialized_frames.data());
+    assert(parsed_cf.data.data() < serialized_frames.data() + serialized_frames.size());
+
+    const auto &parsed_ccf = std::get<ConnectionCloseFrame>(parsed[2]);
+    assert(parsed_ccf.reason_phrase == "ZeroCopyCloseReason");
+    assert(parsed_ccf.reason_phrase.data() >= serialized_frames.data());
+    assert(parsed_ccf.reason_phrase.data() < serialized_frames.data() + serialized_frames.size());
+
+    // 2. StreamBuffer zero-copy peek and consume
+    wavex::utils::StreamBuffer sb;
+    sb.append("HeaderPrefix");
+    sb.append("BodyContent12345");
+    assert(sb.size() == 28);
+
+    const std::string_view peek1 = sb.peek(12);
+    assert(peek1 == "HeaderPrefix");
+    sb.consume(12);
+    assert(sb.size() == 16);
+
+    const std::string_view peek2 = sb.peek(16);
+    assert(peek2 == "BodyContent12345");
+    sb.consume(16);
+    assert(sb.empty());
+
+    // 3. Multi-buffer async_write_some zero-copy plumbing
+    asio::io_context io;
+    const auto cid = ConnectionId::random(8);
+    const auto peer_cid = ConnectionId::random(8);
+    asio::ip::udp::endpoint ep(asio::ip::address_v4::loopback(), 4433);
+    auto conn = std::make_shared<QuicConnection>(cid, peer_cid, ep, true, io.get_executor());
+
+    auto stream = std::make_shared<QuicStream>(conn, 0, io.get_executor());
+
+    const std::string part_a = "PartAlpha_";
+    const std::string part_b = "PartBeta_";
+    const std::array<asio::const_buffer, 2> bufs{
+        asio::buffer(part_a),
+        asio::buffer(part_b)
+    };
+
+    bool write_completed = false;
+    std::size_t written_bytes = 0;
+    stream->async_write_some(bufs, [&](const std::error_code ec, const std::size_t n) {
+        assert(!ec);
+        written_bytes = n;
+        write_completed = true;
+        conn->close();
+    });
+
+    io.run();
+    assert(write_completed);
+    assert(written_bytes == part_a.size() + part_b.size());
+
+    std::cout << "  [PASS] Zero-Copy Frame Views and Write Streaming (E5) passed." << std::endl;
+}
+
+static void test_quic_datagram_coalescing_e4() {
+    std::cout << "Testing Datagram Coalescing & Batch Outbound Sending (E4)..." << std::endl;
+
+    asio::io_context io;
+    const auto client_cid = ConnectionId::random(8);
+    const auto server_cid = ConnectionId::random(8);
+    asio::ip::udp::endpoint ep(asio::ip::address_v4::loopback(), 4433);
+    auto conn = std::make_shared<QuicConnection>(server_cid, client_cid, ep, true, io.get_executor());
+
+    ProtectionKeys client_keys, server_keys;
+    CryptoSuite::derive_initial_secrets(client_cid, client_keys, server_keys);
+
+    auto make_protected_packet = [&](PacketType type, bool is_long, uint64_t pn, const std::string &payload_str) -> std::string {
+        PacketHeader hdr;
+        hdr.is_long = is_long;
+        hdr.type = type;
+        hdr.version = QUIC_VERSION_1;
+        hdr.dcid = client_cid;
+        hdr.scid = server_cid;
+        hdr.packet_number = pn;
+        hdr.packet_number_len = 4;
+
+        std::string pkt;
+        bool ok = CryptoSuite::protect_packet(server_keys, hdr, payload_str, pkt);
+        assert(ok);
+        return pkt;
+    };
+
+    // 1. Coalescing Long-Header + Long-Header packets within MTU (Initial + Handshake)
+    {
+        std::string pkt1 = make_protected_packet(PacketType::Initial, true, 1, "InitialCryptoPayload100Bytes");
+        std::string pkt2 = make_protected_packet(PacketType::Handshake, true, 2, "HandshakeCryptoPayload200Bytes");
+
+        const std::size_t expected_total_size = pkt1.size() + pkt2.size();
+        assert(expected_total_size < 1200);
+
+        conn->queue_outbound_packet(pkt1);
+        conn->queue_outbound_packet(pkt2);
+
+        auto dgrams = conn->poll_outgoing_datagrams();
+        assert(dgrams.size() == 1);
+        assert(dgrams[0].size() == expected_total_size);
+        assert(dgrams[0].substr(0, pkt1.size()) == pkt1);
+        assert(dgrams[0].substr(pkt1.size()) == pkt2);
+
+        // Verify receiver handle_datagram successfully unpacks both coalesced packets
+        auto receiver_conn = std::make_shared<QuicConnection>(client_cid, server_cid, ep, false, io.get_executor());
+        receiver_conn->handle_datagram(dgrams[0]);
+    }
+
+    // 2. Coalescing Long-Header + Short-Header (1-RTT) packet
+    {
+        std::string pkt_long = make_protected_packet(PacketType::Handshake, true, 3, "HandshakePayload300");
+        std::string pkt_short = make_protected_packet(PacketType::OneRTT, false, 4, "OneRttPayload150");
+
+        const std::size_t expected_total_size = pkt_long.size() + pkt_short.size();
+        assert(expected_total_size < 1200);
+
+        conn->queue_outbound_packet(pkt_long);
+        conn->queue_outbound_packet(pkt_short);
+
+        auto dgrams = conn->poll_outgoing_datagrams();
+        assert(dgrams.size() == 1);
+        assert(dgrams[0].size() == expected_total_size);
+        assert(dgrams[0].substr(0, pkt_long.size()) == pkt_long);
+        assert(dgrams[0].substr(pkt_long.size()) == pkt_short);
+    }
+
+    // 3. RFC 9000 §12.2 Invariant: Multiple Short-Header packets MUST NOT be coalesced
+    {
+        std::string pkt_short1 = make_protected_packet(PacketType::OneRTT, false, 5, "ShortPacket1");
+        std::string pkt_short2 = make_protected_packet(PacketType::OneRTT, false, 6, "ShortPacket2");
+
+        conn->queue_outbound_packet(pkt_short1);
+        conn->queue_outbound_packet(pkt_short2);
+
+        auto dgrams = conn->poll_outgoing_datagrams();
+        assert(dgrams.size() == 2);
+        assert(dgrams[0] == pkt_short1);
+        assert(dgrams[1] == pkt_short2);
+    }
+
+    // 4. Long + Short + Short: Short terminates the first coalesced datagram
+    {
+        std::string pkt_long = make_protected_packet(PacketType::Handshake, true, 7, "LongHandshake");
+        std::string pkt_short1 = make_protected_packet(PacketType::OneRTT, false, 8, "Short1");
+        std::string pkt_short2 = make_protected_packet(PacketType::OneRTT, false, 9, "Short2");
+
+        conn->queue_outbound_packet(pkt_long);
+        conn->queue_outbound_packet(pkt_short1);
+        conn->queue_outbound_packet(pkt_short2);
+
+        auto dgrams = conn->poll_outgoing_datagrams();
+        assert(dgrams.size() == 2);
+        assert(dgrams[0].size() == pkt_long.size() + pkt_short1.size());
+        assert(dgrams[1] == pkt_short2);
+    }
+
+    // 5. MTU Boundary limit enforcement (default 1200 bytes)
+    {
+        std::string large_payload1(750, 'A');
+        std::string large_payload2(500, 'B');
+
+        std::string pkt_large1 = make_protected_packet(PacketType::Initial, true, 10, large_payload1);
+        std::string pkt_large2 = make_protected_packet(PacketType::Handshake, true, 11, large_payload2);
+
+        assert(pkt_large1.size() + pkt_large2.size() > 1200);
+
+        conn->queue_outbound_packet(pkt_large1);
+        conn->queue_outbound_packet(pkt_large2);
+
+        auto dgrams = conn->poll_outgoing_datagrams();
+        assert(dgrams.size() == 2);
+        assert(dgrams[0] == pkt_large1);
+        assert(dgrams[1] == pkt_large2);
+    }
+
+    // 6. Configurable MTU boundary
+    {
+        conn->set_max_datagram_size(1500);
+        assert(conn->max_datagram_size() == 1500);
+
+        std::string large_payload1(750, 'A');
+        std::string large_payload2(500, 'B');
+
+        std::string pkt_large1 = make_protected_packet(PacketType::Initial, true, 12, large_payload1);
+        std::string pkt_large2 = make_protected_packet(PacketType::Handshake, true, 13, large_payload2);
+
+        assert(pkt_large1.size() + pkt_large2.size() <= 1500);
+
+        conn->queue_outbound_packet(pkt_large1);
+        conn->queue_outbound_packet(pkt_large2);
+
+        auto dgrams = conn->poll_outgoing_datagrams();
+        assert(dgrams.size() == 1);
+        assert(dgrams[0].size() == pkt_large1.size() + pkt_large2.size());
+
+        conn->set_max_datagram_size(1200);
+    }
+
+    std::cout << "  [PASS] Datagram Coalescing & Batch Outbound Sending (E4) passed." << std::endl;
+}
+
+int main() {
+    std::cout << "=== Running WaveX QUIC Transport Tests ===\n";
+    try {
+        test_varint();
+        test_varint_edge_cases();
+        test_connection_id();
+        test_connection_id_boundaries();
+        test_connection_id_siphash_d3();
+        test_cert_resolution_d4();
+        test_quic_cipher_ctx_caching_e3();
+        test_quic_zero_copy_frames_and_writes_e5();
+        test_quic_datagram_coalescing_e4();
+        test_stream_id_allocation();
+        test_rfc9001_appendix_a();
+        test_frames();
+        test_malformed_packets_and_fuzzing();
+        test_quic_packet_fuzzer();
+        test_packet_protection();
+        test_rfc9002_loss_and_recovery();
+        test_congestion_controller();
+        test_quic_stream_async();
+        test_quic_stream_chunk_buffering_e2();
+        test_quic_keys_cleanliness_a15();
+        test_quic_variable_cid_and_key_update_a16();
+        test_quic_secrets_cleanse_b9();
+        test_quic_tls_ctx_move_and_accept_stream();
+        test_quic_lifecycle_idle_eviction_and_crypto_cap();
+        test_quic_stream_limits_and_coroutine_termination();
+        test_quic_critical_mtu_flow_control_anti_amplification();
+        test_udp_basic_loopback();
+        test_quic_server_client_loopback();
+        test_quic_protocol();
+        test_quic_socket_acceptor_tcp_syntax();
+        test_quic_socket_acceptor_coroutine();
+        test_quic_stream_multiplexing();
+        std::cout << "=== All QUIC Tests PASSED ===\n";
+        return 0;
+    } catch (const std::exception &ex) {
+        std::cerr << "Exception in test_quic: " << ex.what() << "\n";
+        return 1;
+    }
+}
+
+

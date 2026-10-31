@@ -9,17 +9,19 @@
  *        domainless IPv4/IPv6 client endpoints, and query parameter handling.
  */
 
-#include <coroutine>
 #include <utility>
 #include <vector>
 #include <string>
 #include <string_view>
 #include <charconv>
 #include <algorithm>
-#include <cctype>
 
 #include <wavex/Client/HttpClient.hpp>
 #include <wavex/protos/http/http2codec.hpp>
+#include <wavex/Utils/BinaryFile.hpp>
+#include <wavex/Utils/FsUtils.hpp>
+#include <wavex/Utils/Compression.hpp>
+#include <wavex/Base/MimeTypes.hpp>
 #include <asio/write.hpp>
 #include <asio/connect.hpp>
 #include <asio/redirect_error.hpp>
@@ -49,7 +51,6 @@ namespace wavex::client {
             const std::string &host_header,
             const ClientRequest &req,
             const std::string &path_target) {
-
             ClientResponse res;
             res.http_version(HttpVersion::Http1_1);
 
@@ -105,6 +106,9 @@ namespace wavex::client {
             std::string response_buffer;
             char buf[4096];
             asio::error_code read_ec;
+            protos::http::http1codec::response parsed_h1;
+            std::size_t consumed = 0;
+            bool response_complete = false;
 
             while (true) {
                 std::size_t bytes = co_await stream.async_read_some(
@@ -112,17 +116,30 @@ namespace wavex::client {
                 if (bytes > 0) {
                     response_buffer.append(buf, bytes);
                 }
+
+                if (!response_buffer.empty()) {
+                    parsed_h1 = {};
+                    consumed = 0;
+                    if (protos::http::http1codec::parser::parse_response(
+                            response_buffer, parsed_h1, consumed) ==
+                        protos::http::http1codec::parser::result::success) {
+                        response_complete = true;
+                        break;
+                    }
+                }
+
                 if (read_ec) break;
             }
 
-            protos::http::http1codec::response parsed_h1;
-            std::size_t consumed = 0;
-            if (protos::http::http1codec::parser::parse_response(response_buffer, parsed_h1, consumed) !=
-                protos::http::http1codec::parser::result::success) {
-                res.status_code(502);
-                res.status_text("Bad Gateway");
-                res.body("Invalid response format from upstream HTTP server");
-                co_return res;
+            if (!response_complete) {
+                consumed = 0;
+                if (protos::http::http1codec::parser::parse_response(response_buffer, parsed_h1, consumed) !=
+                    protos::http::http1codec::parser::result::success) {
+                    res.status_code(502);
+                    res.status_text("Bad Gateway");
+                    res.body("Invalid response format from upstream HTTP server");
+                    co_return res;
+                }
             }
 
             res.status_code(parsed_h1.status_code);
@@ -150,7 +167,6 @@ namespace wavex::client {
             const std::string &host_header,
             const ClientRequest &req,
             const std::string &path_target) {
-
             namespace h2 = protos::http::http2;
 
             ClientResponse res;
@@ -160,7 +176,10 @@ namespace wavex::client {
             std::string initial_wire;
             initial_wire.reserve(h2::CONNECTION_PREFACE.size() + 32);
             initial_wire += h2::CONNECTION_PREFACE;
-            initial_wire += h2::encoder::serialize_settings({});
+            // Open the receive windows fully: this client reads whole responses and never sends
+            // WINDOW_UPDATE, so a server honouring flow control would otherwise stall after 64 KiB.
+            initial_wire += h2::encoder::serialize_settings({{h2::settings_parameter::INITIAL_WINDOW_SIZE, 0x7FFFFFFF}});
+            initial_wire += h2::encoder::serialize_window_update(0, 0x7FFFFFFF - 65535);
 
             // 2. Build HEADERS frame for stream 1
             std::vector<std::pair<std::string, std::string> > filtered_headers;
@@ -311,8 +330,8 @@ namespace wavex::client {
                         if (payload.size() >= header_cursor + pad_len) {
                             const std::string_view h_block = payload.substr(
                                 header_cursor, payload.size() - header_cursor - pad_len);
-                            std::vector<std::pair<std::string, std::string> > decoded_headers;
-                            if (dec.decode_header_block(h_block, decoded_headers)) {
+                            if (std::vector<std::pair<std::string, std::string> > decoded_headers; dec.
+                                decode_header_block(h_block, decoded_headers)) {
                                 headers_received = true;
                                 for (const auto &[n, v]: decoded_headers) {
                                     if (n == ":status") {
@@ -420,16 +439,22 @@ namespace wavex::client {
         const bool is_tls = (parsed_url.scheme == "https");
 
         auto executor = co_await asio::this_coro::executor;
-        asio::ip::tcp::resolver resolver(executor);
+        asio::ip::tcp::resolver::results_type endpoints;
 
-        asio::error_code resolve_ec;
-        auto endpoints = co_await resolver.async_resolve(
-            host, port_str, asio::redirect_error(asio::use_awaitable, resolve_ec));
-        if (resolve_ec) {
-            res.status_code(502);
-            res.status_text("Bad Gateway");
-            res.body("Host resolution failed: " + resolve_ec.message());
-            co_return res;
+        if (is_ip_literal) {
+            endpoints = asio::ip::tcp::resolver::results_type::create(
+                asio::ip::tcp::endpoint(ip_addr, port), host, port_str);
+        } else {
+            asio::ip::tcp::resolver resolver(executor);
+            asio::error_code resolve_ec;
+            endpoints = co_await resolver.async_resolve(
+                host, port_str, asio::redirect_error(asio::use_awaitable, resolve_ec));
+            if (resolve_ec) {
+                res.status_code(502);
+                res.status_text("Bad Gateway");
+                res.body("Host resolution failed: " + resolve_ec.message());
+                co_return res;
+            }
         }
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
@@ -465,14 +490,19 @@ namespace wavex::client {
                 unsigned char alpn_protos[32];
                 unsigned int alpn_len = 0;
                 if (options.version == HttpVersion::Http2) {
-                    alpn_protos[0] = 2; alpn_protos[1] = 'h'; alpn_protos[2] = '2';
+                    alpn_protos[0] = 2;
+                    alpn_protos[1] = 'h';
+                    alpn_protos[2] = '2';
                     alpn_len = 3;
                 } else if (options.version == HttpVersion::Http1_1) {
                     alpn_protos[0] = 8;
                     std::memcpy(&alpn_protos[1], "http/1.1", 8);
                     alpn_len = 9;
-                } else { // Auto
-                    alpn_protos[0] = 2; alpn_protos[1] = 'h'; alpn_protos[2] = '2';
+                } else {
+                    // Auto
+                    alpn_protos[0] = 2;
+                    alpn_protos[1] = 'h';
+                    alpn_protos[2] = '2';
                     alpn_protos[3] = 8;
                     std::memcpy(&alpn_protos[4], "http/1.1", 8);
                     alpn_len = 12;
@@ -489,6 +519,8 @@ namespace wavex::client {
                     res.body("TCP connect failed: " + conn_ec.message());
                     co_return res;
                 }
+                asio::error_code nd_ec;
+                ssl_socket.lowest_layer().set_option(asio::ip::tcp::no_delay(true), nd_ec);
 
                 asio::error_code hs_ec;
                 co_await ssl_socket.async_handshake(
@@ -549,6 +581,8 @@ namespace wavex::client {
                 res.body("TCP connect failed: " + conn_ec.message());
                 co_return res;
             }
+            asio::error_code nd_ec;
+            socket.set_option(asio::ip::tcp::no_delay(true), nd_ec);
 
             if (options.version == HttpVersion::Http2) {
                 res = co_await execute_http2_exchange(
@@ -568,5 +602,128 @@ namespace wavex::client {
         }
 
         co_return res;
+    }
+
+    // ── ClientRequest Methods ───────────────────────────────────────────────
+
+    ClientRequest &ClientRequest::set_header(const std::string_view key, const std::string_view value) {
+        for (auto &[k, v]: headers_) {
+            if (detail_case_equal(k, key)) {
+                v = std::string(value);
+                return *this;
+            }
+        }
+        headers_.emplace_back(std::string(key), std::string(value));
+        return *this;
+    }
+
+    std::optional<std::string_view> ClientRequest::header(const std::string_view key) const noexcept {
+        for (const auto &[k, v]: headers_) {
+            if (detail_case_equal(k, key)) return v;
+        }
+        return std::nullopt;
+    }
+
+    ClientRequest &ClientRequest::set_body(const std::string_view body, const std::string_view content_type) {
+        body_ = std::string(body);
+        if (!content_type.empty()) {
+            set_header("Content-Type", content_type);
+        }
+        return *this;
+    }
+
+    ClientRequest &ClientRequest::json(const nlohmann::json &j) {
+        body_ = j.dump();
+        set_header("Content-Type", "application/json");
+        return *this;
+    }
+
+    ClientRequest &ClientRequest::multipart(const utils::MultipartFormData &form) {
+        body_ = form.compose();
+        set_header("Content-Type", form.content_type_header());
+        return *this;
+    }
+
+    ClientRequest &ClientRequest::add_field(const std::string_view name, const std::string_view value) {
+        multipart_builder_.add_field(name, value);
+        return multipart(multipart_builder_);
+    }
+
+    ClientRequest &ClientRequest::add_file(const std::string_view name,
+                                           const std::string_view filename,
+                                           const std::string_view data,
+                                           const std::string_view content_type) {
+        std::string ct(content_type);
+        if (ct.empty()) {
+            ct = std::string(base::mime_type_from_path(filename));
+        }
+        multipart_builder_.add_file(name, filename, data, ct);
+        return multipart(multipart_builder_);
+    }
+
+    ClientRequest &ClientRequest::add_file_from_path(const std::string_view name,
+                                                     const std::string &filepath,
+                                                     const std::string_view content_type) {
+        if (const auto res = wavex::utils::BinaryFile::read_all(filepath)) {
+            const std::string &content = *res;
+            const std::string filename = wavex::utils::fs_utils::filename(filepath);
+            std::string ct(content_type);
+            if (ct.empty()) {
+                ct = std::string(base::mime_type_from_path(filepath));
+            }
+            multipart_builder_.add_file(name, filename, content, ct);
+            multipart(multipart_builder_);
+        }
+        return *this;
+    }
+
+    ClientRequest &ClientRequest::file_body(const std::string &filepath,
+                                            const std::string_view content_type) {
+        if (auto res = wavex::utils::BinaryFile::read_all(filepath)) {
+            body_ = std::move(*res);
+            std::string ct(content_type);
+            if (ct.empty()) {
+                ct = std::string(base::mime_type_from_path(filepath));
+            }
+            set_header("Content-Type", ct);
+        }
+        return *this;
+    }
+
+    ClientRequest &ClientRequest::compress(const utils::CompressionFormat format) {
+        if (auto compressed = utils::Compressor::compress(body_, format); compressed.has_value()) {
+            body_ = std::move(*compressed);
+            set_header("Content-Encoding",
+                       format == utils::CompressionFormat::Gzip ? "gzip" : "deflate");
+        }
+        return *this;
+    }
+
+    // ── ClientResponse Methods ──────────────────────────────────────────────
+
+    nlohmann::json ClientResponse::json() const {
+        return nlohmann::json::parse(body_);
+    }
+
+    std::optional<std::string> ClientResponse::decompressed_body(
+        const utils::CompressionFormat format) const {
+        auto decompress_helper = [](const std::string_view d,
+                                    const utils::CompressionFormat fmt) -> std::optional<std::string> {
+            if (auto res = utils::Compressor::decompress(d, fmt)) return *res;
+            return std::nullopt;
+        };
+        if (const auto enc = header("Content-Encoding"); enc.has_value()) {
+            if (enc->find("gzip") != std::string_view::npos) {
+                return decompress_helper(body_, utils::CompressionFormat::Gzip);
+            }
+            if (enc->find("deflate") != std::string_view::npos) {
+                return decompress_helper(body_, utils::CompressionFormat::Deflate);
+            }
+        }
+        return decompress_helper(body_, format);
+    }
+
+    bool ClientResponse::save_to_file(const std::string &dest_path) const {
+        return wavex::utils::BinaryFile::write_all(dest_path, body_);
     }
 } // namespace wavex::client

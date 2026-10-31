@@ -122,6 +122,13 @@ void test_server_streaming_and_files() {
         server.run();
     });
 
+    // The client coroutine is already queued; wait until the server thread is accepting so the
+    // first request cannot race the listener start-up.
+    for (int i = 0; i < 200 && !server.is_running(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
     io.run();
 
     if (server_thread.joinable()) {

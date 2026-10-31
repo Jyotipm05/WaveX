@@ -6,10 +6,17 @@
  *
  * Usage examples:
  *   ./wavex_postman_http1_server                      # Plain HTTP on http://127.0.0.1:8080
+ *   ./wavex_postman_http1_server --lan                # Host on LAN (0.0.0.0:8080)
  *   ./wavex_postman_http1_server --tls                # HTTPS/TLS 1.3 on https://127.0.0.1:8443
+ *   ./wavex_postman_http1_server --tls --lan          # HTTPS/TLS 1.3 on LAN (0.0.0.0:8443)
  *   ./wavex_postman_http1_server -p 9000              # Plain HTTP on http://127.0.0.1:9000
  *   ./wavex_postman_http1_server --tls -p 4430 -c ssl/test.crt -k ssl/test.key
  *   ./wavex_postman_http1_server --help               # Show CLI usage and option details
+ *
+ * cURL testing:
+ *   curl http://127.0.0.1:8080/api/json
+ *   curl -X POST http://127.0.0.1:8080/api/query -H "Content-Type: application/json" -d '{"domain": "google.com"}'
+ *   curl -X QUERY http://127.0.0.1:8080/api/query -H "Content-Type: application/json" -d '{"domain": "google.com"}'
  */
 
 #ifndef ASIO_HAS_CO_AWAIT
@@ -18,13 +25,58 @@
 
 #include <iostream>
 #include <string>
+#include <vector>
+#include <algorithm>
 #include <nlohmann/json.hpp>
 #include <wavex/wavex.hpp>
+#include <asio/ip/udp.hpp>
+#include <asio/ip/tcp.hpp>
+#include <asio/ip/host_name.hpp>
+#include <asio/as_tuple.hpp>
+#include <asio/use_awaitable.hpp>
+#include <asio/this_coro.hpp>
 
 using namespace wavex;
 using HttpRequest = protos::http::Http1Request;
 using HttpResponse = protos::http::Http1Response;
 using HttpRouter = engine::Http1Router;
+
+// Helper to detect LAN IP address of current machine
+inline std::string get_lan_ip() {
+    // 1. Try querying outbound interface via UDP routing table lookup (no actual packet sent)
+    try {
+        asio::io_context ctx;
+        asio::ip::udp::socket sock(ctx);
+        sock.connect(asio::ip::udp::endpoint(asio::ip::make_address("8.8.8.8"), 53));
+        const auto addr = sock.local_endpoint().address();
+        if (addr.is_v4() && !addr.is_loopback()) {
+            return addr.to_string();
+        }
+    } catch (...) {
+    }
+
+    // 2. Fallback: resolve local hostname to discover network interface IPv4 addresses
+    try {
+        asio::io_context ctx;
+        asio::ip::tcp::resolver resolver(ctx);
+        asio::error_code ec;
+        const auto host = asio::ip::host_name(ec);
+        if (!ec && !host.empty()) {
+            const auto results = resolver.resolve(host, "", ec);
+            if (!ec) {
+                for (const auto &entry : results) {
+                    const auto addr = entry.endpoint().address();
+                    if (addr.is_v4() && !addr.is_loopback()) {
+                        return addr.to_string();
+                    }
+                }
+            }
+        }
+    } catch (...) {
+    }
+
+    return "";
+}
 
 // Global Logger Middleware
 asio::awaitable<void> logger_middleware(const HttpRequest &req, const HttpResponse &res, base::Next next) {
@@ -49,15 +101,27 @@ asio::awaitable<void> auth_middleware(const HttpRequest &req, HttpResponse &res,
     co_await next();
 }
 
+#ifndef PROJECT_DIR
+#  ifdef CMAKE_SOURCE_DIR
+#    define PROJECT_DIR CMAKE_SOURCE_DIR
+#  else
+#    define PROJECT_DIR "."
+#  endif
+#endif
+
 int main(int argc, char *argv[]) {
+    const std::string default_cert = std::string(PROJECT_DIR) + "/ssl/test.crt";
+    const std::string default_key = std::string(PROJECT_DIR) + "/ssl/test.key";
+
     cli::CliParser parser("wavex_postman_http1_server",
                           "Unified WaveX HTTP/1.1 Interactive Dev & Postman Testing Server");
 
     parser.add_flag("tls", 's', "Enable HTTPS / TLS 1.3 encryption (default: disabled)")
+            .add_flag("lan", 'l', "Host server on local area network (LAN) using current machine IP")
             .add_option("port", 'p', "Port number to listen on (default: 8080 plain, 8443 with --tls)")
             .add_option("host", 'H', "Host IP address to bind to", "127.0.0.1")
-            .add_option("cert", 'c', "Path to TLS certificate file", "ssl/test.crt")
-            .add_option("key", 'k', "Path to TLS private key file", "ssl/test.key");
+            .add_option("cert", 'c', "Path to TLS certificate file", default_cert)
+            .add_option("key", 'k', "Path to TLS private key file", default_key);
 
     const auto parse_res = parser.parse(argc, argv);
     if (!parse_res.ok()) {
@@ -71,7 +135,17 @@ int main(int argc, char *argv[]) {
     }
 
     const bool is_tls = parser.get_bool("tls");
-    const std::string host = parser.get_string("host");
+    const bool is_lan = parser.get_bool("lan");
+    std::string host = parser.get_string("host");
+    if (is_lan && !parser.has("host")) {
+        const std::string detected_ip = get_lan_ip();
+        if (!detected_ip.empty()) {
+            host = detected_ip;
+        } else {
+            std::cerr << "[Warning] Could not automatically detect LAN IP. Falling back to 127.0.0.1.\n";
+            host = "127.0.0.1";
+        }
+    }
     const std::string cert_file = parser.get_string("cert");
     const std::string key_file = parser.get_string("key");
 
@@ -87,19 +161,24 @@ int main(int argc, char *argv[]) {
             << " / Postman Server (HTTP/1.1)           \n";
     std::cout << "=========================================================================\n";
     std::cout << " Protocol : HTTP/1.1 " << (is_tls ? "[TLS 1.3 Active]" : "[Plain TCP]") << "\n";
-    std::cout << " Bound To : " << base_url << "\n";
+    std::cout << " Bound To : " << host << ":" << port << (is_lan ? " [LAN Active - Current Machine IP]" : " [Loopback]") << "\n";
+    std::cout << " URL      : " << base_url << "\n";
+    if (is_lan) {
+        std::cout << " Note     : Hosted on LAN IP. Open " << base_url << " from any device on your network.\n";
+    }
     if (is_tls) {
         std::cout << " Cert File: " << cert_file << "\n";
         std::cout << " Key File : " << key_file << "\n";
     }
     std::cout << "=========================================================================\n";
     std::cout << " Quick Test Endpoints Reference for Postman / cURL:\n";
-    std::cout << "  1. GET  " << base_url << "/\n";
-    std::cout << "  2. GET  " << base_url << "/api/json\n";
-    std::cout << "  3. POST " << base_url << "/api/echo  (Body: JSON payload)\n";
-    std::cout << "  4. GET  " << base_url << "/api/protected  (Header: Authorization: Bearer secret123)\n";
-    std::cout << "  5. GET  " << base_url << "/users/42\n";
-    std::cout << "  6. GET  " << base_url << "/files/documents/2026/report.pdf  (Wildcard match)\n";
+    std::cout << "  1. GET        " << base_url << "/\n";
+    std::cout << "  2. GET        " << base_url << "/api/json\n";
+    std::cout << "  3. POST       " << base_url << "/api/echo   (Body: JSON payload)\n";
+    std::cout << "  4. POST/QUERY " << base_url << "/api/query  (Body: {\"domain\": \"google.com\"})\n";
+    std::cout << "  5. GET        " << base_url << "/api/protected  (Header: Authorization: Bearer secret123)\n";
+    std::cout << "  6. GET        " << base_url << "/users/42\n";
+    std::cout << "  7. GET        " << base_url << "/files/documents/2026/report.pdf  (Wildcard match)\n";
     std::cout << "=========================================================================\n\n";
 
     auto &router = HttpRouter::instance();
@@ -156,7 +235,98 @@ int main(int argc, char *argv[]) {
         co_return;
     });
 
-    // 4. Protected route with Auth Middleware
+    // 4. JSON Query endpoint - Domain to IP DNS Resolver (Supports both POST and QUERY methods)
+    auto dns_query_handler = [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
+        const std::string raw(req.body());
+        std::string domain;
+
+        if (!raw.empty()) {
+            auto j = nlohmann::json::parse(raw, nullptr, false);
+            if (!j.is_discarded()) {
+                if (j.is_object()) {
+                    if (j.contains("domain") && j["domain"].is_string()) {
+                        domain = j["domain"].get<std::string>();
+                    } else if (j.contains("host") && j["host"].is_string()) {
+                        domain = j["host"].get<std::string>();
+                    }
+                } else if (j.is_string()) {
+                    domain = j.get<std::string>();
+                }
+            } else {
+                domain = raw;
+            }
+        }
+
+        // Clean & normalize domain string
+        while (!domain.empty() && (domain.front() == ' ' || domain.front() == '\t' || domain.front() == '"')) domain.erase(0, 1);
+        while (!domain.empty() && (domain.back() == ' ' || domain.back() == '\t' || domain.back() == '\r' || domain.back() == '\n' || domain.back() == '"')) domain.pop_back();
+
+        if (domain.starts_with("https://")) {
+            domain = domain.substr(8);
+        } else if (domain.starts_with("http://")) {
+            domain = domain.substr(7);
+        }
+
+        auto slash_pos = domain.find('/');
+        if (slash_pos != std::string::npos) {
+            domain = domain.substr(0, slash_pos);
+        }
+        auto colon_pos = domain.find(':');
+        if (colon_pos != std::string::npos) {
+            domain = domain.substr(0, colon_pos);
+        }
+
+        if (domain.empty()) {
+            res.status(400).json({
+                {"status", "error"},
+                {"protocol", "HTTP/1.1"},
+                {"message", "Missing or invalid domain in JSON body. Example: {\"domain\": \"google.com\"}"}
+            });
+            co_return;
+        }
+
+        auto executor = co_await asio::this_coro::executor;
+        asio::ip::tcp::resolver resolver(executor);
+
+        auto [ec, results] = co_await resolver.async_resolve(domain, "", asio::as_tuple(asio::use_awaitable));
+        if (ec) {
+            res.status(404).json({
+                {"status", "error"},
+                {"protocol", "HTTP/1.1"},
+                {"domain", domain},
+                {"message", "Failed to resolve domain: " + ec.message()}
+            });
+            co_return;
+        }
+
+        std::string primary_ip;
+        std::vector<std::string> all_ips;
+        for (const auto &entry : results) {
+            std::string ip = entry.endpoint().address().to_string();
+            if (primary_ip.empty()) {
+                primary_ip = ip;
+            }
+            if (std::find(all_ips.begin(), all_ips.end(), ip) == all_ips.end()) {
+                all_ips.push_back(ip);
+            }
+        }
+
+        res.status(200).json({
+            {"status", "success"},
+            {"protocol", "HTTP/1.1"},
+            {"domain", domain},
+            {"ip", primary_ip},
+            {"ips", all_ips}
+        });
+        co_return;
+    };
+
+    router.post("/api/query", dns_query_handler);
+    router.query("/api/query", dns_query_handler);
+    router.post("/api/dns", dns_query_handler);
+    router.query("/api/dns", dns_query_handler);
+
+    // 5. Protected route with Auth Middleware
     router.get("/api/protected", {auth_middleware}, [](HttpRequest &, HttpResponse &res) -> asio::awaitable<void> {
         res.status(200).json({
             {"status", "granted"},
@@ -165,7 +335,7 @@ int main(int argc, char *argv[]) {
         co_return;
     });
 
-    // 5. Dynamic path parameter
+    // 6. Dynamic path parameter
     router.get("/users/:id", [](const HttpRequest &req, HttpResponse &res) -> asio::awaitable<void> {
         res.status(200).json({
             {"endpoint", "user_details"},

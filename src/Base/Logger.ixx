@@ -17,6 +17,9 @@ export module wavex:logger;
 
 export namespace wavex::base {
     using base::LogLevel;
+    using base::OverflowPolicy;
+    using base::LoggerConfig;
+    using base::LogBuffer;
     using base::log_level_tag;
     using base::log_level_color;
     using base::Logger;
@@ -31,6 +34,15 @@ export namespace wavex::log {
     using log::warn;
     using log::error;
     using log::fatal;
+    using log::set_level;
+    using log::set_async;
+    using log::set_overflow_policy;
+    using log::configure;
+    using log::flush;
+    using log::dropped_count;
+    using log::LogLevel;
+    using log::OverflowPolicy;
+    using log::LoggerConfig;
 }
 
 export namespace wxlog = wavex::log;

@@ -1,35 +1,87 @@
+---
+trigger: always_on
+---
+
 # WaveX Architectural & Development Invariants
 
-1. **C++20 Module Interface Synchronization**:
-   - Whenever any new public class, struct, function, type alias, or template is added or modified in `include/wavex/`, you MUST update the corresponding C++20 module partition in `src/` (`.ixx` files).
-   - Ensure all public symbols are explicitly exported via `export namespace wavex::... { using ...; }`.
+## 1. C++20 Module Synchronization
+- All public types, functions, and aliases in `include/wavex/` must be exported in `src/*.ixx` partitions via `export namespace wavex::... { using ...; }`.
 
-2. **Zero-VTable & Modern C++ Invariants**:
-   - Never introduce virtual functions (`virtual`) in `Request` or `Response` base classes. Use CRTP and C++23 explicit object parameter ("deducing this": `this Self&& self`).
-   - Responses must support in-place mutation and zero-copy string views (`std::string_view`) referencing owned buffers where appropriate.
-   - Status code mutations must ensure `status_text_` synchronizes with standard RFC reason phrases (`Codec::status_text_for(code)`).
+## 2. Zero-VTable Architecture
+- No `virtual` methods in `Request` or `Response`. Use C++23 explicit object parameter ("deducing this", `this Self&& self`).
+- Responses must support in-place mutation and zero-copy `std::string_view` referencing owned buffers.
+- `status_text_` must synchronize with RFC reason phrases via `Codec::status_text_for(code)`.
 
-3. **Build & Test Invariants**:
-   - **Allowed**: You ARE allowed to compile/build and run tests for the project:
-     - Build: `cmake --build --preset fast-dev` (or `cmake --build build/test-profile -j 10`)
-     - Test: `ctest --preset run-tests --output-on-failure` (or `ctest --test-dir build/test-profile --output-on-failure`)
-   - **Prohibited (No CMake Configure)**: NEVER run CMake configuration commands directly (e.g. `cmake --preset test-profile`, `cmake -B ...`, or changing generator/toolchain cache). The configuration step must ONLY be performed by the user.
+## 3. Protocol Traits & 3-Seam Decoupling
+- `Server<Codec, Router>` must remain strictly protocol-agnostic (never branch on `is_http2` or `is_http3` in generic server code):
+  - **Transport Seam**: `handle_connection<Stream>` generic over `AsyncStream` (TCP, TLS, QUIC).
+  - **Codec Seam**: `parse_stream`, `serialize`, `result`.
+  - **Policy Seam**: `wavex::protos::protocol_traits<Codec>` for prefaces, keep-alive, headers, and ALPN.
+- **Zero Protocol Leakage**:
+  - `Server<Codec, Router>` must NEVER hold references/pointers to secondary routers (e.g. `h3_router_`), protocol enable flags (`http3_enabled_`), or protocol-specific stream handlers (`handle_http3_connection`, `spawn_http3_stream`).
+  - Generic connection loops (`ServerConnection.ipp`) must NEVER contain codec-specific debug logging (`if constexpr (is_http3_codec_v)`).
+- **Multi-Protocol Composition (`ComposedHttpServer`)**:
+  - Concurrent multi-protocol servers (e.g., running HTTP/1.1 & HTTP/2 over TCP alongside HTTP/3 over QUIC on the same port) must be managed by `ComposedHttpServer`.
+  - `ComposedHttpServer` owns `Http2Server server_` (TCP listener) and `QuicServer quic_server_` (UDP listener), dispatching QUIC streams via `server_.pool()` and synchronizing graceful shutdown.
+- **Policy-Driven Header Advertisement (`Alt-Svc`)**:
+  - Protocol advertisement headers (e.g. RFC 9114 `Alt-Svc: h3=":4433"; ma=86400`) must be injected exclusively via `protocol_traits<Codec>::prepare_response(req, res, keep_alive, timeout, remaining, alt_svc_port)`.
+  - Generic `Server` only stores a scalar `alt_svc_port_` configured by higher-level composition layers.
 
-4. **Protocol Traits & Server Decoupling (The 3-Seam Architecture)**:
-   - `Server<Codec, RouterType>` must remain completely protocol-agnostic. It speaks ONLY to concepts and traits, never directly naming specific codecs (`http1codec`/`http2codec`):
-     - **Seam 1 (Transport)**: Single `handle_connection<Stream>()` generic over any `AsyncStream` (plain TCP or TLS 1.3 `ssl::stream`). Handshake happens on the worker pool via `if constexpr (requires { stream.async_handshake(...); })`.
-     - **Seam 2 (Codec)**: `parse_stream`, `serialize`, `result`.
-     - **Seam 3 (Protocol Traits)**: `wavex::protos::protocol_traits<Codec>` answering opening connection prefaces (`has_connection_preface`, `on_connection_start`), persistence decisions (`keep_alive`), response header setup (`prepare_response`), and ALPN registration (`configure_alpn`).
-   - Never embed protocol-specific logic or `if constexpr (is_http2)` inside the generic `Server` class body.
+## 4. Response Lifecycle & Streaming Sinks
+- `res.send(...)` only commits the response payload in memory; never write directly to sockets in `send_impl()`.
+- On HTTP/1.1 and HTTP/3 the connection loop writes `res.serialize()`; on HTTP/2 the session's stream task hands it to the connection's writer queue (with flow control). Streaming output is always framed by the response for its own stream (`frame_body_chunk`, `terminal_chunk`).
+- Streaming (`start_chunked`, `write_chunk`, `end_chunked`, `send_file`) writes via the injected `write_sink_fn`.
+- `is_sent_` short-circuits middlewares. `Server` writes `res.serialize()` only if `!res.is_headers_sent()`.
 
-5. **`HttpResponse` Decoupling & Injected Write Sink**:
-   - `res.send(...)` strictly means "mark committed" with payload ready. Never perform synchronous socket writes in `send_impl()`.
-   - Streaming APIs (`start_chunked()`, `write_chunk()`, `end_chunked()`, `send_file()`) must write through an injected type-erased write sink (`write_sink_fn`), bound per-connection by `Server`.
-   - `is_sent_` signals response commitment to middleware chains (`run_chain`) for immediate short-circuiting.
-   - `is_headers_sent_` signals whether headers and data have already been flushed directly to the wire via streaming. `Server` writes `res.serialize()` if and only if `!res.is_headers_sent()`.
+## 5. Memory Architecture & FlatMap
+- Per-request key-values (params, query, headers) must use `FlatMap<K, V, InlineCap=16>` (contiguous, zero heap allocation for N <= 16).
+- Case-insensitive header lookups must use `.find_ci()` and `.insert_or_assign_ci()`.
+- Use `wavex::memory::RequestArena` (4KB inline bump allocator) for request-scoped dynamic allocations, reclaimed in O(1) via `arena.release()`. Never instantiate it in connection loops if unused.
+- Socket buffers exceeding 64KB must be shrunk via `shrink_to_fit()` on empty.
 
-6. **Future Protocol Extension Invariants (GraphQL, WebSockets, HTTP/3 QUIC)**:
-   - **GraphQL**: Operates at the Protocol/Codec layer (`Router<GraphqlProto>` with `graphql_codec`), running over standard HTTP/TLS streams. It specializes `protocol_traits<graphql_codec>` for any custom session behavior.
-   - **WebSockets**: Operates as a protocol upgrade over HTTP/1.1; the opening handshake and frame streaming map cleanly to `traits::on_connection_start` and codec framing.
-   - **HTTP/3 (QUIC / UDP)**: In QUIC, packet encryption and stream multiplexing are integrated at the UDP connection level; individual virtual QUIC streams (`QuicStream`) do NOT have or need `stream.async_handshake()`. Because `handle_connection<Stream>` uses `requires { stream.async_handshake(...); }`, passing a `QuicStream` automatically evaluates to false, skipping TCP/TLS handshakes and routing directly to QPACK/frame handling via `traits::on_connection_start`.
+## 6. Resource Limits & DoS Hard Caps
+- Query parameters hard-capped at 64 (`kMaxQueryParams`). Overflow sets `query_param_overflow_ = true` -> reject with `431 Request Header Fields Too Large`.
+- Headers capped at 100 by default (`set_max_headers(N)`).
 
+## 7. `string_view` Lifetime & Container Stability
+- Views from `req.param()`, `req.query_param()`, and `res.header()` point to ephemeral backing storage:
+  - **In-Turn (Zero-Copy)**: Valid synchronously within current turn.
+  - **Escaping (Owning Copy)**: Crossing coroutine turns, `spawn_blocking`, or caching requires `std::string(view)`.
+- Never point `string_view` into an incrementally grown `std::vector` without post-mutation view resynchronization.
+- Route wildcard slices must be contiguous pointers into the single normalized path buffer (`assert(w_begin <= w_end)`).
+
+## 8. HTTP Framing & Connection Completion
+- `HttpClient` must evaluate `parser::parse_response` per chunk and exit immediately upon complete framing; never loop until EOF.
+- When `Content-Length` is present, `buffer.size() - cursor < content_length` must yield `result::incomplete`.
+- Status `1xx`, `204`, and `304` have no body; finalize immediately with `body = ""`.
+
+## 9. HTTP/3 & QUIC Protocol Invariants
+- **Stream Demuxing (RFC 9000 §2.1 & RFC 9114 §6.2)**:
+  - `(sid & 0x03) == 0x00`: Client-initiated bidirectional stream -> Dispatched to `Server` / `HttpRouter` as HTTP/3 request stream.
+  - `(sid & 0x03) == 0x02`: Client-initiated unidirectional stream -> Drained/handled in background as peer Control or QPACK streams. **NEVER** treated as request streams and **NEVER** written to.
+  - `(sid & 0x03) == 0x03`: Server-initiated unidirectional stream -> Streams 3 (Control), 7 (QPACK encoder), 11 (QPACK decoder).
+- **Server Control & QPACK Streams**: Immediately upon TLS 1.3 handshake completion (`SSL_do_handshake == 1`) after emitting `HANDSHAKE_DONE`, server emits unidirectional Stream 3 (Type `0x00` VarInt followed by `SETTINGS` frame `0x04`), Stream 7 (`0x02` QPACK encoder), and Stream 11 (`0x03` QPACK decoder).
+- **Transport Parameter Lifetime**: `SSL_set_quic_tls_transport_params` does not copy its buffer. The backing `std::string` must remain alive across the entire connection lifecycle (`local_transport_params_` in `QuicConnection`).
+- **QPACK Prefix & Framing**: Outgoing HTTP/3 responses begin with a 2-byte QPACK prefix (`0x00 0x00`) followed by indexed static entries, wrapped in RFC 9000 VarInt frames (`HEADERS 0x01` + `DATA 0x00`), and terminated by QUIC stream FIN.
+
+## 10. Protocol Switches (WebSocket, WebTransport)
+- Connection takeover is a policy decision: `HttpResponse::upgrade(fn)` + `protocol_traits<Codec>::wants_takeover(req, res)` (synchronous) / `take_over(stream_ptr, req, res, unread)`. Never branch on `101` or `CONNECT` in `ServerConnection.ipp` (see future-protocols-architecture.md §5).
+- Upgraded protocols run on `network::AnyStream` (shared ownership, erased transport); never template session code on `tcp::socket` / `ssl::stream` / `QuicStream`.
+- WebSocket sends are queued and written by one writer coroutine on the connection executor; never `async_write` the socket from a thread other than the connection's.
+- Peeking at a QUIC stream's first bytes (WebTransport demux) must put them back with `QuicStream::unread()` before the stream reaches the HTTP/3 request path.
+- HTTP/2 connections are driven by `protocol_traits<http2codec>::serve_connection` (multiplexed session); per-request work goes through `ConnectionServices::handle()` = `Server::process_request()`. Keep one pipeline for all protocols.
+- New pseudo-headers (e.g. `:protocol`) are accepted only where the RFC allows them (`:protocol` only with `CONNECT`, which then also needs `:scheme`, `:path`, `:authority`).
+
+## 11. Test Integrity
+- NEVER modify test assertions, expected output, or fixtures when debugging test failures without explicit user consent. Root causes must be fixed in framework implementations.
+
+## 12. Associated Rules
+- [toolchain-and-build.md](toolchain-and-build.md) (Compilers, Winsock, CMake)
+- [class-struct-layout.md](class-struct-layout.md) (Member packing & layout)
+- [asio-socket-lifecycle.md](asio-socket-lifecycle.md) (Sockets, coroutines, buffers)
+- [optional-dependency-guards.md](optional-dependency-guards.md) (Dependency header guards)
+- [never-config-cmake.md](never-config-cmake.md) (CMake configure safety)
+- [future-protocols-architecture.md](future-protocols-architecture.md) (Protocol extensions)
+- [websocket-takeover-http2-session.md](websocket-takeover-http2-session.md) (WebSocket, WebTransport, takeover, HTTP/2 session)
+- [quic-transport-invariants.md](quic-transport-invariants.md) (QUIC transport & crypto)
+- [test-invariants.md](test-invariants.md) (Unit tests, stream isolation, CTest flushing)

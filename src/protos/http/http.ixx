@@ -13,17 +13,12 @@ module;
 #include <wavex/protos/http/Methods.hpp>
 #include <wavex/protos/http/http1codec.hpp>
 #include <wavex/protos/http/http2codec.hpp>
+#include <wavex/protos/http/http3codec.hpp>
 #include <wavex/protos/http/HttpRequest.hpp>
 #include <wavex/protos/http/HttpResponse.hpp>
 #include <wavex/protos/http/http.hpp>
 
 export module wavex:protos_http;
-
-export import :protos_http_methods;
-export import :protos_http_codec;
-export import :protos_http_http2codec;
-export import :protos_http_request;
-export import :protos_http_response;
 
 export namespace wavex::protos::http {
     using http::method;
@@ -39,16 +34,29 @@ export namespace wavex::protos::http {
     using http::decoder;
     using http::http1codec;
     using http::http2codec;
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+    using http::http3codec;
+#endif
     using http::HttpRequest;
     using http::Http1Request;
     using http::http1request;
     using http::Http2Request;
     using http::http2request;
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+    using http::Http3Request;
+    using http::http3request;
+#endif
     using http::HttpResponse;
     using http::Http1Response;
     using http::http1response;
     using http::Http2Response;
     using http::http2response;
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+    using http::Http3Response;
+    using http::http3response;
+#endif
+    using http::StringSink;
+
 
     // Templated codec helpers
     using http::parse_request;

@@ -1,0 +1,77 @@
+name: Sanitizers
+
+# ThreadSanitizer and ASan+UBSan builds are slow on 2 vCPU, so they run on pushes to dev, nightly and on demand
+# instead of on every pull request.
+
+on:
+  push:
+    branches: [dev]
+  schedule:
+    - cron: "17 21 * * *" # 02:47 IST
+  workflow_dispatch:
+
+concurrency:
+  group: sanitizers-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_MAXSIZE: 500M
+
+jobs:
+  sanitize:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    # Both sanitizer jobs are strict: the suite is TSan-clean (halt_on_error=1), so a report is a regression.
+    # `informational` stays in the matrix so a job can be demoted temporarily without restructuring.
+    continue-on-error: ${{ matrix.informational }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ThreadSanitizer
+            option: WAVEX_TEST_TSAN
+            informational: false
+          - name: ASan + UBSan + LSan
+            option: WAVEX_TEST_ASAN
+            informational: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Cache OpenSSL 3.5 and ccache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/openssl-3.5.4
+            .ccache
+          key: san-${{ matrix.option }}-${{ hashFiles('.github/scripts/setup-linux.sh') }}-${{ github.sha }}
+          restore-keys: |
+            san-${{ matrix.option }}-${{ hashFiles('.github/scripts/setup-linux.sh') }}-
+
+      - name: Toolchain (CMake 4, OpenSSL 3.5)
+        run: bash .github/scripts/setup-linux.sh
+
+      - name: Generate TLS test certificate
+        run: |
+          mkdir -p ssl
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout ssl/test.key -out ssl/test.crt \
+            -days 2 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -D${{ matrix.option }}=ON -DWAVEX_USE_MODULE=OFF \
+            -DOPENSSL_ROOT_DIR="$OPENSSL_PREFIX" -DOPENSSL_INCLUDE_DIR="$OPENSSL_PREFIX/include" \
+            -DOPENSSL_CRYPTO_LIBRARY="$OPENSSL_PREFIX/lib/libcrypto.so" \
+            -DOPENSSL_SSL_LIBRARY="$OPENSSL_PREFIX/lib/libssl.so"
+
+      - name: Build
+        run: cmake --build build -j2
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure --timeout 300

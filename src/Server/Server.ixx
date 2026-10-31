@@ -13,12 +13,11 @@ module;
 #include <wavex/Server/TlsConfig.hpp>
 #include <wavex/Server/WorkStealingQueue.hpp>
 #include <wavex/Server/ThreadPool.hpp>
+#include <wavex/Server/BlockingPool.hpp>
 #include <wavex/Server/Server.hpp>
+#include <wavex/Async/SpawnBlocking.hpp>
 
 export module wavex:server;
-
-export import :server_queue;
-export import :server_pool;
 
 export namespace wavex::server {
     using server::TlsConfig;
@@ -28,11 +27,25 @@ export namespace wavex::server {
     using server::ThreadPoolConfig;
     using server::WorkerNode;
     using server::ThreadPool;
+    using server::BlockingTask;
+    using server::BlockingThreadPool;
+    using server::ConnectionTracker;
+    using server::ServerState;
     using server::Server;
     using server::Http1Server;
     using server::http1server;
     using server::Http2Server;
     using server::http2server;
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+    using server::Http3Server;
+    using server::http3server;
+    using server::ComposedHttpServer;
+    using server::composed_http_server;
+#endif
     using server::HttpServer;
     using server::httpserver;
+}
+
+export namespace wavex {
+    using wavex::spawn_blocking;
 }

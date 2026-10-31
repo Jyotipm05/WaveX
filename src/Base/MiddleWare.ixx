@@ -20,30 +20,54 @@ module;
 // outside this translation unit but their declarations are available
 // to the module body below.
 #define ASIO_HAS_CO_AWAIT 1
-#include <functional>
-#include <asio/awaitable.hpp>
+#include <wavex/Base/FlatMap.hpp>
+#include <wavex/Base/Event.hpp>
+#include <wavex/Base/Memory.hpp>
+#include <wavex/Base/Uri.hpp>
+#include <wavex/Base/Url.hpp>
 #include <wavex/Base/MimeTypes.hpp>
 #include <wavex/Base/Request.hpp>
 #include <wavex/Base/Response.hpp>
 #include <wavex/Base/MiddleWare.hpp>
+#include <wavex/Base/StringSink.hpp>
 
 export module wavex:middleware;
 
 export namespace wavex::base {
+    using base::FlatMap;
+    using base::Event;
+    using base::EventBus;
+    using base::Subscription;
+    using base::ShutdownEvent;
+    using base::ServerShutdownEvent;
     using base::Request;
     using base::Response;
     using base::mime_type_from_ext;
     using base::mime_type_from_path;
 
-    /// Callable that invokes the next middleware or the final handler.
-    using Next = std::function<asio::awaitable<void>()>;
-
-    /**
-     * @brief Generic middleware function signature for CRTP Request and Response types.
-     */
-    template<typename ReqT, typename ResT>
-    using GenericMiddlewareFn = std::function<asio::awaitable<void>(ReqT &, ResT &, Next)>;
-
+    using base::Next;
+    using base::GenericMiddlewareFn;
     using base::keep_alive;
     using base::sse_stay_active;
+    using base::body_limit;
+    using base::StringSink;
+    using base::resize_and_overwrite_compat;
 } // export namespace wavex::base
+
+export namespace wavex::memory {
+    using memory::RequestArena;
+    using memory::ConnectionMemoryPool;
+    using memory::get_thread_local_pool;
+    using memory::get_default_upstream_resource;
+} // export namespace wavex::memory
+
+export namespace wavex::uri {
+    using uri::encode;
+    using uri::decode;
+    using uri::decode_to;
+} // export namespace wavex::uri
+
+export namespace wavex::url {
+    using url::Url;
+    using url::parse_query;
+} // export namespace wavex::url

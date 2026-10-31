@@ -23,6 +23,9 @@
 #ifndef ASIO_HAS_CO_AWAIT
 #define ASIO_HAS_CO_AWAIT 1
 #endif
+#if defined(__MINGW32__) && !defined(ASIO_HAS_PTHREADS)
+#define ASIO_HAS_PTHREADS 1
+#endif
 #include <asio/awaitable.hpp>
 
 namespace wavex {
@@ -31,10 +34,21 @@ namespace wavex {
      * @brief C++23 "Deducing This" CRTP replacement.
      */
     class Chainable {
-    protected:
+    public:
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        Chainable() = default;
+
         ~Chainable() = default;
 
-    public:
+        Chainable(const Chainable &) = default;
+
+        Chainable &operator=(const Chainable &) = default;
+
+        Chainable(Chainable &&) noexcept = default;
+
+        Chainable &operator=(Chainable &&) noexcept = default;
+
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
         template<typename Self, typename... Args>
         decltype(auto) handle(this Self &&self, Args &&... args) {
             return std::forward<Self>(self).handle_impl(std::forward<Args>(args)...);
@@ -61,8 +75,8 @@ namespace wavex {
     // Specialization to match asio::awaitable and extract the result type
     template<typename T, typename Executor>
     struct awaitable_traits<asio::awaitable<T, Executor> > {
-        static constexpr bool is_awaitable = true;
         using result_type = T;
+        static constexpr bool is_awaitable = true;
     };
 
     /**
@@ -71,8 +85,17 @@ namespace wavex {
      */
     template<typename... Handlers>
     class StaticChain {
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
         std::tuple<Handlers...> handlers_;
 
+    public:
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        constexpr explicit StaticChain(Handlers... handlers)
+            : handlers_(std::move(handlers)...) {
+        }
+
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
+    private:
         template<typename T>
         static decltype(auto) unwrap(T &t) { return t; }
 
@@ -83,10 +106,6 @@ namespace wavex {
         static decltype(auto) unwrap(const std::reference_wrapper<T> &rw) { return rw.get(); }
 
     public:
-        constexpr explicit StaticChain(Handlers... handlers)
-            : handlers_(std::move(handlers)...) {
-        }
-
         [[nodiscard]] constexpr const std::tuple<Handlers...> &get_tuple() const {
             return handlers_;
         }
@@ -104,31 +123,41 @@ namespace wavex {
 
         template<typename... Args>
         asio::awaitable<bool> process_all_async(Args &&... args) {
-            auto run_one = [&]<typename H>(H &h) -> asio::awaitable<bool> {
+            co_return co_await process_all_async_impl<0>(args...);
+        }
+
+    private:
+        template<std::size_t Index, typename... Args>
+        asio::awaitable<bool> process_all_async_impl(Args &... args) {
+            if constexpr (Index < sizeof...(Handlers)) {
+                auto &h = std::get<Index>(handlers_);
                 using Ret = std::remove_cvref_t<decltype(unwrap(h).handle(args...))>;
+                bool ok{};
 
                 if constexpr (std::same_as<Ret, bool>) {
-                    co_return unwrap(h).handle(args...);
+                    ok = unwrap(h).handle(args...);
                 } else if constexpr (awaitable_traits<Ret>::is_awaitable) {
                     using AwaitRet = awaitable_traits<Ret>::result_type;
 
                     if constexpr (std::same_as<AwaitRet, bool>) {
-                        co_return co_await unwrap(h).handle(args...);
+                        ok = co_await unwrap(h).handle(args...);
                     } else {
                         co_await unwrap(h).handle(args...);
-                        co_return true;
+                        ok = true;
                     }
                 } else {
                     unwrap(h).handle(args...);
-                    co_return true;
+                    ok = true;
                 }
-            };
 
-            auto tuple_runner = [&](auto &... h) -> asio::awaitable<bool> {
-                co_return (... && co_await run_one(h));
-            };
+                if (!ok) {
+                    co_return false;
+                }
 
-            co_return co_await std::apply(tuple_runner, handlers_);
+                co_return co_await process_all_async_impl<Index + 1>(args...);
+            } else {
+                co_return true;
+            }
         }
     };
 
@@ -143,21 +172,34 @@ namespace wavex {
      */
     template<typename Handler>
     class ConditionalChainable : public Chainable {
+        // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
         Handler handler_;
-        bool enabled_ = true;
+        bool enabled_{true};
 
     public:
-        constexpr explicit ConditionalChainable(Handler h, bool enabled = true)
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        constexpr explicit ConditionalChainable(Handler h, const bool enabled = true)
             : handler_(std::move(h)), enabled_(enabled) {
         }
 
-        void set_enabled(bool enabled) { enabled_ = enabled; }
+        ~ConditionalChainable() = default;
+
+        ConditionalChainable(const ConditionalChainable &) = default;
+
+        ConditionalChainable &operator=(const ConditionalChainable &) = default;
+
+        ConditionalChainable(ConditionalChainable &&) noexcept = default;
+
+        ConditionalChainable &operator=(ConditionalChainable &&) noexcept = default;
+
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
+        void set_enabled(const bool enabled) { enabled_ = enabled; }
 
         [[nodiscard]] bool is_enabled() const { return enabled_; }
 
         template<typename Self, typename... Args>
         decltype(auto) handle_impl(this Self &&self, Args &&... args) {
-            if (!self.enabled_) {
+            if (!self.enabled_) [[unlikely]] {
                 using Ret = std::remove_cvref_t<decltype(self.handler_.handle(std::forward<Args>(args)...))>;
                 if constexpr (std::same_as<Ret, bool>) {
                     return true;
@@ -181,7 +223,21 @@ namespace wavex {
      * @struct KeepAlivePolicy
      */
     template<unsigned TimeoutSec = 5, unsigned MaxRequests = 1000>
-    struct KeepAlivePolicy : public Chainable {
+    struct KeepAlivePolicy : Chainable {
+        // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────
+        KeepAlivePolicy() = default;
+
+        ~KeepAlivePolicy() = default;
+
+        KeepAlivePolicy(const KeepAlivePolicy &) = default;
+
+        KeepAlivePolicy &operator=(const KeepAlivePolicy &) = default;
+
+        KeepAlivePolicy(KeepAlivePolicy &&) noexcept = default;
+
+        KeepAlivePolicy &operator=(KeepAlivePolicy &&) noexcept = default;
+
+        // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
         template<typename Self, typename Req, typename Res>
         bool handle_impl(this Self &&, Req &req, Res &res) {
             if (req.should_keep_alive()) {

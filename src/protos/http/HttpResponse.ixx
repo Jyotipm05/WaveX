@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2026 Jyotipriya Mondal
+// Copyright (c) 2026 Jyotipriya Mondal
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -18,4 +18,5 @@ export namespace wavex::protos::http {
     using http::HttpResponse;
     using http::Http1Response;
     using http::http1response;
+    using http::StringSink;
 }
