@@ -98,6 +98,10 @@ WaveX is a pure C++23 framework requiring a conforming modern C++23 compiler and
 - CI Debug jobs build with `-g1` (`-DCMAKE_CXX_FLAGS_DEBUG=-g1`): line tables are kept for backtraces and sanitizer reports, but local-variable debug info is dropped. Measured on two test targets, this cut compile time by about 11% and test binaries by about 36%. Use plain `-g` locally when stepping through code in a debugger.
 - Install the distro RE2 to skip those steps: `sudo apt install libre2-dev` (Ubuntu 24.04 ships RE2 2023-03-01, which does not need Abseil). CMake finds it through pkg-config when there is no CMake package, and a clean build drops from 369 to 101 steps. The GCC and Clang CI jobs do this. Sanitizer builds should keep building RE2 from source so it is instrumented too.
 
+### Portability workflow
+
+`.github/workflows/portability.yml` builds and tests on Windows (MSVC, vcpkg) and macOS (Homebrew LLVM) when started manually and once a week. It is informational: the jobs use `continue-on-error`, so they never block a pull request, and they have not been run yet, so expect to adjust them on first use. Move a job into `ci.yml` once it passes reliably.
+
 ---
 
 ## Compiler-specific notes
