@@ -547,13 +547,17 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/WaveXConfig.cmake" DESTINATION "${CMA
 # ===========================================================================
 #  Quality of Life
 # ===========================================================================
-# Auto-copy compile_commands.json to project root for Clangd
-add_custom_target(clangd_sync ALL
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_BINARY_DIR}/compile_commands.json"
-        "${CMAKE_SOURCE_DIR}/compile_commands.json"
-        COMMENT "Syncing compile_commands.json for Clangd"
-)
+# Auto-copy compile_commands.json to project root for Clangd.
+# Only the Ninja and Makefile generators write that file; with Visual Studio or Xcode there is nothing to copy and
+# the ALL target would fail the whole build ("Error copying file ... compile_commands.json").
+if (CMAKE_EXPORT_COMPILE_COMMANDS AND CMAKE_GENERATOR MATCHES "Ninja|Makefiles")
+    add_custom_target(clangd_sync ALL
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_BINARY_DIR}/compile_commands.json"
+            "${CMAKE_SOURCE_DIR}/compile_commands.json"
+            COMMENT "Syncing compile_commands.json for Clangd"
+    )
+endif ()
 
 if (WAVEX_TEST)
     enable_testing()
