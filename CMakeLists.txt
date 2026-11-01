@@ -300,6 +300,8 @@ add_library(wavex
         src/Network/QUIC/QuicConnection.cpp
         src/Network/QUIC/QuicServer.cpp
         src/Network/QUIC/QuicClient.cpp
+        src/Network/Dns/DnsMessage.cpp
+        src/Network/Dns/Resolver.cpp
         src/Network/QUIC/QuicSocket.cpp
         src/Server/ConnectionTracker.cpp
         src/Server/ComposedHttpServer.cpp
@@ -320,7 +322,7 @@ target_link_libraries(wavex PUBLIC
 )
 
 if (WIN32)
-    target_link_libraries(wavex PUBLIC ws2_32 mswsock)
+    target_link_libraries(wavex PUBLIC ws2_32 mswsock iphlpapi)
 endif ()
 
 # Native async file I/O for wavex::fs (io_mode::native). Windows has it through IOCP with no setup. On Linux Asio
@@ -425,6 +427,8 @@ target_sources(wavex
         include/wavex/Network/QUIC/QuicListener.hpp
         include/wavex/Network/TransportListener.hpp
         include/wavex/Network/QUIC/QuicClient.hpp
+        include/wavex/Network/Dns/DnsMessage.hpp
+        include/wavex/Network/Dns/Resolver.hpp
         include/wavex/Network/QUIC/QuicSocket.hpp
         include/wavex/Server/WorkStealingQueue.hpp
         include/wavex/Server/ThreadPool.hpp
@@ -470,6 +474,7 @@ if (WAVEX_USE_MODULE)
             src/protos/websocket/WebSocket.ixx
             src/protos/webtransport/WebTransport.ixx
             src/Network/AnyStream.ixx
+            src/Network/Dns/Dns.ixx
             src/Engine/Router.ixx
             src/Engine/HttpRouter.ixx
             src/Server/Server.ixx
@@ -706,6 +711,7 @@ if (WAVEX_TEST)
     wavex_add_test(wavex_connection_tracker_tests tests/test_connection_tracker.cpp)
     wavex_add_test(wavex_protocol_traits_tests tests/test_protocol_traits.cpp)
     wavex_add_test(wavex_http2_codec_tests tests/test_http2_codec.cpp)
+    wavex_add_test(wavex_dns_tests tests/test_dns.cpp)
     wavex_add_test(wavex_temp_file_tests tests/test_temp_file.cpp)
     wavex_add_test(wavex_compression_tests tests/test_compression.cpp)
     wavex_add_test(wavex_multipart_tests tests/test_multipart.cpp)

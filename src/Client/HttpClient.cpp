@@ -17,6 +17,7 @@
 #include <algorithm>
 
 #include <wavex/Client/HttpClient.hpp>
+#include <wavex/Network/Dns/Resolver.hpp>
 #include <wavex/protos/http/http2codec.hpp>
 #include <wavex/Utils/BinaryFile.hpp>
 #include <wavex/Utils/FsUtils.hpp>
@@ -445,15 +446,38 @@ namespace wavex::client {
             endpoints = asio::ip::tcp::resolver::results_type::create(
                 asio::ip::tcp::endpoint(ip_addr, port), host, port_str);
         } else {
-            asio::ip::tcp::resolver resolver(executor);
             asio::error_code resolve_ec;
-            endpoints = co_await resolver.async_resolve(
-                host, port_str, asio::redirect_error(asio::use_awaitable, resolve_ec));
-            if (resolve_ec) {
-                res.status_code(502);
-                res.status_text("Bad Gateway");
-                res.body("Host resolution failed: " + resolve_ec.message());
-                co_return res;
+            bool resolved = false;
+            if (options.dns != DnsMode::System) {
+                if (auto native = co_await dns::resolver::shared()->resolve(host)) {
+                    std::vector<asio::ip::tcp::endpoint> eps;
+                    eps.reserve(native->list.size());
+                    for (const auto &a: native->list) eps.emplace_back(a, port);
+                    endpoints = asio::ip::tcp::resolver::results_type::create(eps.begin(), eps.end(), host, port_str);
+                    resolved = true;
+                } else {
+                    resolve_ec = native.error();
+                    const bool definitive = native.error() == dns::errc::name_not_found ||
+                                            native.error() == dns::errc::no_data ||
+                                            native.error() == dns::errc::invalid_name;
+                    if (options.dns == DnsMode::Native || definitive) {
+                        res.status_code(502);
+                        res.status_text("Bad Gateway");
+                        res.body("Host resolution failed: " + resolve_ec.message());
+                        co_return res;
+                    }
+                }
+            }
+            if (!resolved) {
+                asio::ip::tcp::resolver resolver(executor);
+                endpoints = co_await resolver.async_resolve(
+                    host, port_str, asio::redirect_error(asio::use_awaitable, resolve_ec));
+                if (resolve_ec) {
+                    res.status_code(502);
+                    res.status_text("Bad Gateway");
+                    res.body("Host resolution failed: " + resolve_ec.message());
+                    co_return res;
+                }
             }
         }
 

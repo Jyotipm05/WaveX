@@ -58,6 +58,13 @@ namespace wavex::client {
      * @struct ClientOptions
      * @brief Configuration options for HttpClient requests.
      */
+    /// How the client resolves host names.
+    enum class DnsMode {
+        NativeWithSystemFallback, ///< WaveX's built-in resolver; the OS resolver is used if no DNS server answered
+        Native, ///< built-in resolver only
+        System, ///< OS resolver (getaddrinfo, on a helper thread)
+    };
+
     struct ClientOptions {
         // ─── 2. Member Variables (SECOND - Ordered for Minimal Padding) ────
         std::chrono::milliseconds timeout{30000}; ///< Request timeout (default: 30s)
@@ -65,6 +72,7 @@ namespace wavex::client {
         std::string cert_file{}; ///< Optional client certificate for mTLS
         std::string key_file{}; ///< Optional client private key for mTLS
         HttpVersion version{HttpVersion::Auto}; ///< Protocol version strategy
+        DnsMode dns{DnsMode::NativeWithSystemFallback}; ///< Host name resolution strategy
         bool verify_peer{false}; ///< Verify TLS server certificates (default: false for development/self-signed)
     };
 

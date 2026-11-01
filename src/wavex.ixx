@@ -26,6 +26,7 @@ export import :protos_http;
 export import :protos_websocket;
 export import :protos_webtransport;
 export import :network_any_stream;
+export import :dns;
 export import :middleware;
 export import :router;
 export import :http_router;
@@ -105,6 +106,27 @@ export namespace wavex::protos::http {
 
 export namespace wavex::network {
     using network::AnyStream;
+}
+
+export namespace wavex::dns {
+    using dns::rr_type;
+    using dns::rcode;
+    using dns::svcb_data;
+    using dns::message;
+    using dns::record;
+    using dns::errc;
+    using dns::category;
+    using dns::make_error_code;
+    using dns::config;
+    using dns::parse_resolv_conf;
+    using dns::parse_hosts;
+    using dns::system_config;
+    using dns::resolve_options;
+    using dns::resolver_options;
+    using dns::addresses;
+    using dns::resolver;
+    using dns::build_query;
+    using dns::parse_message;
 }
 
 export namespace wavex::protos::websocket {
