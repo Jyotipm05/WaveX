@@ -52,4 +52,9 @@ export namespace wavex::fs {
     using fs::append_file;
     using fs::remove;
     using fs::copy_file;
+    using fs::io_mode;
+    using fs::native_read_max_bytes;
+    using fs::native_io_available;
+    using fs::set_io_mode;
+    using fs::get_io_mode;
 }

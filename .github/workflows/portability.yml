@@ -106,3 +106,53 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure --timeout 120 -j3
+
+  linux-io-uring:
+    name: Linux / GCC 14 / io_uring file I/O
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    continue-on-error: true
+    env:
+      # libre2-dev: distro RE2 (see CMakeLists.txt). liburing-dev: Asio's io_uring file I/O (-DWAVEX_IO_URING=ON).
+      EXTRA_APT: libre2-dev liburing-dev
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Cache OpenSSL 3.5 and ccache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/openssl-3.5.4
+            .ccache
+          key: linux-uring-${{ hashFiles('.github/scripts/setup-linux.sh') }}-${{ github.sha }}
+          restore-keys: |
+            linux-uring-${{ hashFiles('.github/scripts/setup-linux.sh') }}-
+
+      - name: Toolchain (CMake 4, OpenSSL 3.5)
+        run: bash .github/scripts/setup-linux.sh
+
+      - name: Generate TLS test certificate
+        run: |
+          mkdir -p ssl
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout ssl/test.key -out ssl/test.crt \
+            -days 2 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+
+      # ASIO_HAS_IO_URING changes several Asio internals, so the whole suite runs with it, not only the fs tests.
+      # The hosted runner's kernel may refuse io_uring; WaveX then falls back to the blocking pool by itself and
+      # the fs test reports "native_io_available() = no".
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS_DEBUG=-g1 -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DWAVEX_TEST=ON -DWAVEX_USE_MODULE=OFF -DWAVEX_IO_URING=ON \
+            -DOPENSSL_ROOT_DIR="$OPENSSL_PREFIX" -DOPENSSL_INCLUDE_DIR="$OPENSSL_PREFIX/include" \
+            -DOPENSSL_CRYPTO_LIBRARY="$OPENSSL_PREFIX/lib/libcrypto.so" \
+            -DOPENSSL_SSL_LIBRARY="$OPENSSL_PREFIX/lib/libssl.so"
+
+      - name: Build
+        run: cmake --build build -j2
+
+      - name: Test
+        env:
+          LD_LIBRARY_PATH: ${{ env.OPENSSL_PREFIX }}/lib
+        run: ctest --test-dir build --output-on-failure --timeout 120 -j2

@@ -163,6 +163,26 @@ flowchart TB
 
 ```
 
+## Async file I/O
+
+`wavex::fs` (`read_file`, `read_bytes`, `write_file`, `append_file`, `copy_file`, `remove`) runs its blocking file code (`open`, `stat`, `read`, `write`, `close`) on the blocking thread pool (`wavex::spawn_blocking`), so a slow or network-backed disk cannot stall the worker that serves connections. The `std::filesystem` / `FILE*` calls themselves are blocking; the pool is what makes the coroutine API non-blocking. Errors keep their real `errno` (`EACCES`, `ENOENT`, `ENOSPC`, ...), and `write_file` reports a failed flush instead of silently truncating the file.
+
+`fs::set_io_mode(fs::io_mode::native)` opts in to Asio's native file I/O (`asio::stream_file`: IOCP on Windows, io_uring on Linux when built with `-DWAVEX_IO_URING=ON`) for reads of files up to `fs::native_read_max_bytes` (64 KiB). Bigger files, and everything else (writes, copy, remove: Asio has no asynchronous form of them), stay on the pool. `fs::native_io_available()` tells whether the build and the kernel support it; if the kernel refuses (io_uring blocked by seccomp, for example) WaveX falls back to the pool by itself.
+
+Measured on Linux 6.18, GCC 14 -O2, one `io_context` thread, warm page cache, reads per second (`spawn_blocking` / `stream_file`):
+
+| File size | 1 reader | 16 concurrent | 64 concurrent |
+|:----------|:---------|:--------------|:--------------|
+| 4 KiB     | 25k / 124k (4.9x) | 68k / 234k (3.4x) | 73k / 241k (3.3x) |
+| 64 KiB    | 21k / 108k (5.2x) | 54k / 98k (1.8x)  | 62k / 90k (1.5x)  |
+| 256 KiB   | 16k / 30k (1.9x)  | 39k / 28k (0.7x)  | 47k / 26k (0.55x) |
+| 1 MiB     | 4.6k / 6.6k (1.5x) | 12k / 7.1k (0.57x) | 16k / 6.3k (0.40x) |
+| 4 MiB     | 450 / 1.2k (2.6x) | 2.3k / 0.8k (0.34x) | 2.4k / 0.7k (0.30x) |
+
+Small files are several times faster natively; from about 256 KiB the pool's parallel reads win under load, hence the size limit. Writes showed no consistent gain (the `open`/truncate dominates), so they always use the pool.
+
+Why `native` is opt-in: Asio opens the file with a synchronous `open()` on the calling worker. On a warm local disk that is microseconds, but on a cold cache or a network file system it can block every connection on that worker, which is exactly what the default mode guarantees against. Enable it when your files live on fast local storage.
+
 ## Request lifecycle
 
 The sequence below follows one HTTP/1.1 connection: accept, keep-alive loop, parse, route, middleware, serialize, persistence decision and teardown.

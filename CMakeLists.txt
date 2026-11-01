@@ -251,6 +251,15 @@ if (WAVEX_ENABLE_TLS)
     find_package(OpenSSL QUIET)
     if (OpenSSL_FOUND)
         message(STATUS "OpenSSL found: ${OPENSSL_VERSION}")
+        # Asio (any release so far) reads ASN1_STRING fields and stores X509_get_subject_name() results in non-const
+        # pointers; OpenSSL 4 made those types opaque/const, so asio/ssl/impl/rfc2818_verification.ipp no longer
+        # compiles. Fail here with an explanation instead of 18 errors deep inside Asio.
+        option(WAVEX_ALLOW_UNSUPPORTED_OPENSSL "Do not reject OpenSSL >= 4 (the build will fail inside Asio)" OFF)
+        if (OPENSSL_VERSION VERSION_GREATER_EQUAL 4.0 AND NOT WAVEX_ALLOW_UNSUPPORTED_OPENSSL)
+            message(FATAL_ERROR "OpenSSL ${OPENSSL_VERSION} is not supported: Asio does not build against OpenSSL 4. "
+                    "Use OpenSSL 3.5 or 3.6 (set OPENSSL_ROOT_DIR to it; vcpkg builds pin it in vcpkg.json), "
+                    "or configure with -DWAVEX_ENABLE_TLS=OFF.")
+        endif ()
         set(WAVEX_HAS_SSL ON)
     else ()
         message(WARNING "OpenSSL requested but not found — TLS features will be compiled out.")
@@ -312,6 +321,26 @@ target_link_libraries(wavex PUBLIC
 
 if (WIN32)
     target_link_libraries(wavex PUBLIC ws2_32 mswsock)
+endif ()
+
+# Native async file I/O for wavex::fs (io_mode::native). Windows has it through IOCP with no setup. On Linux Asio
+# needs io_uring, which changes several Asio internals (sockets, timers, thread_info_base), so ASIO_HAS_IO_URING must
+# be the same in every translation unit that includes Asio: it is a PUBLIC definition and liburing a PUBLIC link
+# dependency, which is why this is an opt-in option and not automatic.
+option(WAVEX_IO_URING "Enable Asio's io_uring file I/O on Linux (needs liburing; consumers need it too)" OFF)
+if (WAVEX_IO_URING)
+    if (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        message(WARNING "WAVEX_IO_URING is Linux-only; ignored on ${CMAKE_SYSTEM_NAME}.")
+    else ()
+        find_path(WAVEX_LIBURING_INCLUDE_DIR liburing.h)
+        find_library(WAVEX_LIBURING_LIBRARY uring)
+        if (NOT WAVEX_LIBURING_INCLUDE_DIR OR NOT WAVEX_LIBURING_LIBRARY)
+            message(FATAL_ERROR "WAVEX_IO_URING=ON needs liburing (Debian/Ubuntu: apt install liburing-dev).")
+        endif ()
+        message(STATUS "io_uring file I/O enabled (liburing: ${WAVEX_LIBURING_LIBRARY})")
+        target_compile_definitions(wavex PUBLIC ASIO_HAS_IO_URING=1)
+        target_link_libraries(wavex PUBLIC uring)
+    endif ()
 endif ()
 
 target_compile_definitions(wavex PUBLIC
@@ -552,7 +581,9 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/WaveXConfig.cmake" DESTINATION "${CMA
 # Auto-copy compile_commands.json to project root for Clangd.
 # Only the Ninja and Makefile generators write that file; with Visual Studio or Xcode there is nothing to copy and
 # the ALL target would fail the whole build ("Error copying file ... compile_commands.json").
-if (CMAKE_EXPORT_COMPILE_COMMANDS AND CMAKE_GENERATOR MATCHES "Ninja|Makefiles")
+# Only for a top-level build: when WaveX is pulled in with add_subdirectory/FetchContent it must not write into (or
+# add an ALL target to) the consuming project's source tree.
+if (PROJECT_IS_TOP_LEVEL AND CMAKE_EXPORT_COMPILE_COMMANDS AND CMAKE_GENERATOR MATCHES "Ninja|Makefiles")
     add_custom_target(clangd_sync ALL
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_BINARY_DIR}/compile_commands.json"

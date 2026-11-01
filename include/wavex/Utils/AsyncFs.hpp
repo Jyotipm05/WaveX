@@ -6,15 +6,23 @@
 
 /**
  * @file AsyncFs.hpp
- * @brief Tokio-like async file system operations built on wavex::spawn_blocking.
+ * @brief Tokio-like async file system operations.
  *
- * Provides non-blocking file read, write, append, copy, and remove utilities
- * that execute standard C++ std::ifstream/ofstream/std::filesystem calls on
- * the dedicated blocking thread pool, returning results via std::expected.
+ * Provides non-blocking file read, write, append, copy, and remove utilities returning results via
+ * std::expected. By default every call runs its blocking file code (open, stat, read, write, close) on the
+ * dedicated blocking thread pool (wavex::spawn_blocking), so a slow disk or network file system can never stall
+ * the worker that serves your connections.
+ *
+ * Optionally (`set_io_mode(io_mode::native)`), reads of small files use Asio's native file I/O
+ * (asio::stream_file: IOCP on Windows, io_uring on Linux when built with -DWAVEX_IO_URING=ON), which skips the
+ * thread hop. Asio opens the file with a synchronous open() on the calling worker, so that mode trades the
+ * "never blocks a worker" guarantee for lower latency on local disks; it is off by default. See the
+ * "Async file I/O" section of docs/architecture.md for measurements.
  */
 
 #pragma once
 
+#include <cstddef>
 #include <expected>
 #include <string>
 #include <system_error>
@@ -26,6 +34,27 @@
 #include <wavex/Utils/FsUtils.hpp>
 
 namespace wavex::fs {
+    /// How read_file()/read_bytes() reach the file system.
+    enum class io_mode {
+        blocking_pool, ///< default: all file code runs on the blocking thread pool (never blocks a worker)
+        native ///< small files via Asio's native file I/O when the build has it; larger files use the pool
+    };
+
+    /// Largest file (bytes) that `io_mode::native` reads natively; bigger files go to the blocking pool, which wins
+    /// on large files under concurrency (measured crossover between 64 KiB and 256 KiB).
+    inline constexpr std::size_t native_read_max_bytes = 64 * 1024;
+
+    /// True when this build of WaveX has native async file I/O (Windows IOCP, or Linux with WAVEX_IO_URING=ON) and
+    /// the kernel has not refused it at run time.
+    [[nodiscard]] bool native_io_available() noexcept;
+
+    /// Select the I/O mode (process-wide, thread-safe). Returns the mode now in effect: asking for `native` where
+    /// `native_io_available()` is false leaves `blocking_pool` in effect.
+    io_mode set_io_mode(io_mode mode) noexcept;
+
+    /// The mode currently in effect.
+    [[nodiscard]] io_mode get_io_mode() noexcept;
+
     namespace detail {
         template<typename T>
         std::string to_string_path(const T &p) {

@@ -11,6 +11,7 @@
 
 #include <wavex/Utils/BinaryFile.hpp>
 #include <wavex/Utils/FsUtils.hpp>
+#include <cerrno>
 #include <cstddef>
 #include <cstdio>
 #include <string>
@@ -26,6 +27,13 @@
 #endif
 
 namespace wavex::utils {
+    namespace {
+        std::error_code last_errno_or(const std::errc fallback) noexcept {
+            const int e = errno;
+            return e != 0 ? std::error_code(e, std::generic_category()) : std::make_error_code(fallback);
+        }
+    } // namespace
+
     BinaryFile::BinaryFile(const std::string_view path, const FileMode mode) noexcept {
         open(path, mode);
     }
@@ -132,7 +140,8 @@ namespace wavex::utils {
     std::expected<std::string, std::error_code> BinaryFile::read_all(const std::string_view path) {
         BinaryFile file(path, FileMode::Read);
         if (!file.is_open()) {
-            return std::unexpected(std::make_error_code(std::errc::no_such_file_or_directory));
+            // The failed open() is the last call that touched errno: keep the real reason (ENOENT, EACCES, EMFILE, ...).
+            return std::unexpected(last_errno_or(std::errc::no_such_file_or_directory));
         }
         const auto sz = file.file_size();
         std::string content;
@@ -158,6 +167,8 @@ namespace wavex::utils {
                 return false;
             }
         }
-        return file.write(content);
+        // fwrite() only fills the stdio buffer; a full disk or a quota error shows up at flush time. Report it
+        // instead of silently dropping the tail of the file.
+        return file.write(content) && file.flush();
     }
 } // namespace wavex::utils

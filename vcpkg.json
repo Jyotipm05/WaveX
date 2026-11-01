@@ -14,5 +14,18 @@
     "nlohmann-json",
     "re2",
     "openssl"
+  ],
+  "builtin-baseline": "9a5dfef5d1a0438a7d24856a85bd60f309d355e9",
+  "overrides": [
+    {
+      "name": "openssl",
+      "version": "3.6.5",
+      "port-version": 2
+    },
+    {
+      "name": "asio",
+      "version": "1.32.0",
+      "port-version": 0
+    }
   ]
 }

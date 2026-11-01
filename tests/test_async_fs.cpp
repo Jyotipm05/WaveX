@@ -158,11 +158,83 @@ void test_async_fs_utf8_operations() {
     std::cout << "  [PASS] Async UTF-8 Unicode operations passed.\n";
 }
 
+// Runs the read/write checks once per I/O mode. `native` is exercised for real only in builds that have native file
+// I/O (Windows IOCP, Linux with -DWAVEX_IO_URING=ON); elsewhere set_io_mode(native) must leave the blocking pool in
+// effect and every result must be identical.
+void test_async_fs_io_modes() {
+    std::cout << "[Test AsyncFs] I/O modes (blocking pool / native small-file reads)...\n";
+    std::cout << "  native_io_available() = " << (wavex::fs::native_io_available() ? "yes" : "no") << "\n";
+
+    const auto dir = std::filesystem::temp_directory_path() / "wavex_async_fs_modes";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+
+    // Payloads around the native/pool boundary, plus bytes that text-mode I/O would mangle.
+    std::string binary;
+    for (int i = 0; i < 4096; ++i) binary.push_back(static_cast<char>(i % 256)); // NULs, \r, \n, 0xFF ...
+    const std::string empty;
+    const std::string at_limit(wavex::fs::native_read_max_bytes, 'a');
+    const std::string over_limit(wavex::fs::native_read_max_bytes + 1, 'b');
+    const std::string big(300 * 1024, 'c');
+
+    for (const auto requested: {wavex::fs::io_mode::blocking_pool, wavex::fs::io_mode::native}) {
+        const auto effective = wavex::fs::set_io_mode(requested);
+        assert(effective == wavex::fs::get_io_mode());
+        if (requested == wavex::fs::io_mode::native && !wavex::fs::native_io_available()) {
+            assert(effective == wavex::fs::io_mode::blocking_pool);
+        }
+        std::cout << "  mode requested=" << (requested == wavex::fs::io_mode::native ? "native" : "blocking_pool")
+                << " effective=" << (effective == wavex::fs::io_mode::native ? "native" : "blocking_pool") << "\n";
+
+        asio::io_context io;
+        bool done = false;
+        auto coro = [&]() -> wavex::task<void> {
+            int n = 0;
+            for (const std::string *payload: std::initializer_list<const std::string *>{&binary, &empty, &at_limit, &over_limit, &big}) {
+                const auto path = (dir / ("f" + std::to_string(n++))).string();
+                auto w = co_await wavex::fs::write_file(path, *payload);
+                assert(w.has_value());
+
+                auto text = co_await wavex::fs::read_file(path);
+                assert(text.has_value());
+                assert(*text == *payload);
+
+                auto bytes = co_await wavex::fs::read_bytes(path);
+                assert(bytes.has_value());
+                assert(bytes->size() == payload->size());
+                assert(std::string(bytes->begin(), bytes->end()) == *payload);
+            }
+
+            // Missing file: the real reason, not a generic error.
+            auto missing = co_await wavex::fs::read_file((dir / "missing").string());
+            assert(!missing.has_value() && missing.error() == std::errc::no_such_file_or_directory);
+            auto missing_bytes = co_await wavex::fs::read_bytes((dir / "missing").string());
+            assert(!missing_bytes.has_value() && missing_bytes.error() == std::errc::no_such_file_or_directory);
+
+            // write_file creates missing parent directories (existing behaviour) ...
+            auto nested = co_await wavex::fs::write_file((dir / "a" / "b" / "c.txt").string(), "nested");
+            assert(nested.has_value());
+            // ... and a path below a regular file fails with an error instead of pretending success.
+            auto below_file = co_await wavex::fs::write_file((dir / "f0" / "x.txt").string(), "nope");
+            assert(!below_file.has_value());
+            done = true;
+        };
+        asio::co_spawn(io, coro(), asio::detached);
+        io.run();
+        assert(done);
+    }
+    wavex::fs::set_io_mode(wavex::fs::io_mode::blocking_pool);
+    std::filesystem::remove_all(dir, ec);
+    std::cout << "  [PASS] Both I/O modes return identical results (binary, empty, boundary, large, errors).\n";
+}
+
 int main() {
     std::cout << "=== Running WaveX AsyncFs Tests ===\n";
     try {
         test_async_fs_operations();
         test_async_fs_utf8_operations();
+        test_async_fs_io_modes();
         std::cout << "=== All AsyncFs Tests PASSED ===\n";
         return 0;
     } catch (const std::exception &ex) {
