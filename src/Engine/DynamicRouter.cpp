@@ -5,11 +5,11 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 /**
- * @file Router.cpp
+ * @file DynamicRouter.cpp
  * @brief Out-of-line implementation of non-template router algorithms and path utilities.
  */
 
-#include <wavex/Engine/Router.hpp>
+#include <wavex/Engine/DynamicRouter.hpp>
 #include <wavex/Engine/HttpRouter.hpp>
 #include <wavex/Utils/BinaryFile.hpp>
 #include <wavex/Base/MimeTypes.hpp>
@@ -194,9 +194,9 @@ namespace wavex::engine {
     } // namespace detail
 
     // Explicit template instantiations for standard HTTP specializations
-    template class Router<Http1Proto>;
-    template class Router<Http2Proto>;
+    template class DynamicRouter<Http1Proto>;
+    template class DynamicRouter<Http2Proto>;
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
-    template class Router<Http3Proto>;
+    template class DynamicRouter<Http3Proto>;
 #endif
 } // namespace wavex::engine

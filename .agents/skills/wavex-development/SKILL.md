@@ -35,7 +35,7 @@ This skill provides essential domain context for developing, extending, and debu
       `mutable std::mutex` in `EventBus` allowing `subscriber_count() const`.
 
 2. **Routing Engine (`include/wavex/Engine/`)**:
-    - `Router.hpp`: Protocol-agnostic radix tree with RE2 regex (`{id:[0-9]+}`), dynamic `:param`, wildcard `*param`,
+    - `DynamicRouter.hpp`: Protocol-agnostic radix tree with RE2 regex (`{id:[0-9]+}`), dynamic `:param`, wildcard `*param`,
       scoped middlewares, and 404 handler. Wildcard captures are zero-allocation contiguous string slices
       `std::string_view(w_begin, w_end - w_begin)` guarded by a contiguous path buffer invariant assertion.
     - `HttpRouter.hpp`: HTTP-specific convenience wrapper (`get`, `post`, `put`, `del`, `patch`, `query`). Aliases

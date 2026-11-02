@@ -284,7 +284,7 @@ add_library(wavex
         src/Base/Logger.cpp
         src/Base/Uri.cpp
         src/Base/Url.cpp
-        src/Engine/Router.cpp
+        src/Engine/DynamicRouter.cpp
         src/Client/HttpClient.cpp
         src/Client/Http3Client.cpp
         src/Utils/FsUtils.cpp
@@ -397,7 +397,7 @@ target_sources(wavex
         include/wavex/Base/Response.hpp
         include/wavex/Base/Uri.hpp
         include/wavex/Base/Url.hpp
-        include/wavex/Engine/Router.hpp
+        include/wavex/Engine/DynamicRouter.hpp
         include/wavex/Engine/HttpRouter.hpp
         include/wavex/protos/ProtocolTraits.hpp
         include/wavex/protos/protos.hpp
@@ -477,7 +477,7 @@ if (WAVEX_USE_MODULE)
             src/protos/webtransport/WebTransport.ixx
             src/Network/AnyStream.ixx
             src/Network/Dns/Dns.ixx
-            src/Engine/Router.ixx
+            src/Engine/DynamicRouter.ixx
             src/Engine/HttpRouter.ixx
             src/Server/Server.ixx
             src/Server/WorkStealingQueue.ixx

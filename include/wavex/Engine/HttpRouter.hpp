@@ -8,13 +8,13 @@
  * @file HttpRouter.hpp
  * @brief HTTP-specific router with GET/POST/PUT/DEL convenience methods.
  *
- * Derives from Router<HttpProto> to add HTTP method shortcuts and static chain integration
+ * Derives from DynamicRouter<HttpProto> to add HTTP method shortcuts and static chain integration
  * while keeping the base router protocol-agnostic.
  */
 
 #pragma once
 
-#include <wavex/Engine/Router.hpp>
+#include <wavex/Engine/DynamicRouter.hpp>
 #include <wavex/protos/http/Methods.hpp>
 #include <wavex/protos/http/HttpRequest.hpp>
 #include <wavex/protos/http/HttpResponse.hpp>
@@ -56,13 +56,13 @@ namespace wavex::engine {
 
     /**
      * @class HttpRouter
-     * @brief HTTP-specific convenience wrapper around Router<HttpProto<Codec>>.
+     * @brief HTTP-specific convenience wrapper around DynamicRouter<HttpProto<Codec>>.
      * @tparam Codec HTTP protocol codec type (defaults to http1codec).
      */
     template<typename Codec = protos::http::http1codec>
-    class HttpRouter : public Router<HttpProto<Codec> > {
+    class HttpRouter : public DynamicRouter<HttpProto<Codec> > {
     public:
-        using Base = Router<HttpProto<Codec> >;
+        using Base = DynamicRouter<HttpProto<Codec> >;
         using typename Base::Handler;
         using typename Base::NotFoundHandler;
         using typename Base::MiddlewareFn;

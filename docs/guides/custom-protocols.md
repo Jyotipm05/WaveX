@@ -226,12 +226,12 @@ namespace wavex::protos {
 
 ## Step 4: Create the Router Specialization (`CustomRouter`)
 
-You can use the general `wavex::engine::Router<MyCodec>` or build a domain-specific router with custom convenience methods:
+You can use the general `wavex::engine::DynamicRouter<MyCodec>` or build a domain-specific router with custom convenience methods:
 
 ```c++
-#include <wavex/Engine/Router.hpp>
+#include <wavex/Engine/DynamicRouter.hpp>
 
-class MyRouter : public wavex::engine::Router<MyCodec> {
+class MyRouter : public wavex::engine::DynamicRouter<MyCodec> {
 public:
     using Handler = std::function<wavex::task<void>(MyRequest &, MyResponse &)>;
 

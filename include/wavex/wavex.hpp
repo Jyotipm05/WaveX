@@ -26,7 +26,7 @@
 #include <wavex/Network/AnyStream.hpp>
 #include <wavex/protos/websocket/WebSocket.hpp>
 #include <wavex/protos/webtransport/WebTransport.hpp>
-#include <wavex/Engine/Router.hpp>
+#include <wavex/Engine/DynamicRouter.hpp>
 #include <wavex/Engine/HttpRouter.hpp>
 #include <wavex/Server/Server.hpp>
 #include <wavex/Client/HttpClient.hpp>

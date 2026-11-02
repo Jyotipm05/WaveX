@@ -164,7 +164,7 @@ export namespace wavex::protos::webtransport {
 #endif
 
 export namespace wavex::engine {
-    using engine::Router;
+    using engine::DynamicRouter;
     using engine::HttpRouter;
     using engine::http_router;
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL

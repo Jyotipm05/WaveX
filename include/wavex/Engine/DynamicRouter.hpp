@@ -5,10 +5,10 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 /**
- * @file Router.hpp
+ * @file DynamicRouter.hpp
  * @brief Protocol-agnostic hybrid radix-tree router with RE2 regex constraints.
  *
- * The Router<Proto> template is parameterised on a protocol type that must
+ * The DynamicRouter<Proto> template is parameterised on a protocol type that must
  * provide a `Proto::method` enum type. This allows the same routing engine
  * to serve HTTP, MCP, GraphQL, or any future protocol.
  *
@@ -16,7 +16,7 @@
  * Dynamic segments (:param, {name:regex}) and wildcards (*, *name) are checked
  * in priority order after static children fail.
  *
- * Provides a thread-safe singleton access pattern (`Router<Proto>::instance()`)
+ * Provides a thread-safe singleton access pattern (`DynamicRouter<Proto>::instance()`)
  * that maintains unique instance identity across both header inclusions and C++20
  * module imports according to the C++ standard ODR rules.
  *
@@ -117,13 +117,13 @@ namespace wavex::engine {
         auto load_not_found_file(const std::string &file_path, std::string &out_body, std::string &out_mime) -> bool;
     } // namespace detail
     /**
-     * @class Router
+     * @class DynamicRouter
      * @brief Protocol-agnostic radix-tree router.
      *
      * @tparam Proto Protocol type. Must have nested `method`, `request`, and `response` types.
      */
     template<typename Proto>
-    class Router {
+    class DynamicRouter {
     public:
         using MethodType = Proto::method;
         using RequestType = Proto::request;
@@ -260,40 +260,40 @@ namespace wavex::engine {
         /**
          * @brief Constructs an empty router with a single root node at "/".
          */
-        Router() {
+        DynamicRouter() {
             root_ = std::make_unique<Node>();
             root_->prefix = "/";
         }
 
-        ~Router() = default;
+        ~DynamicRouter() = default;
 
-        Router(const Router &) = delete;
+        DynamicRouter(const DynamicRouter &) = delete;
 
-        Router &operator=(const Router &) = delete;
+        DynamicRouter &operator=(const DynamicRouter &) = delete;
 
-        Router(Router &&) noexcept = default;
+        DynamicRouter(DynamicRouter &&) noexcept = default;
 
-        Router &operator=(Router &&) noexcept = default;
+        DynamicRouter &operator=(DynamicRouter &&) noexcept = default;
 
         // ─── 4. Member Functions & Friend Declarations (LAST) ──────────────
 
         /**
          * @brief Singleton instance for a given protocol type.
-         * @return Reference to the process-wide Router<Proto> instance, guaranteed
+         * @return Reference to the process-wide DynamicRouter<Proto> instance, guaranteed
          *         unique across translation units and C++20 module boundaries by
          *         C++ ODR inline rules.
          */
-        static auto instance() -> Router & {
-            static Router s_instance;
+        static auto instance() -> DynamicRouter & {
+            static DynamicRouter s_instance;
             return s_instance;
         }
 
         /**
-         * @brief Creates a distinct, local Router instance.
-         * @return A new local Router instance independent of the process-wide singleton.
+         * @brief Creates a distinct, local DynamicRouter instance.
+         * @return A new local DynamicRouter instance independent of the process-wide singleton.
          */
-        static auto make_instance() -> Router {
-            return Router{};
+        static auto make_instance() -> DynamicRouter {
+            return DynamicRouter{};
         }
 
         /**

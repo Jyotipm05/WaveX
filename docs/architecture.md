@@ -68,7 +68,7 @@ flowchart TB
 %% TIER 2: Routing, Networking & Async Execution
 %% -------------------------------------------------------------
   subgraph Engine ["Engine"]
-    Router["Router&lt;Proto&gt;<br/><small>radix tree + RE2</small>"]
+    Router["DynamicRouter&lt;Proto&gt;<br/><small>radix tree + RE2</small>"]
     Http1Router["Http1Router<br/><small>HTTP/1.1 routes</small>"]
     Http2Router["Http2Router<br/><small>HTTP/2 routes</small>"]
     Http3Router["Http3Router<br/><small>HTTP/3 routes</small>"]

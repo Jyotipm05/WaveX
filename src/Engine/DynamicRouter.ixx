@@ -4,20 +4,20 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 /**
- * @file Router.ixx
- * @brief C++ module interface file for the Router component in WaveX.
+ * @file DynamicRouter.ixx
+ * @brief C++ module interface file for the DynamicRouter component in WaveX.
  *
- * Exports wavex::engine::Handler, RouteMatch, ScopedMiddleware, and Router
+ * Exports wavex::engine::Handler, RouteMatch, ScopedMiddleware, and DynamicRouter
  * from the wavex:router partition.
  */
 
 module;
 
 // Global module fragment
-#include <wavex/Engine/Router.hpp>
+#include <wavex/Engine/DynamicRouter.hpp>
 
 export module wavex:router;
 
 export namespace wavex::engine {
-    using engine::Router;
+    using engine::DynamicRouter;
 }

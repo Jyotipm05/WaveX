@@ -1,6 +1,6 @@
 /**
  * @file test_method_template.cpp
- * @brief Unit tests for the wavex::engine::Router and HttpRouter class template.
+ * @brief Unit tests for the wavex::engine::DynamicRouter and HttpRouter class template.
  *
  * Covers:
  *  1. Static route registration and resolution across HTTP methods (verifying method & path separation)
