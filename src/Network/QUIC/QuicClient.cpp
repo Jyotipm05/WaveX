@@ -37,12 +37,25 @@ namespace wavex::network::quic {
     }
 
     wavex::task<bool> QuicClient::connect(const std::string_view host, const uint16_t port) {
-        wavex::log::info("[QuicClient] connect() called to {}:{}", host, port);
         asio::error_code ec;
         const auto addr = asio::ip::make_address(host, ec);
         if (ec) co_return false;
+        co_return co_await connect(host, addr, port);
+    }
+
+    wavex::task<bool> QuicClient::connect(const std::string_view host, const asio::ip::address &addr,
+                                          const uint16_t port) {
+        wavex::log::info("[QuicClient] connect() called to {}:{}", host, port);
+        asio::error_code ec;
 
         server_endpoint_ = asio::ip::udp::endpoint(addr, port);
+        if (addr.is_v6() && socket_.local_endpoint(ec).protocol() != asio::ip::udp::v6()) {
+            // The constructor opened an IPv4 socket; an IPv6 server needs an IPv6 one.
+            socket_.close(ec);
+            socket_.open(asio::ip::udp::v6(), ec);
+            if (!ec) socket_.bind(asio::ip::udp::endpoint(asio::ip::udp::v6(), 0), ec);
+            if (ec) co_return false;
+        }
         const ConnectionId client_cid = ConnectionId::random(8);
         const ConnectionId initial_peer_cid = ConnectionId::random(8);
 
@@ -59,6 +72,10 @@ namespace wavex::network::quic {
             if (!stream) return;
             // Server-initiated unidirectional stream (sid & 0x03 == 3) per RFC 9000 / RFC 9114
             if (const uint64_t sid = stream->stream_id(); (sid & 0x03) == 0x03) {
+                if (peer_uni_handler_) {
+                    asio::post(ex_, [h = peer_uni_handler_, stream] { h(stream); });
+                    return;
+                }
                 asio::co_spawn(ex_, [stream]() -> wavex::task<void> {
                     char buf[1024];
                     while (stream->is_open()) {

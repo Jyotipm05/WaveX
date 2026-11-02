@@ -51,7 +51,8 @@ namespace wavex::client {
     enum class HttpVersion {
         Auto, ///< Auto-negotiate via ALPN on TLS (h2/http1.1); default to HTTP/1.1 on plain TCP
         Http1_1, ///< Enforce HTTP/1.1 (skip HTTP/2 framing overhead)
-        Http2 ///< Enforce HTTP/2 (ALPN "h2" on TLS; prior-knowledge h2c on plain TCP)
+        Http2, ///< Enforce HTTP/2 (ALPN "h2" on TLS; prior-knowledge h2c on plain TCP)
+        Http3 ///< Enforce HTTP/3 over QUIC (https:// only, no fallback to TCP)
     };
 
     /**
@@ -73,6 +74,7 @@ namespace wavex::client {
         std::string key_file{}; ///< Optional client private key for mTLS
         HttpVersion version{HttpVersion::Auto}; ///< Protocol version strategy
         DnsMode dns{DnsMode::NativeWithSystemFallback}; ///< Host name resolution strategy
+        bool h3_discovery{false}; ///< Auto only: use HTTP/3 when Alt-Svc or a DNS HTTPS record advertises it (TCP fallback)
         bool verify_peer{false}; ///< Verify TLS server certificates (default: false for development/self-signed)
     };
 

@@ -631,6 +631,16 @@ namespace wavex::network::quic {
             }
             const std::string_view value = tp.substr(cursor, static_cast<std::size_t>(len));
             cursor += static_cast<std::size_t>(len);
+            if (id >= 0x04 && id <= 0x07) { // initial_max_data / initial_max_stream_data_* (RFC 9000 §18.2)
+                std::size_t v_cursor = 0;
+                if (uint64_t v = 0; VarInt::decode(value, v_cursor, v)) {
+                    std::lock_guard lock(mtx_);
+                    if (id == 0x04) peer_max_data_ = v;
+                    else if (id == 0x05) peer_stream_data_bidi_local_ = v;
+                    else if (id == 0x06) peer_stream_data_bidi_remote_ = v;
+                    else peer_stream_data_uni_ = v;
+                }
+            }
             if (id == 0x20) {
                 // max_datagram_frame_size (RFC 9221 §3)
                 std::size_t v_cursor = 0;
@@ -1214,6 +1224,9 @@ namespace wavex::network::quic {
                     track_sent_packet(PacketType::OneRTT, hdr.packet_number, packet.size(), {sf});
                     pending_outbound_datagrams_.push_back(std::move(packet));
                 }
+            } else if constexpr (std::is_same_v<T, MaxDataFrame> || std::is_same_v<T, MaxStreamDataFrame>) {
+                pending_flow_updates_.emplace_back(f);
+                send_flow_updates();
             } else if constexpr (std::is_same_v<T, HandshakeDoneFrame>) {
                 PacketHeader hdr;
                 hdr.is_long = false;
@@ -1603,19 +1616,20 @@ namespace wavex::network::quic {
 
                     if (target_stream) {
                         target_stream->push_inbound(frame.offset, frame.data, frame.fin);
+                        account_received(frame.stream_id, frame.offset + frame.data.size());
                         if (target_stream->has_final_size_error()) {
                             wavex::log::error("[QUIC] Stream {} FINAL_SIZE_ERROR: final size mismatch with peer",
                                               frame.stream_id);
                         }
                     }
                 } else if constexpr (std::is_same_v<T, MaxDataFrame>) {
-                    if (frame.max_data > max_data_) {
-                        max_data_ = frame.max_data;
+                    if (frame.max_data > peer_max_data_) {
+                        peer_max_data_ = frame.max_data;
                         flush_stream_send_queues();
                     }
                 } else if constexpr (std::is_same_v<T, MaxStreamDataFrame>) {
-                    if (frame.max_stream_data > max_stream_data_) {
-                        max_stream_data_ = frame.max_stream_data;
+                    if (auto &lim = peer_stream_limit_[frame.stream_id]; frame.max_stream_data > lim) {
+                        lim = frame.max_stream_data;
                         flush_stream_send_queues();
                     }
                 } else if constexpr (std::is_same_v<T, ResetStreamFrame>) {
@@ -1649,6 +1663,75 @@ namespace wavex::network::quic {
                     terminate(false, TransportError::NoError, "");
                 }
             }, f);
+        }
+        send_flow_updates();
+    }
+
+    uint64_t QuicConnection::send_stream_limit(const uint64_t stream_id) const {
+        uint64_t initial = peer_stream_data_uni_;
+        if ((stream_id & 0x02) == 0) { // bidirectional
+            const bool locally_initiated = ((stream_id & 0x01) != 0) == is_server_;
+            initial = locally_initiated ? peer_stream_data_bidi_remote_ : peer_stream_data_bidi_local_;
+        }
+        const auto it = peer_stream_limit_.find(stream_id);
+        return it == peer_stream_limit_.end() ? initial : std::max(initial, it->second);
+    }
+
+    void QuicConnection::account_received(const uint64_t stream_id, const uint64_t end_offset) {
+        auto &sw = recv_stream_windows_.try_emplace(stream_id, RecvWindow{max_stream_data_, 0}).first->second;
+        if (end_offset > sw.received) {
+            recv_conn_window_.received += end_offset - sw.received;
+            sw.received = end_offset;
+        }
+        // Grant more once the peer has used half of what it was given (RFC 9000 §4.2).
+        if (sw.received + max_stream_data_ / 2 > sw.limit) {
+            sw.limit = sw.received + max_stream_data_;
+            pending_flow_updates_.emplace_back(MaxStreamDataFrame{stream_id, sw.limit});
+        }
+        if (recv_conn_window_.received + max_data_ / 2 > recv_conn_window_.limit) {
+            recv_conn_window_.limit = recv_conn_window_.received + max_data_;
+            pending_flow_updates_.emplace_back(MaxDataFrame{recv_conn_window_.limit});
+        }
+    }
+
+    void QuicConnection::send_flow_updates() {
+        if (pending_flow_updates_.empty()) return;
+        const ProtectionKeys *keys = one_rtt_send_keys();
+        if (!keys) return;
+
+        // Only the newest value of each limit matters.
+        std::vector<Frame> frames;
+        std::unordered_map<uint64_t, std::size_t> stream_slot;
+        std::size_t conn_slot = SIZE_MAX;
+        for (auto &f: pending_flow_updates_) {
+            if (const auto *sd = std::get_if<MaxStreamDataFrame>(&f)) {
+                if (const auto it = stream_slot.find(sd->stream_id); it != stream_slot.end()) {
+                    frames[it->second] = f;
+                } else {
+                    stream_slot[sd->stream_id] = frames.size();
+                    frames.push_back(f);
+                }
+            } else if (conn_slot != SIZE_MAX) {
+                frames[conn_slot] = f;
+            } else {
+                conn_slot = frames.size();
+                frames.push_back(f);
+            }
+        }
+        pending_flow_updates_.clear();
+
+        PacketHeader hdr;
+        hdr.is_long = false;
+        hdr.type = PacketType::OneRTT;
+        hdr.key_phase = (local_key_phase_ != 0);
+        hdr.dcid = peer_cid_;
+        hdr.packet_number = allocate_next_pn(PacketType::OneRTT);
+        std::string payload;
+        for (const auto &f: frames) serialize_frame(f, payload);
+        if (std::string packet; CryptoSuite::protect_packet(*keys, hdr, payload, packet)) {
+            track_sent_packet(PacketType::OneRTT, hdr.packet_number, packet.size(), std::move(frames));
+            pending_outbound_datagrams_.push_back(std::move(packet));
+            if (on_outbound_) on_outbound_();
         }
     }
 
@@ -1742,6 +1825,7 @@ namespace wavex::network::quic {
             if (const auto it = streams_.find(stream_id); it != streams_.end()) {
                 stream_to_close = it->second;
                 streams_.erase(it);
+                recv_stream_windows_.erase(stream_id);
                 // Send-side state (queue, offset, pending FIN) is intentionally kept: bytes that flow
                 // control or congestion has not let out yet would otherwise be silently truncated.
                 // flush_stream_send_queues() drops it once everything has been packetized.
@@ -1819,9 +1903,10 @@ namespace wavex::network::quic {
 
             while (!queue.empty() || fin_pending) {
                 // Flow control limits (A4)
-                const uint64_t conn_credit = (max_data_ > data_sent_) ? (max_data_ - data_sent_) : 0;
+                const uint64_t conn_credit = (peer_max_data_ > data_sent_) ? (peer_max_data_ - data_sent_) : 0;
                 uint64_t &stream_sent = stream_data_sent_[sid];
-                const uint64_t stream_credit = (max_stream_data_ > stream_sent) ? (max_stream_data_ - stream_sent) : 0;
+                const uint64_t stream_limit = send_stream_limit(sid);
+                const uint64_t stream_credit = (stream_limit > stream_sent) ? (stream_limit - stream_sent) : 0;
 
                 if (!queue.empty() && (conn_credit == 0 || stream_credit == 0)) {
                     wavex::log::debug("[QUIC] Flow control credit blocked on sid={} (conn_credit={}, stream_credit={})",
@@ -1897,6 +1982,7 @@ namespace wavex::network::quic {
                 stream_send_fin_.erase(sid);
                 stream_send_offsets_.erase(sid);
                 stream_data_sent_.erase(sid);
+                peer_stream_limit_.erase(sid);
                 q_it = stream_send_queues_.erase(q_it);
             } else {
                 ++q_it;

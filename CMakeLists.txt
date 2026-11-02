@@ -286,6 +286,7 @@ add_library(wavex
         src/Base/Url.cpp
         src/Engine/Router.cpp
         src/Client/HttpClient.cpp
+        src/Client/Http3Client.cpp
         src/Utils/FsUtils.cpp
         src/Utils/AsyncFs.cpp
         src/Utils/BinaryFile.cpp
@@ -445,6 +446,7 @@ target_sources(wavex
         include/wavex/Server/ComposedHttpServer.hpp
         include/wavex/Server/Server.hpp
         include/wavex/Client/HttpClient.hpp
+        include/wavex/Client/Http3Client.hpp
         include/wavex/CLI/CLI.hpp
         include/wavex/Async/SpawnBlocking.hpp
         include/wavex/Utils/Utils.hpp
@@ -727,6 +729,7 @@ if (WAVEX_TEST)
         wavex_add_test(wavex_quic_tests tests/test_quic.cpp)
         wavex_add_test(wavex_qpack_tests tests/test_qpack.cpp)
         wavex_add_test(wavex_http3_tests tests/test_http3.cpp)
+        wavex_add_test(wavex_http3_client_tests tests/test_http3_client.cpp)
         wavex_add_test(wavex_webtransport_tests tests/test_webtransport.cpp)
     endif ()
 

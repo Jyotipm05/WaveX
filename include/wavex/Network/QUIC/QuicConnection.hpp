@@ -224,8 +224,23 @@ namespace wavex::network::quic {
         std::array<uint64_t, 2> next_peer_stream_idx_{0, 0}; // [0]=bidi, [1]=uni
         std::chrono::steady_clock::time_point loss_time_{};
         std::chrono::milliseconds idle_timeout_{30000};
-        uint64_t max_data_{1024 * 1024}; // 1 MB
-        uint64_t max_stream_data_{256 * 1024}; // 256 KB
+        uint64_t max_data_{1024 * 1024}; // 1 MB   (what we advertise: connection window)
+        uint64_t max_stream_data_{256 * 1024}; // 256 KB (what we advertise: per-stream window)
+        // Limits the PEER imposes on what we send (RFC 9000 §4). Until its transport parameters are parsed they
+        // default to our own advertised values, which is what both ends of a WaveX connection use.
+        uint64_t peer_max_data_{1024 * 1024};
+        uint64_t peer_stream_data_bidi_local_{256 * 1024}; // streams the peer initiated
+        uint64_t peer_stream_data_bidi_remote_{256 * 1024}; // streams we initiated
+        uint64_t peer_stream_data_uni_{256 * 1024};
+        std::unordered_map<uint64_t, uint64_t> peer_stream_limit_{}; // raised by MAX_STREAM_DATA
+        // Credit we grant the peer: extended as data arrives so long transfers never stall.
+        struct RecvWindow {
+            uint64_t limit{0};
+            uint64_t received{0};
+        };
+        RecvWindow recv_conn_window_{1024 * 1024, 0};
+        std::unordered_map<uint64_t, RecvWindow> recv_stream_windows_{};
+        std::vector<Frame> pending_flow_updates_{};
         uint64_t max_field_section_size_{65536}; // 64 KB (RFC 9114 SETTINGS_MAX_FIELD_SECTION_SIZE)
         uint64_t max_datagram_size_{1200}; // MTU limit (RFC 9000 §14 default: 1200 bytes)
         uint64_t local_max_datagram_frame_size_{kDefaultMaxDatagramFrameSize}; // RFC 9221 §3, 0 = disabled
@@ -422,7 +437,7 @@ namespace wavex::network::quic {
 
         [[nodiscard]] auto can_send() const noexcept -> bool {
             std::scoped_lock lock(mtx_);
-            return congestion_controller_.can_send() && (data_sent_ < max_data_);
+            return congestion_controller_.can_send() && (data_sent_ < peer_max_data_);
         }
 
         [[nodiscard]] auto is_peer_address_validated() const noexcept -> bool {
@@ -579,6 +594,15 @@ namespace wavex::network::quic {
         void send_initial_handshake_response();
 
         void send_handshake_done();
+
+        /// Peer's current limit on the bytes we may send on `stream_id`.
+        [[nodiscard]] uint64_t send_stream_limit(uint64_t stream_id) const;
+
+        /// Account for `end_offset` bytes received on `stream_id` and queue MAX_DATA / MAX_STREAM_DATA when due.
+        void account_received(uint64_t stream_id, uint64_t end_offset);
+
+        /// Send queued flow-control updates in one 1-RTT packet.
+        void send_flow_updates();
 
         void flush_stream_send_queues();
 

@@ -18,6 +18,7 @@
 
 #include <wavex/Client/HttpClient.hpp>
 #include <wavex/Network/Dns/Resolver.hpp>
+#include <wavex/Client/Http3Client.hpp>
 #include <wavex/protos/http/http2codec.hpp>
 #include <wavex/Utils/BinaryFile.hpp>
 #include <wavex/Utils/FsUtils.hpp>
@@ -27,6 +28,9 @@
 #include <asio/connect.hpp>
 #include <asio/redirect_error.hpp>
 #include <asio/ip/address.hpp>
+#include <chrono>
+#include <mutex>
+#include <unordered_map>
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
 #include <asio/ssl.hpp>
@@ -396,6 +400,145 @@ namespace wavex::client {
         }
     } // anonymous namespace
 
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+    namespace {
+        /// Origins known to speak HTTP/3 (from Alt-Svc headers or DNS HTTPS records) and origins where HTTP/3 failed.
+        class AltSvcCache {
+        public:
+            struct Hit {
+                uint16_t port;
+            };
+
+            static AltSvcCache &instance() {
+                static AltSvcCache c;
+                return c;
+            }
+
+            std::optional<Hit> lookup(const std::string &origin) {
+                std::scoped_lock lk(mu_);
+                const auto it = map_.find(origin);
+                if (it == map_.end()) return std::nullopt;
+                const auto now = std::chrono::steady_clock::now();
+                if (it->second.expires <= now) {
+                    map_.erase(it);
+                    return std::nullopt;
+                }
+                if (it->second.failed_until > now) return std::nullopt;
+                return Hit{it->second.port};
+            }
+
+            void learn(const std::string &origin, const uint16_t port, const std::chrono::seconds ttl) {
+                std::scoped_lock lk(mu_);
+                auto &e = map_[origin];
+                e.port = port;
+                e.expires = std::chrono::steady_clock::now() + ttl;
+            }
+
+            void forget(const std::string &origin) {
+                std::scoped_lock lk(mu_);
+                map_.erase(origin);
+            }
+
+            void mark_failed(const std::string &origin, const uint16_t port) {
+                std::scoped_lock lk(mu_);
+                auto &e = map_[origin];
+                e.port = port;
+                const auto now = std::chrono::steady_clock::now();
+                e.expires = now + std::chrono::minutes(10);
+                e.failed_until = now + std::chrono::minutes(5); // do not pay a handshake timeout on every request
+            }
+
+            bool known(const std::string &origin) {
+                std::scoped_lock lk(mu_);
+                const auto it = map_.find(origin);
+                return it != map_.end() && it->second.expires > std::chrono::steady_clock::now();
+            }
+
+        private:
+            struct Entry {
+                uint16_t port{443};
+                std::chrono::steady_clock::time_point expires{};
+                std::chrono::steady_clock::time_point failed_until{};
+            };
+
+            std::mutex mu_;
+            std::unordered_map<std::string, Entry> map_;
+        };
+
+        /// Parse an `Alt-Svc` header (RFC 7838): `h3=":443"; ma=86400, h3-29=":443"`, or `clear`.
+        void learn_alt_svc(const std::string &origin, const std::string_view value) {
+            auto &cache = AltSvcCache::instance();
+            if (detail_case_equal(value, "clear")) {
+                cache.forget(origin);
+                return;
+            }
+            std::size_t pos = 0;
+            while (pos < value.size()) {
+                auto end = value.find(',', pos);
+                if (end == std::string_view::npos) end = value.size();
+                const auto item = value.substr(pos, end - pos);
+                pos = end + 1;
+
+                const auto eq = item.find('=');
+                if (eq == std::string_view::npos) continue;
+                auto proto = item.substr(0, eq);
+                while (!proto.empty() && proto.front() == ' ') proto.remove_prefix(1);
+                if (proto != "h3") continue;
+
+                const auto q1 = item.find('"', eq);
+                const auto q2 = q1 == std::string_view::npos ? q1 : item.find('"', q1 + 1);
+                if (q2 == std::string_view::npos) continue;
+                const auto authority = item.substr(q1 + 1, q2 - q1 - 1);
+                const auto colon = authority.rfind(':');
+                if (colon == std::string_view::npos || colon != 0) continue; // same host only (":port")
+
+                unsigned port = 0;
+                const auto ps = authority.substr(colon + 1);
+                if (std::from_chars(ps.data(), ps.data() + ps.size(), port).ec != std::errc{} || port == 0 ||
+                    port > 65535) {
+                    continue;
+                }
+                unsigned long long ma = 86400;
+                if (const auto m = item.find("ma="); m != std::string_view::npos) {
+                    const auto ms = item.substr(m + 3);
+                    unsigned long long v = 0;
+                    if (std::from_chars(ms.data(), ms.data() + ms.size(), v).ec == std::errc{}) ma = v;
+                }
+                if (ma == 0) {
+                    cache.forget(origin);
+                } else {
+                    cache.learn(origin, static_cast<uint16_t>(port),
+                                std::chrono::seconds(std::min<unsigned long long>(ma, 7ull * 86400)));
+                }
+                return;
+            }
+        }
+
+        /// Does `host` advertise HTTP/3? Alt-Svc cache first, then a DNS HTTPS record (RFC 9460).
+        wavex::task<std::optional<uint16_t> > discover_h3(const std::string host, const uint16_t port) {
+            auto &cache = AltSvcCache::instance();
+            const std::string origin = host + ":" + std::to_string(port);
+            if (const auto hit = cache.lookup(origin)) co_return hit->port;
+            if (cache.known(origin)) co_return std::nullopt; // marked failed recently
+            asio::error_code ip_ec;
+            asio::ip::make_address(host, ip_ec);
+            if (!ip_ec) co_return std::nullopt;
+
+            auto records = co_await dns::resolver::shared()->resolve_https(host);
+            if (records) {
+                for (const auto &svc: *records) {
+                    if (!svc.target.empty() && !dns::names_equal(svc.target, host)) continue; // same host only
+                    if (std::ranges::find(svc.alpn, "h3") == svc.alpn.end()) continue;
+                    const uint16_t p = svc.port.value_or(port);
+                    cache.learn(origin, p, std::chrono::minutes(5));
+                    co_return p;
+                }
+            }
+            co_return std::nullopt;
+        }
+    } // anonymous namespace
+#endif
+
     wavex::task<ClientResponse> HttpClient::send(const ClientRequest &req, const ClientOptions &options) {
         ClientResponse res;
 
@@ -438,6 +581,53 @@ namespace wavex::client {
         }
 
         const bool is_tls = (parsed_url.scheme == "https");
+
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+        if (is_tls && (options.version == HttpVersion::Http3 ||
+                       (options.version == HttpVersion::Auto && options.h3_discovery))) {
+            const bool forced = options.version == HttpVersion::Http3;
+            std::optional<uint16_t> h3_port;
+            if (forced) h3_port = port;
+            else h3_port = co_await discover_h3(host, port);
+
+            if (h3_port) {
+                Http3Options h3opt;
+                h3opt.verify_peer = options.verify_peer;
+                h3opt.request_timeout = options.timeout;
+                Http3Client h3(co_await asio::this_coro::executor, h3opt);
+                std::expected<ClientResponse, std::error_code> h3res =
+                        std::unexpected(make_error_code(http3_errc::not_connected));
+                if (const auto cec = co_await h3.connect(host, *h3_port); !cec) {
+                    h3res = co_await h3.exchange(req, host_header, path_target);
+                } else {
+                    h3res = std::unexpected(cec);
+                }
+                h3.close();
+                if (h3res) {
+                    if (options.h3_discovery) {
+                        if (const auto alt = h3res->header("alt-svc"); alt && !alt->empty()) {
+                            learn_alt_svc(host + ":" + std::to_string(port), *alt);
+                        }
+                    }
+                    co_return std::move(*h3res);
+                }
+                if (forced) {
+                    res.status_code(502);
+                    res.status_text("Bad Gateway");
+                    res.body("HTTP/3 request failed: " + h3res.error().message());
+                    co_return res;
+                }
+                AltSvcCache::instance().mark_failed(host + ":" + std::to_string(port), *h3_port);
+            }
+        }
+#else
+        if (options.version == HttpVersion::Http3) {
+            res.status_code(500);
+            res.status_text("Internal Server Error");
+            res.body("HTTP/3 request failed: WaveX was built without TLS/QUIC support (WAVEX_HAS_SSL=0)");
+            co_return res;
+        }
+#endif
 
         auto executor = co_await asio::this_coro::executor;
         asio::ip::tcp::resolver::results_type endpoints;
@@ -574,6 +764,14 @@ namespace wavex::client {
                     res = co_await execute_http1_exchange(
                         ssl_socket, host_header, req, path_target);
                 }
+
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+                if (options.h3_discovery && options.version == HttpVersion::Auto) {
+                    if (const auto alt = res.header("alt-svc"); alt && !alt->empty()) {
+                        learn_alt_svc(host + ":" + std::to_string(port), *alt);
+                    }
+                }
+#endif
 
                 asio::error_code close_ec;
                 co_await ssl_socket.async_shutdown(asio::redirect_error(asio::use_awaitable, close_ec));

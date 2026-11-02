@@ -13,7 +13,6 @@
 #include <asio/ip/tcp.hpp>
 #include <asio/ip/udp.hpp>
 #include <asio/read.hpp>
-#include <asio/steady_timer.hpp>
 #include <asio/write.hpp>
 
 #include <atomic>
@@ -23,6 +22,7 @@
 #include <map>
 #include <mutex>
 #include <random>
+#include <ranges>
 #include <thread>
 
 using namespace wavex::dns;
@@ -196,7 +196,7 @@ namespace {
         int total() {
             std::scoped_lock lk(mu_);
             int n = 0;
-            for (auto &[k, v]: counts_) n += v;
+            for (auto &v: counts_ | std::views::values) n += v;
             return n;
         }
 
@@ -284,7 +284,7 @@ namespace {
     res_t resolve_one(resolver &r, const std::string &host) { return resolve_many(r, host, 1)[0]; }
 
     bool has(const addresses &a, const char *ip) {
-        return std::find(a.list.begin(), a.list.end(), asio::ip::make_address(ip)) != a.list.end();
+        return std::ranges::find(a.list, asio::ip::make_address(ip)) != a.list.end();
     }
 
     // ------------------------------------------------------------------ wire format
@@ -430,18 +430,18 @@ namespace {
         check(a && a->list[0].is_v6() && a->list[1].is_v4(), "IPv6 first, interleaved with IPv4");
         check(srv.count(1) == 1 && srv.count(28) == 1, "one A and one AAAA query on the wire");
 
-        resolve_one(r, "WWW.Example.TEST");
+        std::ignore = resolve_one(r, "WWW.Example.TEST");
         check(srv.total() == 2, "second lookup (different case) served from cache");
         check(r.cache_size() == 2, "cache holds both record sets");
 
         r.clear_cache();
-        resolve_one(r, "www.example.test");
+        std::ignore = resolve_one(r, "www.example.test");
         check(srv.total() == 4, "clear_cache forces a new query");
 
         const auto n1 = resolve_one(r, "nope.example.test");
         check(!n1 && n1.error() == errc::name_not_found, "NXDOMAIN -> name_not_found");
         const int before = srv.total();
-        resolve_one(r, "nope.example.test");
+        std::ignore = resolve_one(r, "nope.example.test");
         check(srv.total() == before, "negative answer cached (RFC 2308)");
 
         wavex::dns::resolve_options v4only;
