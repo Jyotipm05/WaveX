@@ -57,6 +57,8 @@ namespace wavex::network::quic {
         std::size_t server_cid_len_{8};
         std::atomic<bool> stopped_{false};
         std::atomic<bool> running_{false};
+        /// Queued handlers capture a weak_ptr to this and do nothing once it has expired (set by the destructor).
+        std::shared_ptr<int> life_{std::make_shared<int>(0)};
 
     public:
         // ─── 3. Constructors & Destructor (MIDDLE) ─────────────────────────

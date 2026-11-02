@@ -18,6 +18,8 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <chrono>
+#include <thread>
 
 namespace wavex::network::quic {
 
@@ -41,6 +43,13 @@ namespace wavex::network::quic {
     }
 
     QuicServer::~QuicServer() {
+        // Handlers queued on the executor hold only a weak reference and bail out once it expires; a handler
+        // that is running right now holds a strong one, so wait (bounded) for it before the members go away.
+        const std::weak_ptr<int> life = life_;
+        life_.reset();
+        if (!wavex::running_in_this_thread(ex_)) {
+            for (int i = 0; i < 2000 && !life.expired(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
         stop();
         if (shared_ssl_ctx_) {
             SSL_CTX_free(shared_ssl_ctx_);
@@ -108,7 +117,9 @@ namespace wavex::network::quic {
 
         socket_.async_receive_from(
             asio::buffer(recv_buf_), sender_endpoint_,
-            [this](const std::error_code ec, const std::size_t bytes_recvd) {
+            [this, life = std::weak_ptr<int>(life_)](const std::error_code ec, const std::size_t bytes_recvd) {
+                const auto guard = life.lock();
+                if (!guard) return;
                 // Only abort the receive loop on intentional cancellation (shutdown).
                 // Transient UDP errors (e.g. ECONNRESET on Windows) must not halt the loop.
                 if (ec == asio::error::operation_aborted || stopped_.load() || !running_.load()) return;
@@ -194,14 +205,19 @@ namespace wavex::network::quic {
                                                                     ex_, hdr.dcid);
                             conn->set_max_field_section_size(max_field_section_size_);
 
-                            conn->set_outbound_callback([this, weak_conn = std::weak_ptr<QuicConnection>(conn)] {
+                            conn->set_outbound_callback([this, life = std::weak_ptr<int>(life_),
+                                                         weak_conn = std::weak_ptr<QuicConnection>(conn)] {
+                                const auto guard = life.lock();
+                                if (!guard) return;
                                 if (stopped_.load() || !running_.load()) return;
                                 if (wavex::running_in_this_thread(ex_)) {
                                     if (const auto c = weak_conn.lock()) {
                                         flush_outbound(c);
                                     }
                                 } else {
-                                    asio::post(ex_, [this, weak_conn] {
+                                    asio::post(ex_, [this, life, weak_conn] {
+                                        const auto inner_guard = life.lock();
+                                        if (!inner_guard) return;
                                         if (stopped_.load() || !running_.load()) return;
                                         if (const auto c = weak_conn.lock()) {
                                             flush_outbound(c);
@@ -210,9 +226,14 @@ namespace wavex::network::quic {
                                 }
                             });
 
-                            conn->set_closed_callback([this, server_cid, owner = conn.get()](
+                            conn->set_closed_callback([this, life = std::weak_ptr<int>(life_), server_cid,
+                                                       owner = conn.get()](
                                 const ConnectionId &scid, const ConnectionId &, const ConnectionId &orig_dcid) {
-                                asio::post(ex_, [this, server_cid, scid, orig_dcid, owner] {
+                                const auto guard = life.lock();
+                                if (!guard) return;
+                                asio::post(ex_, [this, life, server_cid, scid, orig_dcid, owner] {
+                                    const auto inner_guard = life.lock();
+                                    if (!inner_guard) return;
                                     if (stopped_.load()) return;
                                     std::lock_guard lock(mtx_);
                                     // Only erase entries that still point at this connection: a key may have
@@ -243,8 +264,10 @@ namespace wavex::network::quic {
                             connections_.try_emplace(hdr.dcid, conn);
 
                             if (stream_handler_ || uni_stream_handler_) {
-                                conn->set_stream_created_callback([this](std::shared_ptr<QuicStream> stream) {
-                                    if (!stream) return;
+                                conn->set_stream_created_callback([this, life = std::weak_ptr<int>(life_)](
+                                    std::shared_ptr<QuicStream> stream) {
+                                    const auto guard = life.lock();
+                                    if (!guard || !stream) return;
                                     const uint64_t sid = stream->stream_id();
                                     // Client-initiated unidirectional stream (sid & 0x03 == 2) per RFC 9114 §6.2
                                     if ((sid & 0x03) == 0x02) {

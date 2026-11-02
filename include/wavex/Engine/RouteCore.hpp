@@ -175,12 +175,21 @@ namespace wavex::engine::route {
         return true;
     }
 
+    /// `s.find(c, from)` written as a plain loop: GCC's sanitizer builds cannot constant-evaluate the pointer null
+    /// check inside std::string_view::find when the view points into a static constexpr object.
+    [[nodiscard]] constexpr std::size_t find_char(const std::string_view s, const char c, std::size_t from) noexcept {
+        for (; from < s.size(); ++from) {
+            if (s[from] == c) return from;
+        }
+        return std::string_view::npos;
+    }
+
     /// Parses `pattern` into at most `max_pattern_segments` segments. Never throws; check `error` (the StaticRouter turns it into a static_assert).
     [[nodiscard]] constexpr parsed_pattern parse_pattern(const std::string_view pattern) noexcept {
         parsed_pattern out;
         std::size_t pos = 0;
         while (pos <= pattern.size()) {
-            std::size_t end = pattern.find('/', pos);
+            std::size_t end = find_char(pattern, '/', pos);
             if (end == std::string_view::npos) end = pattern.size();
             const std::string_view seg = pattern.substr(pos, end - pos);
             pos = end + 1;
@@ -201,7 +210,7 @@ namespace wavex::engine::route {
                 ps.text = seg.substr(1);
             } else if (seg.size() >= 2 && seg.front() == '{' && seg.back() == '}') {
                 const std::string_view inner = seg.substr(1, seg.size() - 2);
-                const std::size_t colon = inner.find(':');
+                const std::size_t colon = find_char(inner, ':', 0);
                 ps.kind = segment_kind::param;
                 ps.text = inner.substr(0, colon);
                 if (colon != std::string_view::npos) {
