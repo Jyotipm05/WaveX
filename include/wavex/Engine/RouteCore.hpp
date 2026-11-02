@@ -16,6 +16,7 @@
  *   - `users`            literal segment
  *   - `:id` / `{id}`     parameter, any non-empty segment
  *   - `{id:int}`         parameter with a built-in constraint: any, int, uint, alpha, alnum, hex
+ *   - `{id:[0-9]{4}}`    parameter whose segment must fully match a regular expression (wavex::rx, see CtRegex.hpp)
  *   - `*` / `*name`      wildcard, must be the last segment, captures the rest of the path
  */
 
@@ -27,6 +28,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
+
+#include <wavex/Base/FixedString.hpp>
 
 namespace wavex::engine::route {
 
@@ -42,33 +45,8 @@ namespace wavex::engine::route {
         r.not_found_handler();
     };
 
-    // ─── Compile-time string usable as a template argument ──────────────────
-
-    template<std::size_t N>
-    struct fixed_string {
-        char data[N + 1]{};
-
-        constexpr fixed_string() = default;
-
-        constexpr fixed_string(const char (&s)[N + 1]) noexcept {
-            for (std::size_t i = 0; i < N; ++i) data[i] = s[i];
-        }
-
-        [[nodiscard]] constexpr std::string_view view() const noexcept { return {data, N}; }
-        [[nodiscard]] static constexpr std::size_t size() noexcept { return N; }
-    };
-
-    template<std::size_t N>
-    fixed_string(const char (&)[N]) -> fixed_string<N - 1>;
-
-    /// `A` followed by `B`, as a new fixed_string (used to prefix group paths).
-    template<std::size_t N, std::size_t M>
-    [[nodiscard]] constexpr fixed_string<N + M> concat(const fixed_string<N> &a, const fixed_string<M> &b) noexcept {
-        fixed_string<N + M> out;
-        for (std::size_t i = 0; i < N; ++i) out.data[i] = a.data[i];
-        for (std::size_t i = 0; i < M; ++i) out.data[N + i] = b.data[i];
-        return out;
-    }
+    using base::concat;
+    using base::fixed_string;
 
     // ─── Segment comparison policies ────────────────────────────────────────
     //
@@ -124,12 +102,13 @@ namespace wavex::engine::route {
 
     enum class segment_kind : std::uint8_t { literal, param, wildcard };
 
-    enum class param_class : std::uint8_t { any, int_, uint_, alpha, alnum, hex };
+    enum class param_class : std::uint8_t { any, int_, uint_, alpha, alnum, hex, regex };
 
     struct pattern_segment {
         std::string_view text{}; ///< literal text, or the parameter / wildcard name
         segment_kind kind{segment_kind::literal};
         param_class cls{param_class::any};
+        std::string_view pattern{}; ///< regular expression (cls == regex), else empty
     };
 
     inline constexpr std::size_t max_pattern_segments = 16;
@@ -138,7 +117,7 @@ namespace wavex::engine::route {
         none,
         too_many_segments, ///< more than max_pattern_segments
         wildcard_not_last,
-        unknown_constraint,
+        unknown_constraint, ///< `{name:}` with nothing after the colon
         bad_literal, ///< a literal segment contains '{', '}' or '*'
         empty_param_name,
         duplicate_param ///< the same parameter name used twice in one pattern
@@ -179,6 +158,8 @@ namespace wavex::engine::route {
             case param_class::hex:
                 for (const char ch: s) if (!hex(ch)) return false;
                 return true;
+            case param_class::regex: // evaluated by the router with the compiled program, never here
+                return false;
         }
         return false;
     }
@@ -223,9 +204,17 @@ namespace wavex::engine::route {
                 const std::size_t colon = inner.find(':');
                 ps.kind = segment_kind::param;
                 ps.text = inner.substr(0, colon);
-                if (colon != std::string_view::npos && !parse_class(inner.substr(colon + 1), ps.cls)) {
-                    out.error = pattern_error::unknown_constraint;
-                    return out;
+                if (colon != std::string_view::npos) {
+                    const std::string_view c = inner.substr(colon + 1);
+                    if (c.empty()) {
+                        out.error = pattern_error::unknown_constraint;
+                        return out;
+                    }
+                    // A built-in class name, otherwise a regular expression (same `{name:regex}` form as DynamicRouter).
+                    if (!parse_class(c, ps.cls)) {
+                        ps.cls = param_class::regex;
+                        ps.pattern = c;
+                    }
                 }
             } else if (seg[0] == '*') {
                 ps.kind = segment_kind::wildcard;

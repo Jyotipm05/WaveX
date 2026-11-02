@@ -79,7 +79,9 @@ namespace {
     static_assert(parse_pattern("//a///b/").count == 2);
     static_assert(parse_pattern("/").count == 0);
     static_assert(parse_pattern("/a/*x/b").error == pattern_error::wildcard_not_last);
-    static_assert(parse_pattern("/a/{id:bogus}").error == pattern_error::unknown_constraint);
+    static_assert(parse_pattern("/a/{id:}").error == pattern_error::unknown_constraint);
+    static_assert(parse_pattern("/a/{id:[0-9]{4}}").segs[1].cls == param_class::regex &&
+                  parse_pattern("/a/{id:[0-9]{4}}").segs[1].pattern == "[0-9]{4}");
     static_assert(parse_pattern("/a/{}").error == pattern_error::empty_param_name);
     static_assert(parse_pattern("/a/:x/:x").error == pattern_error::duplicate_param);
     static_assert(parse_pattern("/a{b").error == pattern_error::bad_literal);
@@ -125,14 +127,16 @@ namespace {
             on<fmethod::POST, "/users">(tag("create")),
             on<fmethod::GET, "/a/:x/b">(tag("axb")),
             on<fmethod::GET, "/files/*path">(tag("files")),
-            on<fmethod::GET, "/files/static/info">(tag("info")));
+            on<fmethod::GET, "/files/static/info">(tag("info")),
+            on<fmethod::GET, "/d/{date:[0-9]{4}-[0-9]{2}-[0-9]{2}}">(tag("date")),
+            on<fmethod::GET, "/d/{slug:[a-z]+(-[a-z]+)*}/v">(tag("slug")));
     }
 
     template<typename Cmp>
     void matching_tests(const char *label) {
         std::cout << "matching (" << label << ")\n";
         const auto r = make_router<Cmp>();
-        check(r.size() == 8, "route count is known at compile time");
+        check(r.size() == 10, "route count is known at compile time");
         freq q;
         fres s;
 
@@ -181,6 +185,14 @@ namespace {
         params = call(r, fmethod::GET, "/files/static/other", q, s);
         check(s.body == "files" && params == "path=static/other;", "backtracks from literal branch into the wildcard");
 
+        q = {}; s = {};
+        params = call(r, fmethod::GET, "/d/2026-11-02", q, s);
+        check(s.body == "date" && params == "date=2026-11-02;", "regex parameter");
+        check(call(r, fmethod::GET, "/d/2026-1-02", q, s) == "<none>", "regex parameter must match the whole segment");
+        q = {}; s = {};
+        params = call(r, fmethod::GET, "/d/hello-big-world/v", q, s);
+        check(s.body == "slug" && params == "slug=hello-big-world;", "regex with group and repetition");
+        check(call(r, fmethod::GET, "/d/Hello/v", q, s) == "<none>", "regex rejects uppercase");
         check(call(r, fmethod::GET, "/nope", q, s) == "<none>", "unknown path is a miss");
         q = {}; s = {};
         call(r, fmethod::GET, "", q, s);

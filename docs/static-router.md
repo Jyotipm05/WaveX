@@ -30,13 +30,15 @@ Handlers have the same signature as everywhere else: `task<void>(Req&, Res&)`.
 
 ## Patterns
 
-Same syntax as `DynamicRouter`, with built-in constraints instead of regular expressions:
+Same syntax as `DynamicRouter`; constraints are built-in classes or a regular expression run by the in-tree
+engine (see [ctregex.md](ctregex.md)):
 
 | Pattern | Meaning |
 |---------|---------|
 | `users` | literal segment |
 | `:id`, `{id}` | parameter, any non-empty segment |
 | `{id:int}` | parameter constrained to `any`, `int`, `uint`, `alpha`, `alnum` or `hex` |
+| `{id:[0-9]{4}}` | anything else after the colon is a regular expression the whole segment must match |
 | `*`, `*name` | wildcard, last segment only, captures the rest of the path (key `*` when unnamed) |
 
 Matching order at each position: literal children, then parameters (in registration order, backtracking when a
@@ -44,7 +46,10 @@ branch fails), then the wildcard. Repeated, leading and trailing slashes are ign
 known path with an unregistered method, is a miss (404), as in `DynamicRouter`. Parameters appear in
 `req.param("id")` exactly like before.
 
-Mistakes are compile errors with a readable message: malformed pattern, unknown constraint, wildcard not last,
+A regular expression is compiled to an NFA program at compile time and run without backtracking, so a hostile
+segment cannot make matching slow; it cannot contain `/` (use `\x2f`). Typical cost is a few ns per byte.
+
+Mistakes are compile errors with a readable message: malformed pattern, bad regex, empty constraint, wildcard not last,
 the same parameter name twice, more than 16 segments, or the same method and path registered twice.
 
 ## Middleware
@@ -84,6 +89,6 @@ before using it. A custom policy needs `key_type`, `prepare(string_view)` and `e
 ## Limits
 
 * The route set cannot change after construction (use `DynamicRouter` for runtime registration).
-* No regular-expression constraints and no `HttpRouter` conveniences (`websocket`, `use(prefix, ...)`); `not_found(...)`
+* Regex constraints use the `wavex::rx` subset (no lookaround, backreferences or captures), not RE2; no `HttpRouter` conveniences (`websocket`, `use(prefix, ...)`); `not_found(...)`
   is available.
 * `DynamicRouter` does not take the `SegmentCompare` parameter yet.

@@ -15,6 +15,7 @@
 | `Base/MiddleWare`          | ✅ Complete | Coroutine-aware middleware template (`GenericMiddlewareFn`), linear pipeline, `keep_alive`, `sse_stay_active` & `body_limit`                             |
 | `Engine/DynamicRouter`          | ✅ Complete | Protocol-agnostic radix tree with RE2 regex, wildcard matching & configurable 404 handler                                                                |
 | `Engine/StaticRouter`      | ✅ Complete | Compile-time router: constexpr route tree, typed params, nested middleware (see `static-router.md`)   |
+| `Base/CtRegex`             | ✅ Complete | `wavex::rx`: compile-time regex engine, no backtracking (see `ctregex.md`)                            |
 | `Engine/HttpRouter`        | ✅ Complete | HTTP/1.1 (`Http1Router`), HTTP/2 (`Http2Router`) & HTTP/3 (`Http3Router`) method convenience routing (`get`, `post`, etc.) & 404 customization           |
 | `Server/LocalQueue`        | ✅ Complete | Per-worker 256-slot ring buffer for ultra-fast task stealing                                                                                             |
 | `Server/InjectorQueue`     | ✅ Complete | Global unbounded MPMC task overflow queue with atomic size tracking                                                                                      |

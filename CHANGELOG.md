@@ -7,6 +7,8 @@ Tagged releases before 0.4.0 (`v0.1.0-alpha` to `v0.3.0-alpha`) are listed under
 ## [Unreleased] (0.4.0 development)
 
 ### Added
+- `wavex::rx` (`Base/CtRegex.hpp`): an in-tree regular-expression engine compiled at compile time (`rx::compile`, `rx::matches<"...">`), matching without backtracking or allocation; supports classes, groups, alternation, `* + ? {n,m}`, `(?i)`. `StaticRouter` accepts regex constraints in `{name:regex}` segments. `Base/FixedString.hpp` now holds `fixed_string`. See `docs/ctregex.md`.
+- `test_ctregex`: compile-time assertions, expectation table, error codes, a differential test against `std::regex` on 6000 generated patterns, and garbage-pattern robustness.
 - `StaticRouter` (`Engine/StaticRouter.hpp`, `StaticHttpRouter.hpp`): a router whose routes, lookup tree and middleware chains are built at compile time (`static_router<Proto, Cmp>(on<...>(...), group<...>(...), use(...))`), with typed parameters (`{id:int}`), wildcards, nested middleware that can post-process, and compile errors for malformed or duplicate routes. `Engine/RouteCore.hpp` holds the shared `router_type` concept, the constexpr pattern parser and the `string_compare` / `hash_compare` segment policies. See `docs/static-router.md`.
 - `test_static_router`: pattern parsing and validation as `static_assert`s, matching (literal, typed, wildcard, backtracking, normalization) under both compare policies, middleware order, and serving through `Server<http1codec, StaticRouter>`.
 - `wavex::task<T>` (`wavex/Base/Task.hpp`): WaveX's name for the coroutine return type, an alias of `asio::awaitable<T>` (same type, nothing converts). Public signatures, docs, examples and tests now use it; `asio::awaitable` code keeps compiling.

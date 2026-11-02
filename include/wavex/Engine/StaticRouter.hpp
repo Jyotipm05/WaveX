@@ -34,7 +34,8 @@
  * Order for every route: global `use`, enclosing groups outer to inner, the route's own list, the handler.
  * A `use` applies to every route of its scope regardless of where in the list it appears.
  *
- * Differences from DynamicRouter: no RE2 constraints (`{id:int}` etc. are built in), the route set can't
+ * Differences from DynamicRouter: constraints are the built-in classes (`{id:int}`) or a regular expression run by
+ * the in-tree engine `wavex::rx` (`{id:[0-9]{4}}`, compiled at compile time, no backtracking, no RE2), the route set can't
  * change after construction, and a matched route's middleware runs nested (so it can post-process) instead
  * of through the server's flag-based chain.
  */
@@ -53,6 +54,7 @@
 #include <type_traits>
 #include <utility>
 
+#include <wavex/Base/CtRegex.hpp>
 #include <wavex/Base/FlatMap.hpp>
 #include <wavex/Base/MiddleWare.hpp>
 #include <wavex/Base/Task.hpp>
@@ -152,15 +154,17 @@ namespace wavex::engine::route {
 
     // ─── Compile-time route tree ────────────────────────────────────────────
 
-    enum class table_error : std::uint8_t { none, bad_pattern, duplicate_route };
+    enum class table_error : std::uint8_t { none, bad_pattern, bad_regex, duplicate_route };
 
-    template<typename Cmp, typename Method, std::size_t NodeCap, std::size_t RouteCap>
+    template<typename Cmp, typename Method, std::size_t NodeCap, std::size_t RouteCap, std::size_t RegexCap>
     struct route_table {
         struct node {
             typename Cmp::key_type key{}; ///< prepared literal text (literal nodes only)
             std::string_view name{};      ///< literal text, or parameter / wildcard name
             segment_kind kind{segment_kind::literal};
             param_class cls{param_class::any};
+            std::string_view pattern{};   ///< regex text (cls == regex)
+            int regex{-1};                ///< index into `programs` (cls == regex)
             int next{-1};                 ///< next sibling
             int child{-1};                ///< first child
             int entry{-1};                ///< first (method -> route) entry ending at this node
@@ -174,6 +178,9 @@ namespace wavex::engine::route {
 
         std::array<node, NodeCap> nodes{};
         std::array<entry, RouteCap> entries{};
+        std::array<rx::program, RegexCap> programs{};
+        std::size_t regex_count{0};
+        rx::error regex_error{rx::error::none};
         std::size_t node_count{1};
         std::size_t entry_count{0};
         table_error error{table_error::none};
@@ -195,7 +202,7 @@ namespace wavex::engine::route {
                     tail = c;
                     const node &nd = nodes[c];
                     if (nd.kind == seg.kind && nd.name == seg.text &&
-                        (seg.kind != segment_kind::param || nd.cls == seg.cls)) {
+                        (seg.kind != segment_kind::param || (nd.cls == seg.cls && nd.pattern == seg.pattern))) {
                         found = c;
                         break;
                     }
@@ -206,7 +213,17 @@ namespace wavex::engine::route {
                     nd.kind = seg.kind;
                     nd.cls = seg.cls;
                     nd.name = seg.text;
+                    nd.pattern = seg.pattern;
                     if (seg.kind == segment_kind::literal) nd.key = Cmp::prepare(seg.text);
+                    if (seg.cls == param_class::regex) {
+                        programs[regex_count] = rx::compile(seg.pattern);
+                        if (!programs[regex_count].ok()) {
+                            error = table_error::bad_regex;
+                            regex_error = programs[regex_count].err;
+                            return;
+                        }
+                        nd.regex = static_cast<int>(regex_count++);
+                    }
                     if (tail < 0) nodes[cur].child = found; else nodes[tail].next = found;
                 }
                 cur = found;
@@ -222,10 +239,10 @@ namespace wavex::engine::route {
         }
     };
 
-    template<typename Cmp, typename Method, std::size_t NodeCap, std::size_t RouteCap, std::size_t N>
+    template<typename Cmp, typename Method, std::size_t NodeCap, std::size_t RouteCap, std::size_t RegexCap, std::size_t N>
     [[nodiscard]] consteval auto build_table(const std::array<std::string_view, N> &paths,
                                              const std::array<Method, N> &methods) {
-        route_table<Cmp, Method, NodeCap, RouteCap> t;
+        route_table<Cmp, Method, NodeCap, RouteCap, RegexCap> t;
         for (std::size_t i = 0; i < N; ++i) t.add(paths[i], methods[i], static_cast<std::uint32_t>(i));
         return t;
     }
@@ -272,25 +289,49 @@ namespace wavex::engine::route {
         static constexpr std::size_t route_count = sizeof...(Routes);
         static constexpr std::size_t node_cap = 1 + (std::size_t{0} + ... + parse_pattern(Routes::path.view()).count);
         static constexpr std::size_t route_cap = route_count == 0 ? 1 : route_count;
-
         static constexpr std::array<std::string_view, route_count> paths_{Routes::path.view()...};
         static constexpr std::array<MethodType, route_count> methods_{Routes::method...};
+        static constexpr std::size_t regex_cap = [] {
+            std::size_t n = 0;
+            for (const std::string_view p: paths_) {
+                const parsed_pattern pp = parse_pattern(p);
+                for (std::size_t i = 0; i < pp.count; ++i) n += pp.segs[i].cls == param_class::regex ? 1 : 0;
+            }
+            return n == 0 ? std::size_t{1} : n;
+        }();
 
-        using table_type = route_table<Cmp, MethodType, node_cap, route_cap>;
-        static constexpr table_type tbl_ = build_table<Cmp, MethodType, node_cap, route_cap>(paths_, methods_);
+
+        using table_type = route_table<Cmp, MethodType, node_cap, route_cap, regex_cap>;
+        static constexpr table_type tbl_ = build_table<Cmp, MethodType, node_cap, route_cap, regex_cap>(paths_, methods_);
 
         static_assert(tbl_.error != table_error::bad_pattern || tbl_.pattern != pattern_error::too_many_segments,
                       "StaticRouter: a route pattern has more than 16 segments");
         static_assert(tbl_.error != table_error::bad_pattern || tbl_.pattern != pattern_error::wildcard_not_last,
                       "StaticRouter: a wildcard must be the last segment of a route pattern");
         static_assert(tbl_.error != table_error::bad_pattern || tbl_.pattern != pattern_error::unknown_constraint,
-                      "StaticRouter: unknown parameter constraint (use any, int, uint, alpha, alnum or hex)");
+                      "StaticRouter: empty constraint after ':' in a route parameter");
         static_assert(tbl_.error != table_error::bad_pattern || tbl_.pattern != pattern_error::bad_literal,
                       "StaticRouter: a literal segment contains '{', '}' or '*'");
         static_assert(tbl_.error != table_error::bad_pattern || tbl_.pattern != pattern_error::empty_param_name,
                       "StaticRouter: a route parameter has an empty name");
         static_assert(tbl_.error != table_error::bad_pattern || tbl_.pattern != pattern_error::duplicate_param,
                       "StaticRouter: a route pattern uses the same parameter name twice");
+        static_assert(tbl_.error != table_error::bad_regex || tbl_.regex_error != rx::error::unbalanced_paren,
+                      "StaticRouter: regex constraint has unbalanced parentheses");
+        static_assert(tbl_.error != table_error::bad_regex || tbl_.regex_error != rx::error::bad_escape,
+                      "StaticRouter: regex constraint has an unknown or unsupported escape (\\b, backreferences, ...)");
+        static_assert(tbl_.error != table_error::bad_regex || tbl_.regex_error != rx::error::trailing_backslash,
+                      "StaticRouter: regex constraint ends with a backslash");
+        static_assert(tbl_.error != table_error::bad_regex || tbl_.regex_error != rx::error::bad_class,
+                      "StaticRouter: regex constraint has an unterminated or reversed [...] class");
+        static_assert(tbl_.error != table_error::bad_regex || tbl_.regex_error != rx::error::nothing_to_repeat,
+                      "StaticRouter: regex constraint has a quantifier with nothing to repeat");
+        static_assert(tbl_.error != table_error::bad_regex || tbl_.regex_error != rx::error::bad_repeat,
+                      "StaticRouter: regex constraint has an invalid {n,m} repeat");
+        static_assert(tbl_.error != table_error::bad_regex || tbl_.regex_error != rx::error::too_complex,
+                      "StaticRouter: regex constraint exceeds the engine limits (128 instructions, 16 sets, 32 levels)");
+        static_assert(tbl_.error != table_error::bad_regex || tbl_.regex_error != rx::error::unsupported,
+                      "StaticRouter: regex constraint uses unsupported syntax (lookaround, named group, inner anchor)");
         static_assert(tbl_.error != table_error::duplicate_route,
                       "StaticRouter: the same method and path is registered twice");
 
@@ -376,7 +417,8 @@ namespace wavex::engine::route {
             }
             for (int c = tbl_.nodes[node].child; c >= 0; c = tbl_.nodes[c].next) {
                 const auto &nd = tbl_.nodes[c];
-                if (nd.kind != segment_kind::param || !matches_class(nd.cls, seg)) continue;
+                if (nd.kind != segment_kind::param) continue;
+                if (nd.cls == param_class::regex ? !tbl_.programs[nd.regex].match(seg) : !matches_class(nd.cls, seg)) continue;
                 caps.items[caps.count++] = {nd.name, seg};
                 if (walk(c, rest, method, caps, route)) return true;
                 --caps.count;
