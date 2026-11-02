@@ -19,6 +19,7 @@
  *  - headers.reserve(16)                  — avoids log₂n reallocations
  */
 #pragma once
+#include <algorithm>
 #include <string_view>
 #include <vector>
 #include <array>
@@ -847,6 +848,270 @@ namespace wavex::protos::http {
     };
 
     /**
+     * @class response_stream_parser
+     * @brief Incremental HTTP/1.x response parser for streaming consumers (clients, proxies).
+     *
+     * Feed it whatever bytes have arrived; it hands back the response head once, then the body in pieces with the
+     * transfer framing removed (chunked or Content-Length; until-close bodies end at EOF), then `done`. It never
+     * copies body bytes: `event::data` views into the input you passed, valid until the next call. It performs
+     * no I/O, so the same state machine works for sockets, TLS streams or tests.
+     *
+     * @code
+     * response_stream_parser p;
+     * std::string_view in = bytes;
+     * for (;;) {
+     *     auto ev = p.next(in);               // consumes from the front of `in`
+     *     if (ev.kind == event_kind::need_more) { ...read more into `in`...; continue; }
+     *     if (ev.kind == event_kind::head) { use p.status_code(), p.headers(); }
+     *     else if (ev.kind == event_kind::body) { use ev.data; }
+     *     else break;                          // done or error
+     * }
+     * @endcode
+     */
+    class response_stream_parser {
+    public:
+        enum class event_kind { need_more, head, body, done, error };
+
+        struct event {
+            event_kind kind{event_kind::need_more};
+            std::string_view data{}; ///< body bytes for `body`
+        };
+
+        /// @param no_body true for responses to HEAD requests (no body regardless of headers).
+        explicit response_stream_parser(const bool no_body = false) noexcept : no_body_(no_body) {
+        }
+
+        /// Consume bytes from the front of `input` and return the next event.
+        event next(std::string_view &input) {
+            for (;;) {
+                switch (state_) {
+                    case state::head: {
+                        if (input.empty() && head_buf_.empty()) return {event_kind::need_more, {}};
+                        const std::size_t before = head_buf_.size();
+                        head_buf_.append(input);
+                        // The terminator may straddle the previous and the new bytes.
+                        const std::size_t from = before >= 3 ? before - 3 : 0;
+                        const auto end = head_buf_.find("\r\n\r\n", from);
+                        if (end == std::string::npos) {
+                            input = {};
+                            if (head_buf_.size() > kMaxHead) return fail();
+                            return {event_kind::need_more, {}};
+                        }
+                        const std::size_t head_len = end + 4;
+                        input.remove_prefix(input.size() - (head_buf_.size() - head_len)); // give back the body bytes
+                        head_buf_.resize(head_len);
+                        if (!parse_head()) return fail();
+                        head_buf_.clear();
+                        if (status_code_ >= 100 && status_code_ < 200 && status_code_ != 101) {
+                            reset_head(); // interim response: skip it
+                            continue;
+                        }
+                        choose_body_mode();
+                        return {event_kind::head, {}};
+                    }
+                    case state::fixed: {
+                        if (remaining_ == 0) {
+                            state_ = state::done;
+                            continue;
+                        }
+                        if (input.empty()) return {event_kind::need_more, {}};
+                        const auto n = static_cast<std::size_t>(std::min<uint64_t>(remaining_, input.size()));
+                        const auto piece = input.substr(0, n);
+                        input.remove_prefix(n);
+                        remaining_ -= n;
+                        return {event_kind::body, piece};
+                    }
+                    case state::until_close: {
+                        if (input.empty()) return {event_kind::need_more, {}};
+                        const auto piece = input;
+                        input = {};
+                        return {event_kind::body, piece};
+                    }
+                    case state::chunk_size: {
+                        if (!read_line(input)) return input_exhausted_ ? event{event_kind::need_more, {}} : fail();
+                        const auto semi = line_.find(';');
+                        const std::string_view hex = std::string_view(line_).substr(0, semi);
+                        uint64_t size = 0;
+                        const auto [p, ec] = std::from_chars(hex.data(), hex.data() + hex.size(), size, 16);
+                        if (hex.empty() || ec != std::errc{} || p != hex.data() + hex.size()) return fail();
+                        line_.clear();
+                        if (size == 0) {
+                            state_ = state::trailers;
+                        } else {
+                            remaining_ = size;
+                            state_ = state::chunk_data;
+                        }
+                        continue;
+                    }
+                    case state::chunk_data: {
+                        if (input.empty()) return {event_kind::need_more, {}};
+                        const auto n = static_cast<std::size_t>(std::min<uint64_t>(remaining_, input.size()));
+                        const auto piece = input.substr(0, n);
+                        input.remove_prefix(n);
+                        remaining_ -= n;
+                        if (remaining_ == 0) state_ = state::chunk_crlf;
+                        return {event_kind::body, piece};
+                    }
+                    case state::chunk_crlf: {
+                        // Exactly "\r\n" must follow the data: reject anything else immediately.
+                        if (!input.empty() && ((line_.empty() && input.front() != '\r') ||
+                                               (line_.size() == 1 && input.front() != '\n'))) {
+                            return fail();
+                        }
+                        if (!read_line(input)) return input_exhausted_ ? event{event_kind::need_more, {}} : fail();
+                        if (!line_.empty()) return fail();
+                        state_ = state::chunk_size;
+                        continue;
+                    }
+                    case state::trailers: {
+                        if (!read_line(input)) return input_exhausted_ ? event{event_kind::need_more, {}} : fail();
+                        const bool last = line_.empty();
+                        line_.clear();
+                        if (last) state_ = state::done;
+                        continue;
+                    }
+                    case state::done:
+                        return {event_kind::done, {}};
+                    case state::failed:
+                        return {event_kind::error, {}};
+                }
+            }
+        }
+
+        /// The peer closed the connection. True when the response is complete (until-close bodies end here).
+        [[nodiscard]] bool finish() noexcept {
+            if (state_ == state::until_close) state_ = state::done;
+            return state_ == state::done;
+        }
+
+        [[nodiscard]] bool head_received() const noexcept { return head_received_; }
+        [[nodiscard]] unsigned int status_code() const noexcept { return status_code_; }
+        [[nodiscard]] const std::string &status_text() const noexcept { return status_text_; }
+
+        [[nodiscard]] const std::vector<std::pair<std::string, std::string> > &headers() const noexcept {
+            return headers_;
+        }
+
+    private:
+        enum class state { head, fixed, until_close, chunk_size, chunk_data, chunk_crlf, trailers, done, failed };
+
+        static constexpr std::size_t kMaxHead = 64 * 1024;
+        static constexpr std::size_t kMaxLine = 4096;
+
+        event fail() noexcept {
+            state_ = state::failed;
+            return {event_kind::error, {}};
+        }
+
+        void reset_head() {
+            head_buf_.clear();
+            headers_.clear();
+            status_code_ = 0;
+            status_text_.clear();
+        }
+
+        /// Accumulate one CRLF-terminated line into `line_`. False: more input needed (`input_exhausted_`) or bad.
+        bool read_line(std::string_view &input) {
+            input_exhausted_ = false;
+            while (!input.empty()) {
+                const char c = input.front();
+                input.remove_prefix(1);
+                if (c == '\n') {
+                    if (line_.empty() || line_.back() != '\r') return false;
+                    line_.pop_back();
+                    return true;
+                }
+                if (line_.size() >= kMaxLine) return false;
+                line_.push_back(c);
+            }
+            input_exhausted_ = true;
+            return false;
+        }
+
+        static bool ieq(const std::string_view a, const std::string_view b) noexcept {
+            if (a.size() != b.size()) return false;
+            for (std::size_t i = 0; i < a.size(); ++i) {
+                const auto x = a[i] >= 'A' && a[i] <= 'Z' ? a[i] + 32 : a[i];
+                const auto y = b[i] >= 'A' && b[i] <= 'Z' ? b[i] + 32 : b[i];
+                if (x != y) return false;
+            }
+            return true;
+        }
+
+        bool parse_head() {
+            std::string_view h = head_buf_;
+            const auto eol = h.find("\r\n");
+            const auto status_line = h.substr(0, eol);
+            // "HTTP/1.x SP code [SP reason]"
+            if (status_line.size() < 12 || !status_line.starts_with("HTTP/1.") || status_line[8] != ' ') return false;
+            unsigned int code = 0;
+            const auto cs = status_line.substr(9, 3);
+            if (std::from_chars(cs.data(), cs.data() + 3, code).ec != std::errc{} || code < 100 || code > 599) {
+                return false;
+            }
+            status_code_ = code;
+            status_text_ = status_line.size() > 13 ? std::string(status_line.substr(13)) : std::string();
+            h.remove_prefix(eol + 2);
+            while (!h.empty()) {
+                const auto e = h.find("\r\n");
+                const auto line = h.substr(0, e);
+                h.remove_prefix(e + 2);
+                if (line.empty()) break;
+                const auto colon = line.find(':');
+                if (colon == std::string_view::npos || colon == 0) return false;
+                auto value = line.substr(colon + 1);
+                while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) value.remove_prefix(1);
+                while (!value.empty() && (value.back() == ' ' || value.back() == '\t')) value.remove_suffix(1);
+                headers_.emplace_back(std::string(line.substr(0, colon)), std::string(value));
+            }
+            head_received_ = true;
+            return true;
+        }
+
+        void choose_body_mode() {
+            const bool bodyless = no_body_ || status_code_ == 204 || status_code_ == 304 || status_code_ == 101;
+            if (bodyless) {
+                state_ = state::done;
+                return;
+            }
+            std::optional<uint64_t> length;
+            bool chunked = false;
+            for (const auto &[k, v]: headers_) {
+                if (ieq(k, "transfer-encoding")) {
+                    chunked = chunked || v.find("chunked") != std::string::npos;
+                } else if (ieq(k, "content-length")) {
+                    uint64_t n = 0;
+                    if (std::from_chars(v.data(), v.data() + v.size(), n).ec != std::errc{} ||
+                        (length && *length != n)) {
+                        state_ = state::failed;
+                        return;
+                    }
+                    length = n;
+                }
+            }
+            if (chunked) {
+                state_ = state::chunk_size;
+            } else if (length) {
+                remaining_ = *length;
+                state_ = state::fixed;
+            } else {
+                state_ = state::until_close;
+            }
+        }
+
+        std::string head_buf_{};
+        std::string line_{};
+        std::string status_text_{};
+        std::vector<std::pair<std::string, std::string> > headers_{};
+        uint64_t remaining_{0};
+        unsigned int status_code_{0};
+        state state_{state::head};
+        bool no_body_{false};
+        bool head_received_{false};
+        bool input_exhausted_{false};
+    };
+
+    /**
      * @namespace wavex::protos::http::http1
      * @brief HTTP/1.x specific message structures, parser, and encoder matching http2 namespace.
      */
@@ -858,6 +1123,7 @@ namespace wavex::protos::http {
         using http::parser;
         using http::encoder;
         using http::decoder;
+        using http::response_stream_parser;
     }
 
     /**
@@ -868,6 +1134,7 @@ namespace wavex::protos::http {
         using parser = parser;
         using encoder = encoder;
         using decoder = decoder;
+        using response_stream_parser = http::response_stream_parser;
         using request = request;
         using response = response;
         using result = parser::result;

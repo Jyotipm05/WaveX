@@ -1339,6 +1339,112 @@ namespace wavex::protos::http::http3 {
         return encode_data_frame(data);
     }
 
+    // ─── http3::response_stream_parser ──────────────────────────────────────────────
+
+    response_stream_parser::event response_stream_parser::next(std::string_view &input) {
+        constexpr std::size_t kMaxHeadersFrame = 256 * 1024;
+        for (;;) {
+            switch (state_) {
+                case state::failed:
+                    return {event_kind::error, {}};
+
+                case state::frame_header: {
+                    frame_header hdr;
+                    std::size_t used = 0;
+                    // Take bytes one at a time: a frame header is at most 16 bytes and must not over-consume.
+                    while (!parser::parse_frame_header(hdr_raw_, hdr, used)) {
+                        if (input.empty()) return {event_kind::need_more, {}};
+                        if (hdr_raw_.size() >= 16) return fail();
+                        hdr_raw_.push_back(input.front());
+                        input.remove_prefix(1);
+                    }
+                    if (is_reserved_frame_type(hdr.type)) return fail();
+                    remaining_ = hdr.length;
+                    if (hdr.type == static_cast<uint64_t>(frame_type::HEADERS)) {
+                        if (hdr.length > kMaxHeadersFrame) return fail();
+                        frame_raw_ = hdr_raw_;
+                        state_ = state::headers_payload;
+                    } else if (hdr.type == static_cast<uint64_t>(frame_type::DATA)) {
+                        if (!head_received_) return fail();
+                        state_ = state::data_payload;
+                    } else if (hdr.type == static_cast<uint64_t>(frame_type::SETTINGS) ||
+                               hdr.type == static_cast<uint64_t>(frame_type::CANCEL_PUSH) ||
+                               hdr.type == static_cast<uint64_t>(frame_type::GOAWAY) ||
+                               hdr.type == static_cast<uint64_t>(frame_type::MAX_PUSH_ID)) {
+                        return fail(); // control-stream frames are forbidden on a request stream
+                    } else {
+                        state_ = state::skip_payload; // PUSH_PROMISE, unknown extension frames, ...
+                    }
+                    hdr_raw_.clear();
+                    continue;
+                }
+
+                case state::headers_payload: {
+                    const auto n = static_cast<std::size_t>(std::min<uint64_t>(remaining_, input.size()));
+                    frame_raw_.append(input.substr(0, n));
+                    input.remove_prefix(n);
+                    remaining_ -= n;
+                    if (remaining_ != 0) return {event_kind::need_more, {}};
+                    state_ = state::frame_header;
+                    if (head_received_) { // trailers: complete, nothing to report
+                        frame_raw_.clear();
+                        continue;
+                    }
+                    response res;
+                    std::size_t consumed = 0;
+                    const auto r = parser::parse_response(frame_raw_, res, consumed, dt_);
+                    frame_raw_.clear();
+                    // A Content-Length makes the parser report "incomplete" (the body is not in this buffer), but
+                    // by then the head has been decoded.
+                    if (r == parser::result::error || (r == parser::result::incomplete && !res.state_.headers_received)) {
+                        return fail();
+                    }
+                    if (res.status_code >= 100 && res.status_code < 200) continue; // interim response
+                    status_code_ = res.status_code;
+                    status_text_ = std::string(http1codec::status_text_for(res.status_code));
+                    headers_ = res.headers_storage;
+                    for (const auto &[k, v]: headers_) {
+                        if (k == "content-length") {
+                            has_content_length_ = parse_content_length(v, content_length_);
+                        }
+                    }
+                    head_received_ = true;
+                    return {event_kind::head, {}};
+                }
+
+                case state::data_payload: {
+                    if (remaining_ == 0) {
+                        state_ = state::frame_header;
+                        continue;
+                    }
+                    if (input.empty()) return {event_kind::need_more, {}};
+                    const auto n = static_cast<std::size_t>(std::min<uint64_t>(remaining_, input.size()));
+                    const auto piece = input.substr(0, n);
+                    input.remove_prefix(n);
+                    remaining_ -= n;
+                    body_bytes_ += n;
+                    if (remaining_ == 0) state_ = state::frame_header;
+                    return {event_kind::body, piece};
+                }
+
+                case state::skip_payload: {
+                    const auto n = static_cast<std::size_t>(std::min<uint64_t>(remaining_, input.size()));
+                    input.remove_prefix(n);
+                    remaining_ -= n;
+                    if (remaining_ != 0) return {event_kind::need_more, {}};
+                    state_ = state::frame_header;
+                    continue;
+                }
+            }
+        }
+    }
+
+    bool response_stream_parser::finish() const noexcept {
+        if (state_ == state::failed || !head_received_) return false;
+        if (!hdr_raw_.empty() || state_ != state::frame_header) return false; // a frame was cut short
+        return !has_content_length_ || body_bytes_ == content_length_;
+    }
+
     // ─── http3::decoder ─────────────────────────────────────────────────────────────
 
     parser::result decoder::decode_response(

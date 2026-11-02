@@ -50,12 +50,72 @@ namespace wavex::client {
             return true;
         }
 
+        /// Read an HTTP/1.x response incrementally and hand the body to `sink` (framing is the codec's job).
+        template<typename Stream>
+        wavex::task<ClientResponse> read_http1_streaming(Stream &stream, const bool head_request,
+                                                         const BodySink &sink, ClientResponse res) {
+            using protos::http::http1codec;
+            http1codec::response_stream_parser parser(head_request);
+            char buf[16384];
+            std::string_view pending;
+            bool eof = false;
+            for (;;) {
+                auto ev = parser.next(pending);
+                using kind = http1codec::response_stream_parser::event_kind;
+                if (ev.kind == kind::need_more) {
+                    if (eof) {
+                        if (!parser.finish()) {
+                            if (!parser.head_received()) {
+                                res.status_code(502);
+                                res.status_text("Bad Gateway");
+                                res.body("Invalid response format from upstream HTTP server");
+                            } else {
+                                res.body_error(std::make_error_code(std::errc::connection_reset));
+                            }
+                        }
+                        co_return res;
+                    }
+                    asio::error_code read_ec;
+                    const std::size_t n = co_await stream.async_read_some(
+                        asio::buffer(buf), asio::redirect_error(asio::use_awaitable, read_ec));
+                    pending = std::string_view(buf, n);
+                    if (read_ec) eof = true; // eof or reset; whatever arrived with it is still parsed
+                    continue;
+                }
+                if (ev.kind == kind::head) {
+                    res.status_code(parser.status_code());
+                    res.status_text(parser.status_text());
+                    for (const auto &[k, v]: parser.headers()) res.header(k, v);
+                    continue;
+                }
+                if (ev.kind == kind::body) {
+                    if (!co_await sink(ev.data)) {
+                        res.body_error(std::make_error_code(std::errc::operation_canceled));
+                        co_return res;
+                    }
+                    continue;
+                }
+                if (ev.kind == kind::error) {
+                    if (!parser.head_received()) {
+                        res.status_code(502);
+                        res.status_text("Bad Gateway");
+                        res.body("Invalid response format from upstream HTTP server");
+                    } else {
+                        res.body_error(std::make_error_code(std::errc::protocol_error));
+                    }
+                    co_return res;
+                }
+                co_return res; // done
+            }
+        }
+
         template<typename Stream>
         wavex::task<ClientResponse> execute_http1_exchange(
             Stream &stream,
             const std::string &host_header,
             const ClientRequest &req,
-            const std::string &path_target) {
+            const std::string &path_target,
+            const BodySink *sink = nullptr) {
             ClientResponse res;
             res.http_version(HttpVersion::Http1_1);
 
@@ -106,6 +166,10 @@ namespace wavex::client {
                 res.status_text("Bad Gateway");
                 res.body("Failed to send HTTP/1.1 request: " + write_ec.message());
                 co_return res;
+            }
+
+            if (sink) {
+                co_return co_await read_http1_streaming(stream, req.method() == method::HEAD, *sink, std::move(res));
             }
 
             std::string response_buffer;
@@ -171,7 +235,8 @@ namespace wavex::client {
             const std::string &scheme,
             const std::string &host_header,
             const ClientRequest &req,
-            const std::string &path_target) {
+            const std::string &path_target,
+            const BodySink *sink = nullptr) {
             namespace h2 = protos::http::http2;
 
             ClientResponse res;
@@ -278,6 +343,8 @@ namespace wavex::client {
 
             bool headers_received = false;
             bool response_finished = false;
+            bool sink_aborted = false;
+            bool end_stream_seen = false;
             std::string body_accumulator;
 
             while (!response_finished) {
@@ -353,6 +420,7 @@ namespace wavex::client {
 
                         if (hdr.has_flag(h2::flags::END_STREAM)) {
                             response_finished = true;
+                            end_stream_seen = true;
                         }
                     } else if (hdr.type == h2::frame_type::DATA && hdr.stream_id == 1) {
                         std::size_t pad_len = 0;
@@ -362,11 +430,20 @@ namespace wavex::client {
                             data_offset += 1;
                         }
                         if (payload.size() >= data_offset + pad_len) {
-                            body_accumulator.append(
-                                payload.substr(data_offset, payload.size() - data_offset - pad_len));
+                            const auto piece = payload.substr(data_offset, payload.size() - data_offset - pad_len);
+                            if (sink) {
+                                if (!piece.empty() && !co_await (*sink)(piece)) {
+                                    res.body_error(std::make_error_code(std::errc::operation_canceled));
+                                    sink_aborted = true;
+                                    response_finished = true;
+                                }
+                            } else {
+                                body_accumulator.append(piece);
+                            }
                         }
                         if (hdr.has_flag(h2::flags::END_STREAM)) {
                             response_finished = true;
+                            end_stream_seen = true;
                         }
                     } else if (hdr.type == h2::frame_type::RST_STREAM && hdr.stream_id == 1) {
                         response_finished = true;
@@ -395,6 +472,9 @@ namespace wavex::client {
                 co_return res;
             }
 
+            if (sink && !sink_aborted && !end_stream_seen) {
+                res.body_error(std::make_error_code(std::errc::connection_reset)); // RST_STREAM/GOAWAY/EOF mid-body
+            }
             res.body(body_accumulator);
             co_return res;
         }
@@ -540,6 +620,16 @@ namespace wavex::client {
 #endif
 
     wavex::task<ClientResponse> HttpClient::send(const ClientRequest &req, const ClientOptions &options) {
+        co_return co_await send_impl(req, options, nullptr);
+    }
+
+    wavex::task<ClientResponse> HttpClient::send_streaming(const ClientRequest &req, const ClientOptions &options,
+                                                           BodySink sink) {
+        co_return co_await send_impl(req, options, &sink);
+    }
+
+    wavex::task<ClientResponse> HttpClient::send_impl(const ClientRequest &req, const ClientOptions &options,
+                                                      const BodySink *sink) {
         ClientResponse res;
 
         // 1. Target URL parsing
@@ -598,7 +688,7 @@ namespace wavex::client {
                 std::expected<ClientResponse, std::error_code> h3res =
                         std::unexpected(make_error_code(http3_errc::not_connected));
                 if (const auto cec = co_await h3.connect(host, *h3_port); !cec) {
-                    h3res = co_await h3.exchange(req, host_header, path_target);
+                    h3res = co_await h3.exchange(req, host_header, path_target, sink);
                 } else {
                     h3res = std::unexpected(cec);
                 }
@@ -759,10 +849,10 @@ namespace wavex::client {
 
                 if (use_h2) {
                     res = co_await execute_http2_exchange(
-                        ssl_socket, "https", host_header, req, path_target);
+                        ssl_socket, "https", host_header, req, path_target, sink);
                 } else {
                     res = co_await execute_http1_exchange(
-                        ssl_socket, host_header, req, path_target);
+                        ssl_socket, host_header, req, path_target, sink);
                 }
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
@@ -808,10 +898,10 @@ namespace wavex::client {
 
             if (options.version == HttpVersion::Http2) {
                 res = co_await execute_http2_exchange(
-                    socket, "http", host_header, req, path_target);
+                    socket, "http", host_header, req, path_target, sink);
             } else {
                 res = co_await execute_http1_exchange(
-                    socket, host_header, req, path_target);
+                    socket, host_header, req, path_target, sink);
             }
 
             asio::error_code close_ec;

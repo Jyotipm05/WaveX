@@ -34,6 +34,9 @@ namespace wavex::network::quic {
         asio::ip::udp::endpoint recv_endpoint_{}; // sender of the last datagram; never used for sending
         std::shared_ptr<QuicConnection> connection_{};
         std::function<void(std::shared_ptr<QuicStream>)> peer_uni_handler_{};
+        /// Handlers already queued on the executor outlive `this`; they hold a weak_ptr to this and bail out once
+        /// the client is gone.
+        std::shared_ptr<int> life_{std::make_shared<int>(0)};
         mutable std::mutex mtx_{};
         std::array<uint8_t, 65536> recv_buf_{};
         bool connected_{false};

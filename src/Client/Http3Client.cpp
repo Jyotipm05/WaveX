@@ -123,28 +123,6 @@ namespace wavex::client {
             co_return;
         }
 
-        struct read_result {
-            std::error_code ec;
-            std::string data;
-        };
-
-        wavex::task<read_result> read_all(std::shared_ptr<QuicStream> stream, const std::size_t limit) {
-            read_result out;
-            char tmp[16384];
-            for (;;) {
-                auto [ec, n] = co_await stream->async_read_some(asio::buffer(tmp), asio::as_tuple(asio::use_awaitable));
-                if (n > 0) out.data.append(tmp, n);
-                if (out.data.size() > limit) {
-                    out.ec = make_error_code(http3_errc::response_too_large);
-                    break;
-                }
-                if (ec) {
-                    if (ec != asio::error::eof) out.ec = ec;
-                    break;
-                }
-            }
-            co_return out;
-        }
     } // namespace
 
     const std::error_category &http3_category() noexcept {
@@ -215,7 +193,7 @@ namespace wavex::client {
     }
 
     wavex::task<std::expected<ClientResponse, std::error_code> > Http3Client::exchange(
-        const ClientRequest &req, std::string authority, std::string path_target) {
+        const ClientRequest &req, std::string authority, std::string path_target, const BodySink *sink) {
         using namespace asio::experimental::awaitable_operators;
         if (!is_open()) co_return std::unexpected(make_error_code(http3_errc::not_connected));
         auto stream = quic_->create_stream(true);
@@ -246,55 +224,111 @@ namespace wavex::client {
         if (!req.body().empty()) wire += h3::encoder::encode_data_frame(req.body());
         if (const auto ec = stream->write_outbound(wire, true)) co_return std::unexpected(ec);
 
-        asio::steady_timer timer(ex_, options_.request_timeout);
-        auto raced = co_await (read_all(stream, options_.max_response_size) ||
-                               timer.async_wait(asio::as_tuple(asio::use_awaitable)));
-        if (raced.index() == 1) {
-            stream->close();
-            co_return std::unexpected(make_error_code(http3_errc::timeout));
-        }
-        auto &rr = std::get<0>(raced);
-        if (rr.ec) co_return std::unexpected(rr.ec == asio::error::operation_aborted ||
-                                             rr.ec == asio::error::connection_reset
-                                                 ? make_error_code(http3_errc::stream_reset)
-                                                 : rr.ec);
-
-        h3::response res;
-        h3::qpack::dynamic_table dt;
-        std::size_t consumed = 0;
-        if (h3::parser::parse_response(rr.data, res, consumed, dt) != h3::parser::result::success) {
-            co_return std::unexpected(make_error_code(rr.data.empty() ? http3_errc::stream_reset
-                                                                      : http3_errc::protocol_error));
-        }
-
+        // The response is read incrementally by the codec's stream parser; `request_timeout` is the longest we
+        // wait for the next bytes, so a long streaming body is fine as long as it keeps flowing.
+        h3::response_stream_parser parser;
+        using kind = h3::response_stream_parser::event_kind;
         ClientResponse out;
         out.http_version(HttpVersion::Http3);
-        out.status_code(res.status_code);
-        out.status_text(res.status_text);
-        for (const auto &h: res.headers) out.header(h.name, h.value);
-        out.body(res.body);
+        std::string body;
+        bool head = false;
+        std::error_code body_ec;
+        char buf[16384];
+        asio::steady_timer timer(ex_);
+
+        const auto fail = [&](const std::error_code ec) -> std::expected<ClientResponse, std::error_code> {
+            stream->close();
+            if (head && sink) {
+                out.body_error(ec);
+                return out;
+            }
+            return std::unexpected(ec);
+        };
+
+        for (bool eof = false; !eof;) {
+            timer.expires_after(options_.request_timeout);
+            auto raced = co_await (stream->async_read_some(asio::buffer(buf), asio::as_tuple(asio::use_awaitable)) ||
+                                   timer.async_wait(asio::as_tuple(asio::use_awaitable)));
+            if (raced.index() == 1) co_return fail(make_error_code(http3_errc::timeout));
+            auto &[rec, n] = std::get<0>(raced);
+            if (rec && rec != asio::error::eof) {
+                co_return fail(rec == asio::error::operation_aborted || rec == asio::error::connection_reset
+                                   ? make_error_code(http3_errc::stream_reset)
+                                   : rec);
+            }
+            eof = static_cast<bool>(rec);
+
+            std::string_view pending(buf, n);
+            for (;;) {
+                const auto ev = parser.next(pending);
+                if (ev.kind == kind::need_more) break;
+                if (ev.kind == kind::error) co_return fail(make_error_code(http3_errc::protocol_error));
+                if (ev.kind == kind::head) {
+                    head = true;
+                    out.status_code(parser.status_code());
+                    out.status_text(parser.status_text());
+                    for (const auto &[k, v]: parser.headers()) out.header(k, v);
+                    continue;
+                }
+                if (sink) {
+                    if (!co_await (*sink)(ev.data)) {
+                        stream->close();
+                        out.body_error(std::make_error_code(std::errc::operation_canceled));
+                        co_return out;
+                    }
+                } else {
+                    if (body.size() + ev.data.size() > options_.max_response_size) {
+                        co_return fail(make_error_code(http3_errc::response_too_large));
+                    }
+                    body.append(ev.data);
+                }
+            }
+        }
+
+        if (!parser.finish()) {
+            co_return fail(make_error_code(head ? http3_errc::stream_reset : http3_errc::stream_reset));
+        }
+        if (!sink) out.body(body);
         stream->close();
         co_return out;
     }
 
-    wavex::task<std::expected<ClientResponse, std::error_code> > Http3Client::send(const ClientRequest &req) {
-        const auto parsed = url::Url::parse(req.target());
-        if (parsed.host.empty()) co_return std::unexpected(std::make_error_code(std::errc::invalid_argument));
+    namespace {
+        /// Split a request URL into the `:authority` and `:path` pseudo-header values.
+        bool split_target(const ClientRequest &req, std::string &authority, std::string &path) {
+            const auto parsed = url::Url::parse(req.target());
+            if (parsed.host.empty()) return false;
+            std::string query = parsed.query;
+            for (const auto &[k, v]: req.queries()) {
+                if (!query.empty()) query += '&';
+                query += uri::encode(k) + '=' + uri::encode(v);
+            }
+            path = parsed.path.empty() ? "/" : parsed.path;
+            if (!query.empty()) path += '?' + query;
 
-        std::string query = parsed.query;
-        for (const auto &[k, v]: req.queries()) {
-            if (!query.empty()) query += '&';
-            query += uri::encode(k) + '=' + uri::encode(v);
+            asio::error_code ip_ec;
+            const auto ip = asio::ip::make_address(parsed.host, ip_ec);
+            authority = (!ip_ec && ip.is_v6()) ? "[" + parsed.host + "]" : parsed.host;
+            if (const auto port = parsed.effective_port(); port != 443) authority += ':' + std::to_string(port);
+            return true;
         }
-        std::string path = parsed.path.empty() ? "/" : parsed.path;
-        if (!query.empty()) path += '?' + query;
+    } // namespace
 
-        asio::error_code ip_ec;
-        const auto ip = asio::ip::make_address(parsed.host, ip_ec);
-        std::string authority = (!ip_ec && ip.is_v6()) ? "[" + parsed.host + "]" : parsed.host;
-        const auto port = parsed.effective_port();
-        if (port != 443) authority += ':' + std::to_string(port);
+    wavex::task<std::expected<ClientResponse, std::error_code> > Http3Client::send(const ClientRequest &req) {
+        std::string authority, path;
+        if (!split_target(req, authority, path)) {
+            co_return std::unexpected(std::make_error_code(std::errc::invalid_argument));
+        }
         co_return co_await exchange(req, std::move(authority), std::move(path));
+    }
+
+    wavex::task<std::expected<ClientResponse, std::error_code> > Http3Client::send_streaming(const ClientRequest &req,
+                                                                                            BodySink sink) {
+        std::string authority, path;
+        if (!split_target(req, authority, path)) {
+            co_return std::unexpected(std::make_error_code(std::errc::invalid_argument));
+        }
+        co_return co_await exchange(req, std::move(authority), std::move(path), &sink);
     }
 
 } // namespace wavex::client

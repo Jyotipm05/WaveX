@@ -88,7 +88,13 @@ namespace wavex::client {
 
         /// Lower-level form used by `HttpClient`: the URL has already been split.
         [[nodiscard]] wavex::task<std::expected<ClientResponse, std::error_code> > exchange(
-            const ClientRequest &req, std::string authority, std::string path_target);
+            const ClientRequest &req, std::string authority, std::string path_target,
+            const BodySink *sink = nullptr);
+
+        /// Like `send`, but the body is delivered to `sink` as it arrives (see `BodySink`). The response carries
+        /// status and headers; `body_error()` says whether the body arrived completely.
+        [[nodiscard]] wavex::task<std::expected<ClientResponse, std::error_code> > send_streaming(
+            const ClientRequest &req, BodySink sink);
 
         /// True while the connection is up and the server has not sent GOAWAY.
         [[nodiscard]] bool is_open() const noexcept;

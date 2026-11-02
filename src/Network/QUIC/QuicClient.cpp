@@ -33,6 +33,12 @@ namespace wavex::network::quic {
     }
 
     QuicClient::~QuicClient() {
+        life_.reset(); // handlers still queued on the executor must not touch this object
+        if (connection_) {
+            connection_->set_outbound_callback(nullptr);
+            connection_->set_stream_created_callback(nullptr);
+            connection_->set_connected_callback(nullptr);
+        }
         close();
     }
 
@@ -63,13 +69,14 @@ namespace wavex::network::quic {
                                                        ex_, initial_peer_cid);
         connection_->set_sni_hostname(std::string(host));
         connection_->set_verify_peer(verify_peer_);
-        connection_->set_outbound_callback([this] {
-            flush_outbound();
+        connection_->set_outbound_callback([this, life = std::weak_ptr<int>(life_)] {
+            if (const auto alive = life.lock()) flush_outbound();
         });
         wavex::log::info("[QuicClient] connection created, initializing TLS...");
 
-        connection_->set_stream_created_callback([this](std::shared_ptr<QuicStream> stream) {
-            if (!stream) return;
+        connection_->set_stream_created_callback([this, life = std::weak_ptr<int>(life_)](
+            std::shared_ptr<QuicStream> stream) {
+            if (!stream || life.expired()) return;
             // Server-initiated unidirectional stream (sid & 0x03 == 3) per RFC 9000 / RFC 9114
             if (const uint64_t sid = stream->stream_id(); (sid & 0x03) == 0x03) {
                 if (peer_uni_handler_) {
@@ -155,8 +162,8 @@ namespace wavex::network::quic {
         // a single datagram to this port redirect all of the client's subsequent traffic.
         socket_.async_receive_from(
             asio::buffer(recv_buf_), recv_endpoint_,
-            [this](const std::error_code ec, const std::size_t bytes_recvd) {
-                if (ec == asio::error::operation_aborted || !socket_.is_open()) return;
+            [this, life = std::weak_ptr<int>(life_)](const std::error_code ec, const std::size_t bytes_recvd) {
+                if (life.expired() || ec == asio::error::operation_aborted || !socket_.is_open()) return;
                 if (ec || bytes_recvd == 0) {
                     do_receive();
                     return;
@@ -196,8 +203,8 @@ namespace wavex::network::quic {
                 );
             }
         } else {
-            asio::post(ex_, [this] {
-                flush_outbound();
+            asio::post(ex_, [this, life = std::weak_ptr<int>(life_)] {
+                if (const auto alive = life.lock()) flush_outbound();
             });
         }
     }

@@ -730,6 +730,7 @@ if (WAVEX_TEST)
         wavex_add_test(wavex_qpack_tests tests/test_qpack.cpp)
         wavex_add_test(wavex_http3_tests tests/test_http3.cpp)
         wavex_add_test(wavex_http3_client_tests tests/test_http3_client.cpp)
+        wavex_add_test(wavex_client_streaming_tests tests/test_client_streaming.cpp)
         wavex_add_test(wavex_webtransport_tests tests/test_webtransport.cpp)
     endif ()
 

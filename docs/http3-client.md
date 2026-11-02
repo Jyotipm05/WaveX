@@ -47,7 +47,7 @@ Errors use `http3_category()` (`not_connected`, `handshake_failed`, `timeout`, `
 
 ## Limits
 
-* Responses are buffered whole (`Http3Options::max_response_size`, 64 MiB). No streaming API yet.
+* `send()` buffers the whole response (`Http3Options::max_response_size`, 64 MiB); use `send_streaming()` for large or endless bodies (see `streaming-bodies.md`). `request_timeout` is the longest wait for the next bytes, not a deadline for the whole response.
 * `HttpClient` opens one QUIC connection per request (like its HTTP/1.1 and HTTP/2 paths); reuse needs `Http3Client`.
 * No 0-RTT, no connection migration, no server push, no interim (1xx) responses.
 * Discovery follows alternatives on the same host name only.

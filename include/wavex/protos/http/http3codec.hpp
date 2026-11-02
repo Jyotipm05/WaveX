@@ -798,6 +798,60 @@ namespace wavex::protos::http {
         };
 
         /**
+         * @class response_stream_parser
+         * @brief Incremental HTTP/3 response parser for streaming consumers (clients, proxies).
+         *
+         * Feed it the bytes of one request stream as they arrive. It returns the response head once (QPACK
+         * decoded, interim 1xx responses skipped), then DATA payload in pieces without waiting for whole frames
+         * (`event::data` views into the input, valid until the next call). The end of the response is the end of
+         * the QUIC stream: call `finish()` when the FIN arrives to learn whether the message was complete.
+         * No I/O is performed.
+         */
+        class response_stream_parser {
+        public:
+            enum class event_kind { need_more, head, body, error };
+
+            struct event {
+                event_kind kind{event_kind::need_more};
+                std::string_view data{};
+            };
+
+            /// Consume bytes from the front of `input` and return the next event.
+            event next(std::string_view &input);
+
+            /// The stream ended. True when the response was complete (head seen, no frame cut short, length matches).
+            [[nodiscard]] bool finish() const noexcept;
+
+            [[nodiscard]] unsigned int status_code() const noexcept { return status_code_; }
+            [[nodiscard]] const std::string &status_text() const noexcept { return status_text_; }
+
+            [[nodiscard]] const std::vector<std::pair<std::string, std::string> > &headers() const noexcept {
+                return headers_;
+            }
+
+        private:
+            enum class state { frame_header, headers_payload, data_payload, skip_payload, failed };
+
+            event fail() noexcept {
+                state_ = state::failed;
+                return {event_kind::error, {}};
+            }
+
+            std::string hdr_raw_{}; ///< bytes of the frame header being assembled
+            std::string frame_raw_{}; ///< header + payload of a HEADERS frame being assembled
+            std::string status_text_{};
+            std::vector<std::pair<std::string, std::string> > headers_{};
+            qpack::dynamic_table dt_{};
+            uint64_t remaining_{0};
+            uint64_t body_bytes_{0};
+            uint64_t content_length_{0};
+            unsigned int status_code_{0};
+            state state_{state::frame_header};
+            bool head_received_{false};
+            bool has_content_length_{false};
+        };
+
+        /**
          * @class session_handler
          * @brief Handles HTTP/3 unidirectional streams (Control, QPACK Encoder, QPACK Decoder per RFC 9114/9204).
          */
@@ -962,6 +1016,7 @@ namespace wavex::protos::http {
         using parser = http3::parser;
         using encoder = http3::encoder;
         using decoder = http3::decoder;
+        using response_stream_parser = http3::response_stream_parser;
         using result = http3::parser::result;
         using reserved_frame_type = http3::reserved_frame_type;
 

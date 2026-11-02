@@ -23,6 +23,8 @@
 #include <optional>
 #include <chrono>
 #include <type_traits>
+#include <functional>
+#include <system_error>
 
 #include <asio/awaitable.hpp>
 #include <wavex/Base/Task.hpp>
@@ -54,6 +56,15 @@ namespace wavex::client {
         Http2, ///< Enforce HTTP/2 (ALPN "h2" on TLS; prior-knowledge h2c on plain TCP)
         Http3 ///< Enforce HTTP/3 over QUIC (https:// only, no fallback to TCP)
     };
+
+    /**
+     * @brief Receives a response body piece by piece (see `HttpClient::send_streaming`).
+     *
+     * Called with each decoded chunk in order (chunked/DATA framing already removed). The next chunk is not
+     * read until the returned task completes, so a slow sink slows the transfer down (TCP backpressure).
+     * Return `false` to abort the download.
+     */
+    using BodySink = std::function<wavex::task<bool>(std::string_view chunk)>;
 
     /**
      * @struct ClientOptions
@@ -251,6 +262,7 @@ namespace wavex::client {
         std::string body_{};
         std::string raw_buffer_{}; ///< Stores full HTTP/1.1 wire bytes for raw_response()
         std::vector<std::pair<std::string, std::string> > headers_storage_{};
+        std::error_code body_error_{};
         unsigned int status_code_{0};
         HttpVersion version_{HttpVersion::Auto};
 
@@ -307,6 +319,19 @@ namespace wavex::client {
         [[nodiscard]] std::string_view body() const noexcept { return body_; }
         [[nodiscard]] const std::string &get_body() const noexcept { return body_; }
         [[nodiscard]] HttpVersion http_version() const noexcept { return version_; }
+
+        /**
+         * @brief Why a streamed body did not arrive completely (empty when it did).
+         *
+         * Set by `send_streaming` when the connection ended early, the framing was malformed, or the sink
+         * returned false (`std::errc::operation_canceled`). The status and headers are still valid.
+         */
+        [[nodiscard]] std::error_code body_error() const noexcept { return body_error_; }
+
+        ClientResponse &body_error(const std::error_code ec) noexcept {
+            body_error_ = ec;
+            return *this;
+        }
 
         [[nodiscard]] std::optional<std::string_view> header(const std::string_view name) const noexcept {
             for (const auto &[k, v]: headers_storage_) {
@@ -406,6 +431,30 @@ namespace wavex::client {
          * @return Coroutine awaitable producing ClientResponse.
          */
         static wavex::task<ClientResponse> send(const ClientRequest &req, const ClientOptions &options = {});
+
+        /**
+         * @brief Send a request and deliver the response body to `sink` as it arrives.
+         *
+         * Works over HTTP/1.1, HTTP/2 and HTTP/3. The returned response carries the status and headers with an
+         * empty body; check `body_error()` to learn whether the whole body was delivered. Memory use is bounded
+         * by one read buffer, so arbitrarily large (or endless) bodies are fine.
+         *
+         * @code
+         * std::ofstream out("big.bin", std::ios::binary);
+         * auto res = co_await HttpClient::send_streaming(
+         *     ClientRequest(method::GET, url), {},
+         *     [&](std::string_view chunk) -> wavex::task<bool> { out.write(chunk.data(), chunk.size()); co_return true; });
+         * if (res.body_error()) { ... }
+         * @endcode
+         */
+        static wavex::task<ClientResponse> send_streaming(const ClientRequest &req, const ClientOptions &options,
+                                                          BodySink sink);
+
+    private:
+        static wavex::task<ClientResponse> send_impl(const ClientRequest &req, const ClientOptions &options,
+                                                     const BodySink *sink);
+
+    public:
 
         /**
          * @brief Backward-compatible send overload for Http1Request.
