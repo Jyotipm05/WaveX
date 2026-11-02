@@ -28,6 +28,7 @@
 #include <wavex/protos/webtransport/WebTransport.hpp>
 #include <wavex/Engine/DynamicRouter.hpp>
 #include <wavex/Engine/HttpRouter.hpp>
+#include <wavex/Engine/StaticHttpRouter.hpp>
 #include <wavex/Server/Server.hpp>
 #include <wavex/Client/HttpClient.hpp>
 #include <wavex/CLI/CLI.hpp>

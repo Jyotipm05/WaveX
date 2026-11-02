@@ -398,6 +398,9 @@ target_sources(wavex
         include/wavex/Base/Uri.hpp
         include/wavex/Base/Url.hpp
         include/wavex/Engine/DynamicRouter.hpp
+        include/wavex/Engine/RouteCore.hpp
+        include/wavex/Engine/StaticRouter.hpp
+        include/wavex/Engine/StaticHttpRouter.hpp
         include/wavex/Engine/HttpRouter.hpp
         include/wavex/protos/ProtocolTraits.hpp
         include/wavex/protos/protos.hpp
@@ -698,6 +701,7 @@ if (WAVEX_TEST)
     endif ()
     wavex_add_test(wavex_mw_tests tests/test_MW.cpp)
     wavex_add_test(wavex_method_template_tests tests/test_method_template.cpp)
+    wavex_add_test(wavex_static_router_tests tests/test_static_router.cpp)
     wavex_add_test(wavex_server_tests tests/test_server.cpp)
     wavex_add_test(wavex_client_tests tests/test_client.cpp
             DEFINES PROJECT_DIR="${CMAKE_SOURCE_DIR}"
