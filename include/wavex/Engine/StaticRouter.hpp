@@ -186,7 +186,7 @@ namespace wavex::engine::route {
         table_error error{table_error::none};
         pattern_error pattern{pattern_error::none};
 
-        constexpr void add(const std::string_view path, const Method method, const std::uint32_t route_index) {
+        consteval void add(const std::string_view path, const Method method, const std::uint32_t route_index) {
             const parsed_pattern p = parse_pattern(path);
             if (p.error != pattern_error::none) {
                 error = table_error::bad_pattern;

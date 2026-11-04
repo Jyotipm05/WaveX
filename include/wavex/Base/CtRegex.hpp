@@ -580,7 +580,7 @@ namespace wavex::rx {
 
             std::size_t anchor_start{0};
 
-            constexpr P run(const std::string_view pattern) noexcept {
+            consteval P run(const std::string_view pattern) noexcept {
                 src = pattern;
                 if (src.starts_with("(?i)")) {
                     icase = true;
@@ -597,14 +597,14 @@ namespace wavex::rx {
 
     /// Compiles `pattern`. Check `ok()` / `err` on the result (a failed program matches nothing).
     template<std::size_t MaxInsn = 128, std::size_t MaxSets = 16>
-    [[nodiscard]] constexpr basic_program<MaxInsn, MaxSets> compile_with(const std::string_view pattern) noexcept {
+    [[nodiscard]] consteval basic_program<MaxInsn, MaxSets> compile_with(const std::string_view pattern) noexcept {
         detail::compiler<basic_program<MaxInsn, MaxSets> > c;
         auto prog = c.run(pattern);
         if (prog.ok()) prog.finalize();
         return prog;
     }
 
-    [[nodiscard]] constexpr program compile(const std::string_view pattern) noexcept {
+    [[nodiscard]] consteval program compile(const std::string_view pattern) noexcept {
         return compile_with<>(pattern);
     }
 
