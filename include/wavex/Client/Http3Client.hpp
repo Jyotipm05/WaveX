@@ -31,11 +31,12 @@
 #include <wavex/Base/Task.hpp>
 #include <wavex/Client/HttpClient.hpp>
 
-#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <expected>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -89,7 +90,7 @@ namespace wavex::client {
         /// Lower-level form used by `HttpClient`: the URL has already been split.
         [[nodiscard]] wavex::task<std::expected<ClientResponse, std::error_code> > exchange(
             const ClientRequest &req, std::string authority, std::string path_target,
-            const BodySink *sink = nullptr);
+            const BodySink *sink = nullptr, const HeadHook *head_hook = nullptr);
 
         /// Like `send`, but the body is delivered to `sink` as it arrives (see `BodySink`). The response carries
         /// status and headers; `body_error()` says whether the body arrived completely.
@@ -112,6 +113,40 @@ namespace wavex::client {
         std::vector<std::shared_ptr<network::quic::QuicStream> > local_uni_streams_;
     };
 
+
+    /**
+     * @class Http3Pool
+     * @brief Keeps QUIC connections open between requests (opt-in via `ClientOptions::h3_pool`).
+     *
+     * One connection per (host, port, verify_peer) is shared by every request to that origin; HTTP/3 multiplexes
+     * them as streams, so concurrent requests need no extra handshakes. A connection that has closed or received
+     * GOAWAY is replaced on the next `acquire`. Use the pool from one io_context: a connection belongs to the
+     * executor that created it, and a request from another executor opens a connection of its own.
+     */
+    class Http3Pool {
+    public:
+        Http3Pool() = default;
+        Http3Pool(const Http3Pool &) = delete;
+        Http3Pool &operator=(const Http3Pool &) = delete;
+
+        /// An open connection to `host:port`. `force_new` discards the pooled one first.
+        [[nodiscard]] wavex::task<std::expected<std::shared_ptr<Http3Client>, std::error_code> > acquire(
+            wavex::executor ex, std::string host, uint16_t port, Http3Options options, bool force_new = false);
+
+        /// Closes every pooled connection.
+        void close_all();
+
+        [[nodiscard]] std::size_t size() const;
+
+    private:
+        struct Entry {
+            wavex::executor ex;
+            std::shared_ptr<Http3Client> client;
+        };
+
+        mutable std::mutex mu_;
+        std::map<std::string, Entry> entries_;
+    };
 } // namespace wavex::client
 
 template<>

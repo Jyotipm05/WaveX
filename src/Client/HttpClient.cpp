@@ -19,6 +19,9 @@
 #include <wavex/Client/HttpClient.hpp>
 #include <wavex/Network/Dns/Resolver.hpp>
 #include <wavex/Client/Http3Client.hpp>
+#include <asio/co_spawn.hpp>
+#include <asio/detached.hpp>
+#include <asio/experimental/channel.hpp>
 #include <wavex/protos/http/http2codec.hpp>
 #include <wavex/Utils/BinaryFile.hpp>
 #include <wavex/Utils/FsUtils.hpp>
@@ -53,7 +56,8 @@ namespace wavex::client {
         /// Read an HTTP/1.x response incrementally and hand the body to `sink` (framing is the codec's job).
         template<typename Stream>
         wavex::task<ClientResponse> read_http1_streaming(Stream &stream, const bool head_request,
-                                                         const BodySink &sink, ClientResponse res) {
+                                                         const BodySink &sink, const HeadHook *head_hook,
+                                                         ClientResponse res) {
             using protos::http::http1codec;
             http1codec::response_stream_parser parser(head_request);
             char buf[16384];
@@ -86,6 +90,7 @@ namespace wavex::client {
                     res.status_code(parser.status_code());
                     res.status_text(parser.status_text());
                     for (const auto &[k, v]: parser.headers()) res.header(k, v);
+                    if (head_hook && *head_hook) co_await (*head_hook)(res);
                     continue;
                 }
                 if (ev.kind == kind::body) {
@@ -115,7 +120,8 @@ namespace wavex::client {
             const std::string &host_header,
             const ClientRequest &req,
             const std::string &path_target,
-            const BodySink *sink = nullptr) {
+            const BodySink *sink = nullptr,
+            const HeadHook *head_hook = nullptr) {
             ClientResponse res;
             res.http_version(HttpVersion::Http1_1);
 
@@ -169,7 +175,7 @@ namespace wavex::client {
             }
 
             if (sink) {
-                co_return co_await read_http1_streaming(stream, req.method() == method::HEAD, *sink, std::move(res));
+                co_return co_await read_http1_streaming(stream, req.method() == method::HEAD, *sink, head_hook, std::move(res));
             }
 
             std::string response_buffer;
@@ -236,7 +242,8 @@ namespace wavex::client {
             const std::string &host_header,
             const ClientRequest &req,
             const std::string &path_target,
-            const BodySink *sink = nullptr) {
+            const BodySink *sink = nullptr,
+            const HeadHook *head_hook = nullptr) {
             namespace h2 = protos::http::http2;
 
             ClientResponse res;
@@ -344,6 +351,7 @@ namespace wavex::client {
             bool headers_received = false;
             bool response_finished = false;
             bool sink_aborted = false;
+            bool head_sent = false;
             bool end_stream_seen = false;
             std::string body_accumulator;
 
@@ -414,6 +422,10 @@ namespace wavex::client {
                                     } else {
                                         res.header(n, v);
                                     }
+                                }
+                                if (head_hook && *head_hook && sink && !head_sent) {
+                                    head_sent = true;
+                                    co_await (*head_hook)(res);
                                 }
                             }
                         }
@@ -620,16 +632,117 @@ namespace wavex::client {
 #endif
 
     wavex::task<ClientResponse> HttpClient::send(const ClientRequest &req, const ClientOptions &options) {
-        co_return co_await send_impl(req, options, nullptr);
+        co_return co_await send_impl(req, options, nullptr, nullptr);
     }
 
     wavex::task<ClientResponse> HttpClient::send_streaming(const ClientRequest &req, const ClientOptions &options,
                                                            BodySink sink) {
-        co_return co_await send_impl(req, options, &sink);
+        co_return co_await send_impl(req, options, &sink, nullptr);
+    }
+
+    // ─── Pull-style body reader ──────────────────────────────────────────────
+    //
+    // A pump coroutine runs `send_impl` with a sink that hands every chunk over a zero-buffer channel, so the
+    // network is read only as fast as `read_chunk()` is called (same backpressure as the callback API).
+
+    struct ResponseReader::State {
+        struct Msg {
+            enum class kind : std::uint8_t { head, chunk, end } k{kind::end};
+            ClientResponse res{};
+            std::string data{};
+        };
+
+        explicit State(const asio::any_io_executor &ex) : ch(ex, 0) {}
+
+        asio::experimental::channel<void(asio::error_code, Msg)> ch;
+        ClientResponse head{};
+        std::error_code err{};
+        bool finished{false};
+        bool head_sent{false};
+    };
+
+    wavex::task<void> HttpClient::pump_response(std::shared_ptr<ResponseReader::State> st, ClientRequest req,
+                                                ClientOptions options) {
+        {
+            using Msg = ResponseReader::State::Msg;
+            const BodySink sink = [st](std::string_view chunk) -> wavex::task<bool> {
+                const auto [ec] = co_await st->ch.async_send(
+                    asio::error_code{}, Msg{Msg::kind::chunk, {}, std::string(chunk)},
+                    asio::as_tuple(asio::use_awaitable));
+                co_return !ec;
+            };
+            const HeadHook on_head = [st](const ClientResponse &head) -> wavex::task<void> {
+                st->head_sent = true;
+                co_await st->ch.async_send(asio::error_code{}, Msg{Msg::kind::head, head, {}},
+                                           asio::as_tuple(asio::use_awaitable));
+            };
+            ClientResponse final_res;
+            try {
+                final_res = co_await send_impl(req, options, &sink, &on_head);
+            } catch (const std::exception &) {
+                final_res.status_code(502);
+                final_res.status_text("Bad Gateway");
+                final_res.body_error(std::make_error_code(std::errc::connection_aborted));
+            }
+            co_await st->ch.async_send(asio::error_code{}, Msg{Msg::kind::end, std::move(final_res), {}},
+                                       asio::as_tuple(asio::use_awaitable));
+        }
+    }
+
+    wavex::task<ResponseReader> HttpClient::open(const ClientRequest &req, const ClientOptions &options) {
+        using Msg = ResponseReader::State::Msg;
+        const auto ex = co_await asio::this_coro::executor;
+        auto st = std::make_shared<ResponseReader::State>(ex);
+        asio::co_spawn(ex, pump_response(st, req, options), asio::detached);
+
+        auto [ec, first] = co_await st->ch.async_receive(asio::as_tuple(asio::use_awaitable));
+        if (ec) {
+            st->head.status_code(502);
+            st->head.status_text("Bad Gateway");
+            st->finished = true;
+            st->err = ec;
+        } else {
+            st->head = std::move(first.res);
+            if (first.k == Msg::kind::end) {
+                st->finished = true;
+                st->err = st->head.body_error();
+            }
+        }
+        co_return ResponseReader(std::move(st));
+    }
+
+    const ClientResponse &ResponseReader::response() const noexcept {
+        static const ClientResponse empty;
+        return st_ ? st_->head : empty;
+    }
+
+    wavex::task<std::optional<std::string> > ResponseReader::read_chunk() {
+        using Msg = State::Msg;
+        if (!st_ || st_->finished) co_return std::nullopt;
+        auto st = st_; // keeps the state alive if the reader is destroyed while suspended
+        auto [ec, m] = co_await st->ch.async_receive(asio::as_tuple(asio::use_awaitable));
+        if (ec) {
+            st->finished = true;
+            if (!st->err) st->err = std::make_error_code(std::errc::operation_canceled);
+            co_return std::nullopt;
+        }
+        if (m.k == Msg::kind::chunk) co_return std::move(m.data);
+        st->finished = true;
+        st->err = m.res.body_error();
+        co_return std::nullopt;
+    }
+
+    std::error_code ResponseReader::body_error() const noexcept { return st_ ? st_->err : std::error_code{}; }
+
+    void ResponseReader::close() noexcept {
+        if (!st_) return;
+        st_->finished = true;
+        st_->ch.close();
+        st_.reset();
     }
 
     wavex::task<ClientResponse> HttpClient::send_impl(const ClientRequest &req, const ClientOptions &options,
-                                                      const BodySink *sink) {
+                                                      const BodySink *sink, const HeadHook *head_hook) {
         ClientResponse res;
 
         // 1. Target URL parsing
@@ -684,15 +797,30 @@ namespace wavex::client {
                 Http3Options h3opt;
                 h3opt.verify_peer = options.verify_peer;
                 h3opt.request_timeout = options.timeout;
-                Http3Client h3(co_await asio::this_coro::executor, h3opt);
+                const auto h3_executor = co_await asio::this_coro::executor;
                 std::expected<ClientResponse, std::error_code> h3res =
                         std::unexpected(make_error_code(http3_errc::not_connected));
-                if (const auto cec = co_await h3.connect(host, *h3_port); !cec) {
-                    h3res = co_await h3.exchange(req, host_header, path_target, sink);
+                if (options.h3_pool) {
+                    // Pooled: the QUIC connection outlives this request. A reused connection that turns out to be
+                    // dead (idle timeout, GOAWAY) is replaced once and the request is retried.
+                    for (int attempt = 0; attempt < 2; ++attempt) {
+                        auto conn = co_await options.h3_pool->acquire(h3_executor, host, *h3_port, h3opt, attempt > 0);
+                        if (!conn) {
+                            h3res = std::unexpected(conn.error());
+                            break;
+                        }
+                        h3res = co_await (*conn)->exchange(req, host_header, path_target, sink, head_hook);
+                        if (h3res || h3res.error() != make_error_code(http3_errc::not_connected)) break;
+                    }
                 } else {
-                    h3res = std::unexpected(cec);
+                    Http3Client h3(h3_executor, h3opt);
+                    if (const auto cec = co_await h3.connect(host, *h3_port); !cec) {
+                        h3res = co_await h3.exchange(req, host_header, path_target, sink, head_hook);
+                    } else {
+                        h3res = std::unexpected(cec);
+                    }
+                    h3.close();
                 }
-                h3.close();
                 if (h3res) {
                     if (options.h3_discovery) {
                         if (const auto alt = h3res->header("alt-svc"); alt && !alt->empty()) {
@@ -849,10 +977,10 @@ namespace wavex::client {
 
                 if (use_h2) {
                     res = co_await execute_http2_exchange(
-                        ssl_socket, "https", host_header, req, path_target, sink);
+                        ssl_socket, "https", host_header, req, path_target, sink, head_hook);
                 } else {
                     res = co_await execute_http1_exchange(
-                        ssl_socket, host_header, req, path_target, sink);
+                        ssl_socket, host_header, req, path_target, sink, head_hook);
                 }
 
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
@@ -898,10 +1026,10 @@ namespace wavex::client {
 
             if (options.version == HttpVersion::Http2) {
                 res = co_await execute_http2_exchange(
-                    socket, "http", host_header, req, path_target, sink);
+                    socket, "http", host_header, req, path_target, sink, head_hook);
             } else {
                 res = co_await execute_http1_exchange(
-                    socket, host_header, req, path_target, sink);
+                    socket, host_header, req, path_target, sink, head_hook);
             }
 
             asio::error_code close_ec;

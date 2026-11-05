@@ -27,6 +27,7 @@
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
 
+#include <atomic>
 #include <algorithm>
 #include <cctype>
 
@@ -193,7 +194,8 @@ namespace wavex::client {
     }
 
     wavex::task<std::expected<ClientResponse, std::error_code> > Http3Client::exchange(
-        const ClientRequest &req, std::string authority, std::string path_target, const BodySink *sink) {
+        const ClientRequest &req, std::string authority, std::string path_target, const BodySink *sink,
+        const HeadHook *head_hook) {
         using namespace asio::experimental::awaitable_operators;
         if (!is_open()) co_return std::unexpected(make_error_code(http3_errc::not_connected));
         auto stream = quic_->create_stream(true);
@@ -268,6 +270,7 @@ namespace wavex::client {
                     out.status_code(parser.status_code());
                     out.status_text(parser.status_text());
                     for (const auto &[k, v]: parser.headers()) out.header(k, v);
+                    if (sink && head_hook && *head_hook) co_await (*head_hook)(out);
                     continue;
                 }
                 if (sink) {
@@ -291,6 +294,49 @@ namespace wavex::client {
         if (!sink) out.body(body);
         stream->close();
         co_return out;
+    }
+
+    wavex::task<std::expected<std::shared_ptr<Http3Client>, std::error_code> > Http3Pool::acquire(
+        wavex::executor ex, std::string host, const uint16_t port, Http3Options options, const bool force_new) {
+        const std::string key = host + ":" + std::to_string(port) + (options.verify_peer ? ":v" : ":n");
+        {
+            std::scoped_lock lk(mu_);
+            if (const auto it = entries_.find(key); it != entries_.end()) {
+                if (!force_new && it->second.ex == ex && it->second.client->is_open()) co_return it->second.client;
+                auto old = std::move(it->second.client);
+                entries_.erase(it);
+                if (old) old->close();
+            }
+        }
+        auto client = std::make_shared<Http3Client>(ex, options);
+        if (const auto ec = co_await client->connect(host, port)) co_return std::unexpected(ec);
+        {
+            std::scoped_lock lk(mu_);
+            // Another coroutine may have connected while this one was handshaking: keep theirs.
+            if (const auto it = entries_.find(key);
+                it != entries_.end() && it->second.ex == ex && it->second.client->is_open()) {
+                client->close();
+                co_return it->second.client;
+            }
+            entries_[key] = Entry{std::move(ex), client};
+        }
+        co_return client;
+    }
+
+    void Http3Pool::close_all() {
+        std::map<std::string, Entry> doomed;
+        {
+            std::scoped_lock lk(mu_);
+            doomed.swap(entries_);
+        }
+        for (auto &[k, e]: doomed) {
+            if (e.client) e.client->close();
+        }
+    }
+
+    std::size_t Http3Pool::size() const {
+        std::scoped_lock lk(mu_);
+        return entries_.size();
     }
 
     namespace {

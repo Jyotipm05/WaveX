@@ -31,6 +31,8 @@ namespace {
         std::cout << (condition ? "  [PASS] " : "  [FAIL] ") << name << "\n";
     }
 
+    void check(const bool condition, const std::string &name) { check(condition, name.c_str()); }
+
     std::string payload(const std::size_t n) {
         std::string s(n, '\0');
         for (std::size_t i = 0; i < n; ++i) s[i] = static_cast<char>('a' + (i * 5 + i / 97) % 26);
@@ -332,6 +334,94 @@ int main() {
         o3.version = client::HttpVersion::Http3;
         auto plain = co_await HttpClient::send(ClientRequest(client::method::GET, "https://127.0.0.1:19991/big"), o3);
         check(plain.status_code() == 200 && plain.body() == big, "buffered HTTP/3 send unchanged");
+    });
+
+    std::cout << "pull-style reader (HttpClient::open)\n";
+    run_client([&]() -> wavex::task<void> {
+        using client::HttpClient;
+        using client::ClientRequest;
+        struct target {
+            const char *name;
+            std::string url;
+            client::HttpVersion ver;
+        };
+        const target targets[] = {
+            {"HTTP/1.1", "http://127.0.0.1:19992/big", client::HttpVersion::Http1_1},
+            {"HTTP/2", "https://127.0.0.1:19991/big", client::HttpVersion::Http2},
+            {"HTTP/3", "https://127.0.0.1:19991/big", client::HttpVersion::Http3},
+        };
+        for (const auto &t: targets) {
+            const std::string name = t.name;
+            client::ClientOptions o;
+            o.version = t.ver;
+
+            auto rd = co_await HttpClient::open(ClientRequest(client::method::GET, t.url), o);
+            check(rd.response().status_code() == 200, name + ": head available before the body");
+            std::string got;
+            int chunks = 0;
+            while (auto c = co_await rd.read_chunk()) {
+                got += *c;
+                ++chunks;
+            }
+            check(got == big && !rd.body_error() && chunks > 10, name + ": body pulled intact");
+            check(!(co_await rd.read_chunk()).has_value(), name + ": read_chunk after the end stays empty");
+
+            // Stop reading early: closing aborts the transfer and nothing may touch freed memory.
+            {
+                auto early = co_await HttpClient::open(ClientRequest(client::method::GET, t.url), o);
+                auto first = co_await early.read_chunk();
+                check(first.has_value() && !first->empty(), name + ": first chunk");
+                early.close();
+                check(!(co_await early.read_chunk()).has_value(), name + ": closed reader yields nothing");
+            }
+            {
+                auto dropped = co_await HttpClient::open(ClientRequest(client::method::GET, t.url), o);
+                (void) co_await dropped.read_chunk();
+            } // destroyed mid-transfer
+        }
+
+        auto nf = co_await HttpClient::open(ClientRequest(client::method::GET, "http://127.0.0.1:19992/missing"), {});
+        std::string nf_body;
+        while (auto c = co_await nf.read_chunk()) nf_body += *c;
+        check(nf.response().status_code() == 404 && !nf.body_error(), "404 head then its body through the reader");
+
+        auto bad = co_await HttpClient::open(ClientRequest(client::method::GET, "http://127.0.0.1:1/none"), {});
+        check(bad.response().status_code() >= 500 && !(co_await bad.read_chunk()).has_value(),
+              "connection failure reported through the reader");
+    });
+
+    std::cout << "HTTP/3 connection pool\n";
+    run_client([&]() -> wavex::task<void> {
+        using client::HttpClient;
+        using client::ClientRequest;
+        auto pool = std::make_shared<client::Http3Pool>();
+        client::ClientOptions o;
+        o.version = client::HttpVersion::Http3;
+        o.h3_pool = pool;
+
+        for (int i = 0; i < 4; ++i) {
+            auto r = co_await HttpClient::send(ClientRequest(client::method::GET, "https://127.0.0.1:19991/small"), o);
+            check(r.status_code() == 200 && r.body() == "tiny", "pooled request " + std::to_string(i));
+        }
+        check(pool->size() == 1, "four requests share one pooled connection");
+
+        client::Http3Options h3o;
+        auto c1 = co_await pool->acquire(co_await asio::this_coro::executor, "127.0.0.1", 19991, h3o);
+        auto c2 = co_await pool->acquire(co_await asio::this_coro::executor, "127.0.0.1", 19991, h3o);
+        check(c1 && c2 && c1->get() == c2->get(), "acquire returns the same connection");
+
+        collected c;
+        auto rs = co_await HttpClient::send_streaming(
+            ClientRequest(client::method::GET, "https://127.0.0.1:19991/big"), o, collector(c));
+        check(rs.status_code() == 200 && c.data == big && pool->size() == 1, "streaming over the pooled connection");
+
+        // A dead pooled connection is replaced transparently.
+        (*c1)->close();
+        auto again = co_await HttpClient::send(ClientRequest(client::method::GET, "https://127.0.0.1:19991/small"), o);
+        check(again.status_code() == 200 && again.body() == "tiny", "request after the pooled connection closed");
+
+        pool->close_all();
+        check(pool->size() == 0, "close_all empties the pool");
     });
 
     s1.stop();

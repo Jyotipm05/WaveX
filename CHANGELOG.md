@@ -7,6 +7,8 @@ Tagged releases before 0.4.0 (`v0.1.0-alpha` to `v0.3.0-alpha`) are listed under
 ## [Unreleased] (0.4.0 development)
 
 ### Added
+- `HttpClient::open(req, options)` returns a `ResponseReader` (`response()`, `co_await read_chunk()`, `body_error()`, `close()`): pull-style streaming with the same backpressure as `send_streaming`. New `HeadHook` internal seam delivers the headers before the first chunk.
+- `Http3Pool` and `ClientOptions::h3_pool`: opt-in QUIC connection reuse across HTTP/3 requests (shared per origin, dead connections replaced, one retry).
 - `DynamicRouter<Proto, SegmentCompare = route::string_compare>` and `HttpRouter<Codec, SegmentCompare>`: the same segment policy parameter as `StaticRouter`. `hash_compare<H>` swaps the hasher of each node's static-child index (`route::segment_hasher`); matching is identical (`test_dynamic_router_cmp`). Existing code is unchanged.
 - `rx::compile_runtime`: run-time twin of the now-`consteval` `rx::compile`, for tests and tools.
 - `server::ComposedServer<R2, R3>` (`Server/ComposedServer.hpp`): the HTTP/2 + HTTP/3 one-port server for any pair of routers, so `StaticRouter` works in a composed server. `ComposedHttpServer` is now a thin class over `ComposedServer<Http2Router, Http3Router>` (owned routers plus the `get/post/...` conveniences); its public API is unchanged. `Server` befriends `ComposedServer`.

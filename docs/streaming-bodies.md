@@ -43,3 +43,35 @@ message was complete. They are tested at every split size, with truncated and ho
 
 * HTTP/2 over TCP opens its receive window fully, so backpressure is TCP-level, not per-stream.
 * There is no pull-style reader yet (`co_await read_chunk()`); the sink is the single entry point.
+
+## Pull-style reading: `HttpClient::open`
+
+Prefer a loop over a callback? `open()` returns as soon as the headers have arrived:
+
+```cpp
+auto body = co_await wavex::client::HttpClient::open(ClientRequest(method::GET, url));
+if (body.response().status_code() == 200) {
+    while (auto chunk = co_await body.read_chunk()) out.write(chunk->data(), chunk->size());
+}
+if (body.body_error()) { /* the body ended early */ }
+```
+
+* Same backpressure as `send_streaming`: the next piece is read from the network only when `read_chunk()` asks for it.
+* `close()` (or destroying the reader) aborts a running transfer. The abort takes effect at the next chunk boundary.
+* Use the reader from the executor that called `open()`, one coroutine at a time.
+* Works over HTTP/1.1, HTTP/2 and HTTP/3. A failure before any response (connect error, bad URL) shows up as a 5xx `response()` and an empty body.
+
+## Reusing HTTP/3 connections
+
+By default each HTTP/3 request opens its own QUIC connection. Give the client an `Http3Pool` to keep connections open:
+
+```cpp
+auto pool = std::make_shared<wavex::client::Http3Pool>();
+wavex::client::ClientOptions o;
+o.version = wavex::client::HttpVersion::Http3;
+o.h3_pool = pool;
+auto a = co_await HttpClient::send(ClientRequest(method::GET, "https://example.com/a"), o);
+auto b = co_await HttpClient::send(ClientRequest(method::GET, "https://example.com/b"), o); // no new handshake
+```
+
+One connection per `(host, port, verify_peer)` is shared by all requests (they run as HTTP/3 streams, so concurrent requests are fine). A connection that closed or got GOAWAY is replaced and the request retried once. Use a pool from one io_context; `pool->close_all()` closes everything.

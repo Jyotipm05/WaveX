@@ -24,6 +24,7 @@
 #include <chrono>
 #include <type_traits>
 #include <functional>
+#include <memory>
 #include <system_error>
 
 #include <asio/awaitable.hpp>
@@ -57,6 +58,8 @@ namespace wavex::client {
         Http3 ///< Enforce HTTP/3 over QUIC (https:// only, no fallback to TCP)
     };
 
+    class ClientResponse;
+
     /**
      * @brief Receives a response body piece by piece (see `HttpClient::send_streaming`).
      *
@@ -65,6 +68,11 @@ namespace wavex::client {
      * Return `false` to abort the download.
      */
     using BodySink = std::function<wavex::task<bool>(std::string_view chunk)>;
+
+    /// Called once, when the status line and headers have arrived and before the first body chunk (streaming only).
+    using HeadHook = std::function<wavex::task<void>(const ClientResponse &head)>;
+
+    class Http3Pool; // see Http3Client.hpp (only available with TLS/QUIC)
 
     /**
      * @struct ClientOptions
@@ -87,6 +95,9 @@ namespace wavex::client {
         DnsMode dns{DnsMode::NativeWithSystemFallback}; ///< Host name resolution strategy
         bool h3_discovery{false}; ///< Auto only: use HTTP/3 when Alt-Svc or a DNS HTTPS record advertises it (TCP fallback)
         bool verify_peer{false}; ///< Verify TLS server certificates (default: false for development/self-signed)
+        /// HTTP/3 only: reuse QUIC connections across requests through this pool (see Http3Pool). Null = one
+        /// connection per request.
+        std::shared_ptr<Http3Pool> h3_pool{};
     };
 
     /// Key-value query parameters alias
@@ -416,6 +427,47 @@ namespace wavex::client {
     };
 
     /**
+     * @class ResponseReader
+     * @brief Body of a response being streamed; created by `HttpClient::open`.
+     *
+     * Use it from the executor that called `open` (one coroutine at a time). Destroying it, or `close()`, aborts a
+     * transfer that is still running.
+     */
+    class ResponseReader {
+    public:
+        struct State;
+
+        ResponseReader() = default;
+        explicit ResponseReader(std::shared_ptr<State> st) noexcept : st_(std::move(st)) {}
+        ResponseReader(const ResponseReader &) = delete;
+        ResponseReader &operator=(const ResponseReader &) = delete;
+        ResponseReader(ResponseReader &&) noexcept = default;
+        ResponseReader &operator=(ResponseReader &&o) noexcept {
+            if (this != &o) {
+                close();
+                st_ = std::move(o.st_);
+            }
+            return *this;
+        }
+        ~ResponseReader() { close(); }
+
+        /// Status and headers (the body is empty unless the request failed before a response arrived).
+        [[nodiscard]] const ClientResponse &response() const noexcept;
+
+        /// The next body piece, or `std::nullopt` once the body is complete, failed or the reader was closed.
+        [[nodiscard]] wavex::task<std::optional<std::string> > read_chunk();
+
+        /// Why the body ended early; empty when it arrived completely. Meaningful after `read_chunk` returned nullopt.
+        [[nodiscard]] std::error_code body_error() const noexcept;
+
+        /// Aborts the transfer. Safe to call more than once.
+        void close() noexcept;
+
+    private:
+        std::shared_ptr<State> st_;
+    };
+
+    /**
      * @class HttpClient
      * @brief Coroutine-native HTTP client supporting HTTP/1.1 & HTTP/2, plain TCP & TLS 1.3,
      *        domainless IPv4/IPv6 endpoints, query parameter builder, and multi-payload posting.
@@ -450,9 +502,27 @@ namespace wavex::client {
         static wavex::task<ClientResponse> send_streaming(const ClientRequest &req, const ClientOptions &options,
                                                           BodySink sink);
 
+        /**
+         * @brief Pull-style streaming: returns once the headers have arrived; read the body with `read_chunk()`.
+         *
+         * Same transfer and backpressure as `send_streaming` (the next chunk is not read from the network until
+         * `read_chunk()` asks for it), for code that prefers a loop over a callback:
+         *
+         * @code
+         * auto body = co_await HttpClient::open(ClientRequest(method::GET, url));
+         * if (body.response().status_code() == 200) {
+         *     while (auto chunk = co_await body.read_chunk()) out.write(chunk->data(), chunk->size());
+         * }
+         * if (body.body_error()) { ... }
+         * @endcode
+         */
+        static wavex::task<ResponseReader> open(const ClientRequest &req, const ClientOptions &options = {});
+
     private:
+        static wavex::task<void> pump_response(std::shared_ptr<ResponseReader::State> st, ClientRequest req,
+                                               ClientOptions options);
         static wavex::task<ClientResponse> send_impl(const ClientRequest &req, const ClientOptions &options,
-                                                     const BodySink *sink);
+                                                     const BodySink *sink, const HeadHook *head_hook);
 
     public:
 
