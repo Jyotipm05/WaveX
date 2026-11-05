@@ -448,6 +448,7 @@ target_sources(wavex
         include/wavex/Server/ServerConfig.ipp
         include/wavex/Server/ServerTls.ipp
         include/wavex/Server/ServerAliases.hpp
+        include/wavex/Server/ComposedServer.hpp
         include/wavex/Server/ComposedHttpServer.hpp
         include/wavex/Server/Server.hpp
         include/wavex/Client/HttpClient.hpp
@@ -704,6 +705,7 @@ if (WAVEX_TEST)
     wavex_add_test(wavex_mw_tests tests/test_MW.cpp)
     wavex_add_test(wavex_method_template_tests tests/test_method_template.cpp)
     wavex_add_test(wavex_static_router_tests tests/test_static_router.cpp)
+    wavex_add_test(wavex_dynamic_router_cmp_tests tests/test_dynamic_router_cmp.cpp)
     wavex_add_test(wavex_ctregex_tests tests/test_ctregex.cpp)
     wavex_add_test(wavex_server_tests tests/test_server.cpp)
     wavex_add_test(wavex_client_tests tests/test_client.cpp
@@ -738,6 +740,7 @@ if (WAVEX_TEST)
         wavex_add_test(wavex_http3_tests tests/test_http3.cpp)
         wavex_add_test(wavex_http3_client_tests tests/test_http3_client.cpp)
         wavex_add_test(wavex_client_streaming_tests tests/test_client_streaming.cpp)
+        wavex_add_test(wavex_composed_static_tests tests/test_composed_static.cpp)
         wavex_add_test(wavex_webtransport_tests tests/test_webtransport.cpp)
     endif ()
 

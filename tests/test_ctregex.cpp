@@ -86,17 +86,17 @@ namespace {
     };
 
     void table_tests() {
-        for (const auto &r: table) {
-            const auto prog = rx::compile(r.pattern);
+        for (const auto &[pattern, input, expect]: table) {
+            const auto prog = rx::compile_runtime(pattern);
             // rows marked as compile errors above are exercised by the static_asserts; the ones here must compile
             // except the intentionally unsupported "(^a)" which must report an error and match nothing.
-            if (std::string_view(r.pattern) == "(^a)") {
-                check(!prog.ok() && !prog.match(r.input), "unsupported inner anchor");
+            if (std::string_view(pattern) == "(^a)") {
+                check(!prog.ok() && !prog.match(input), "unsupported inner anchor");
                 continue;
             }
-            check(prog.ok(), std::string("compiles: ") + r.pattern);
-            check(prog.match(r.input) == r.expect,
-                  std::string("/") + r.pattern + "/ vs \"" + r.input + "\" expected " + (r.expect ? "match" : "no match"));
+            check(prog.ok(), std::string("compiles: ") + pattern);
+            check(prog.match(input) == expect,
+                  std::string("/") + pattern + "/ vs \"" + input + "\" expected " + (expect ? "match" : "no match"));
         }
     }
 
@@ -162,7 +162,7 @@ namespace {
         int patterns = 0, comparisons = 0, mismatches = 0;
         for (int i = 0; i < 6000; ++i) {
             const std::string pat = gen.alt(0);
-            const auto prog = rx::compile(pat);
+            const auto prog = rx::compile_runtime(pat);
             if (!prog.ok()) {
                 check(prog.err == rx::error::too_complex, "only the size limit may reject a generated pattern: " + pat);
                 continue;
@@ -205,7 +205,7 @@ namespace {
             std::string pat;
             const unsigned n = rng() % 14;
             for (unsigned k = 0; k < n; ++k) pat += "ab()[]{}|*+?^$\\.-,0129dxi:"[rng() % 28];
-            const auto p = rx::compile(pat);
+            const auto p = rx::compile_runtime(pat);
             if (!p.ok()) ++errors;
             (void) p.match("ab01"); // must never crash on garbage patterns
         }

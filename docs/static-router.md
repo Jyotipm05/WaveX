@@ -86,6 +86,25 @@ comparing short strings that differ early. It is opt-in for trees with many sibl
 before using it. A custom policy needs `key_type`, `prepare(string_view)` and `equals(key_type, key_type)`, all
 `constexpr`.
 
+The same policies plug into the runtime router: `DynamicRouter<Proto, hash_compare<>>` / `HttpRouter<Codec, hash_compare<>>` use the policy's hash for the static-child index and resolve exactly like the default.
+
+## Serving HTTP/2 and HTTP/3 on one port
+
+`server::ComposedServer<R2, R3>` (`Server/ComposedServer.hpp`) runs HTTP/1.1 and HTTP/2 over TCP/TLS (router `R2`)
+and HTTP/3 over QUIC (router `R3`) on one port for any pair of routers satisfying `router_type`:
+
+```cpp
+auto r2 = static_router<engine::Http2Proto>(get<"/hi">(hello));
+auto r3 = static_router<engine::Http3Proto>(get<"/hi">(hello));
+server::ComposedServer<decltype(r2), decltype(r3)> srv(r2, r3, "0.0.0.0", 8443);
+srv.enable_tls("ssl/test.crt", "ssl/test.key");
+srv.run();
+```
+
+The routers are borrowed and must outlive the server; register the same routes in both (a helper templated on the
+protocol, as in `tests/test_composed_static.cpp`, keeps them in sync). `ComposedHttpServer` is the same class with
+two owned `HttpRouter`s and the `get/post/...` conveniences.
+
 ## Limits
 
 * The route set cannot change after construction (use `DynamicRouter` for runtime registration).

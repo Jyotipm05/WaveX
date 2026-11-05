@@ -41,24 +41,25 @@
 
 #include <array>
 #include <bit>
+#if defined(__MINGW64__) || defined(__clang__) || defined(__GNUC__)
 #include <cstddef>
+#endif
 #include <cstdint>
 #include <string_view>
 
 #include <wavex/Base/FixedString.hpp>
 
 namespace wavex::rx {
-
     enum class error : std::uint8_t {
         none,
-        unbalanced_paren,   ///< '(' without ')' or a stray ')'
-        bad_escape,         ///< unknown or unsupported escape (\b, \1, ...)
+        unbalanced_paren, ///< '(' without ')' or a stray ')'
+        bad_escape, ///< unknown or unsupported escape (\b, \1, ...)
         trailing_backslash, ///< pattern ends with '\'
-        bad_class,          ///< unterminated or reversed range in [...]
-        nothing_to_repeat,  ///< quantifier without an atom, or two quantifiers in a row
-        bad_repeat,         ///< {n,m} with n > m or a count above 1000
-        too_complex,        ///< program, set, nesting or alternative limit exceeded
-        unsupported         ///< lookaround, named group, anchor in the middle, ...
+        bad_class, ///< unterminated or reversed range in [...]
+        nothing_to_repeat, ///< quantifier without an atom, or two quantifiers in a row
+        bad_repeat, ///< {n,m} with n > m or a count above 1000
+        too_complex, ///< program, set, nesting or alternative limit exceeded
+        unsupported ///< lookaround, named group, anchor in the middle, ...
     };
 
     enum class opcode : std::uint8_t { chr, any, set, split, jmp, match };
@@ -67,9 +68,9 @@ namespace wavex::rx {
     struct basic_program {
         struct insn {
             opcode op{opcode::match};
-            unsigned char ch{0};  ///< chr
-            std::uint16_t x{0};   ///< set: set index; split/jmp: target
-            std::uint16_t y{0};   ///< split: second target
+            unsigned char ch{0}; ///< chr
+            std::uint16_t x{0}; ///< set: set index; split/jmp: target
+            std::uint16_t y{0}; ///< split: second target
         };
 
         using bitset256 = std::array<std::uint64_t, 4>;
@@ -85,15 +86,15 @@ namespace wavex::rx {
 
         using state_set = std::array<std::uint64_t, words>;
 
-        state_set start{};                        ///< states reachable before any input (consuming states and match)
-        std::array<state_set, MaxInsn> follow{};  ///< follow[pc]: states reachable after pc consumes a byte
+        state_set start{}; ///< states reachable before any input (consuming states and match)
+        std::array<state_set, MaxInsn> follow{}; ///< follow[pc]: states reachable after pc consumes a byte
 
         /// Precomputes the epsilon closures so matching never walks split/jmp chains. Called by compile().
         constexpr void finalize() noexcept {
             start = closure(0);
             for (std::size_t pc = 0; pc < size; ++pc) {
-                const opcode op = code[pc].op;
-                if (op == opcode::chr || op == opcode::any || op == opcode::set) follow[pc] = closure(pc + 1);
+                if (const opcode op = code[pc].op; op == opcode::chr || op == opcode::any || op == opcode::set)
+                    follow[pc] = closure(pc + 1);
             }
         }
 
@@ -114,9 +115,12 @@ namespace wavex::rx {
                         const insn &in = code[pc];
                         bool hit = false;
                         switch (in.op) {
-                            case opcode::chr: hit = in.ch == c; break;
-                            case opcode::any: hit = c != '\n' && c != '\r'; break;
-                            case opcode::set: hit = ((sets[in.x][c >> 6] >> (c & 63)) & 1U) != 0; break;
+                            case opcode::chr: hit = in.ch == c;
+                                break;
+                            case opcode::any: hit = c != '\n' && c != '\r';
+                                break;
+                            case opcode::set: hit = ((sets[in.x][c >> 6] >> (c & 63)) & 1U) != 0;
+                                break;
                             default: break; // the match state consumes nothing
                         }
                         if (hit) {
@@ -150,8 +154,7 @@ namespace wavex::rx {
                 const std::uint64_t bit = std::uint64_t{1} << (pc & 63);
                 if ((visited[pc >> 6] & bit) != 0) continue;
                 visited[pc >> 6] |= bit;
-                const insn &in = code[pc];
-                if (in.op == opcode::split) {
+                if (const insn &in = code[pc]; in.op == opcode::split) {
                     stack[sp++] = in.y;
                     stack[sp++] = in.x;
                 } else if (in.op == opcode::jmp) {
@@ -167,11 +170,10 @@ namespace wavex::rx {
     using program = basic_program<>;
 
     namespace detail {
-
         template<typename P>
         struct compiler {
-            using insn = typename P::insn;
-            using bitset256 = typename P::bitset256;
+            using insn = P::insn;
+            using bitset256 = P::bitset256;
 
             static constexpr std::size_t max_insn = P{}.code.size();
             static constexpr std::size_t max_sets = P{}.sets.size();
@@ -209,8 +211,11 @@ namespace wavex::rx {
             static constexpr void add_class(bitset256 &b, const char kind) noexcept {
                 bitset256 t{};
                 switch (kind) {
-                    case 'd': case 'D': add_range(t, '0', '9'); break;
-                    case 'w': case 'W':
+                    case 'd':
+                    case 'D': add_range(t, '0', '9');
+                        break;
+                    case 'w':
+                    case 'W':
                         add_range(t, '0', '9');
                         add_range(t, 'a', 'z');
                         add_range(t, 'A', 'Z');
@@ -227,8 +232,7 @@ namespace wavex::rx {
 
             static constexpr void fold_case(bitset256 &b) noexcept {
                 for (unsigned c = 'a'; c <= 'z'; ++c) {
-                    const unsigned u = c - 'a' + 'A';
-                    if (test_bit(b, c) || test_bit(b, u)) {
+                    if (const unsigned u = c - 'a' + 'A'; test_bit(b, c) || test_bit(b, u)) {
                         set_bit(b, c);
                         set_bit(b, u);
                     }
@@ -267,8 +271,7 @@ namespace wavex::rx {
                 prog.code[at] = in;
                 ++prog.size;
                 for (std::size_t i = at + 1; i < prog.size; ++i) {
-                    insn &m = prog.code[i];
-                    if (m.op == opcode::split) {
+                    if (insn &m = prog.code[i]; m.op == opcode::split) {
                         if (m.x >= at) ++m.x;
                         if (m.y >= at) ++m.y;
                     } else if (m.op == opcode::jmp) {
@@ -296,8 +299,7 @@ namespace wavex::rx {
             }
 
             constexpr bool emit_literal(const unsigned c) noexcept {
-                const bool letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
-                if (icase && letter) {
+                if (const bool letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); icase && letter) {
                     bitset256 b{};
                     set_bit(b, c);
                     fold_case(b);
@@ -327,15 +329,26 @@ namespace wavex::rx {
                 const char c = src[pos++];
                 cls = 0;
                 switch (c) {
-                    case 'd': case 'D': case 'w': case 'W': case 's': case 'S':
+                    case 'd':
+                    case 'D':
+                    case 'w':
+                    case 'W':
+                    case 's':
+                    case 'S':
                         cls = c;
                         return true;
-                    case 't': ch = '\t'; return true;
-                    case 'n': ch = '\n'; return true;
-                    case 'r': ch = '\r'; return true;
-                    case 'f': ch = '\f'; return true;
-                    case 'v': ch = '\v'; return true;
-                    case '0': ch = 0; return true;
+                    case 't': ch = '\t';
+                        return true;
+                    case 'n': ch = '\n';
+                        return true;
+                    case 'r': ch = '\r';
+                        return true;
+                    case 'f': ch = '\f';
+                        return true;
+                    case 'v': ch = '\v';
+                        return true;
+                    case '0': ch = 0;
+                        return true;
                     case 'x': {
                         if (pos + 2 > src.size()) return fail(error::bad_escape);
                         const int h = hex_value(src[pos]);
@@ -381,8 +394,8 @@ namespace wavex::rx {
                     if (pos + 1 < src.size() && src[pos] == '-' && src[pos + 1] != ']') {
                         ++pos;
                         unsigned hi = 0;
-                        char hcls = 0;
                         if (src[pos] == '\\') {
+                            char hcls = 0;
                             ++pos;
                             if (!parse_escape(hi, hcls)) return false;
                             if (hcls != 0) return fail(error::bad_class);
@@ -402,8 +415,7 @@ namespace wavex::rx {
             }
 
             constexpr bool parse_atom(const int depth) noexcept {
-                const char c = src[pos];
-                switch (c) {
+                switch (const char c = src[pos]) {
                     case '(': {
                         ++pos;
                         if (!at_end() && src[pos] == '?') {
@@ -434,7 +446,9 @@ namespace wavex::rx {
                         }
                         return emit_literal(ch);
                     }
-                    case '*': case '+': case '?':
+                    case '*':
+                    case '+':
+                    case '?':
                         return fail(error::nothing_to_repeat);
                     default:
                         ++pos;
@@ -457,11 +471,10 @@ namespace wavex::rx {
                     return true;
                 };
                 if (!number(lo)) return false;
-                hi = lo;
+                hi = static_cast<long>(lo);
                 if (p < src.size() && src[p] == ',') {
                     ++p;
-                    unsigned h = 0;
-                    if (number(h)) hi = h;
+                    if (unsigned h = 0; number(h)) hi = static_cast<long>(h);
                     else hi = -1;
                 }
                 if (p >= src.size() || src[p] != '}') return false;
@@ -475,7 +488,8 @@ namespace wavex::rx {
                     return fail(error::bad_repeat);
                 }
                 std::size_t e = prog.size;
-                if (hi == 0) { // x{0}: the atom never matches anything, drop it
+                if (hi == 0) {
+                    // x{0}: the atom never matches anything, drop it
                     prog.size = static_cast<std::uint16_t>(s);
                     return true;
                 }
@@ -497,7 +511,8 @@ namespace wavex::rx {
                     last_start = prog.size;
                     if (!copy_range(s, e)) return false;
                 }
-                if (hi < 0) { // x{n,} = x^(n-1) x+
+                if (hi < 0) {
+                    // x{n,} = x^(n-1) x+
                     return emit(opcode::split, 0, last_start, prog.size + 1);
                 }
                 return optional_copies(s, e, static_cast<unsigned>(hi) - lo);
@@ -531,9 +546,15 @@ namespace wavex::rx {
                     if (at_end()) break;
                     bool quantified = true;
                     switch (src[pos]) {
-                        case '*': ++pos; if (!apply_repeat(s, 0, -1)) return false; break;
-                        case '+': ++pos; if (!apply_repeat(s, 1, -1)) return false; break;
-                        case '?': ++pos; if (!apply_repeat(s, 0, 1)) return false; break;
+                        case '*': ++pos;
+                            if (!apply_repeat(s, 0, -1)) return false;
+                            break;
+                        case '+': ++pos;
+                            if (!apply_repeat(s, 1, -1)) return false;
+                            break;
+                        case '?': ++pos;
+                            if (!apply_repeat(s, 0, 1)) return false;
+                            break;
                         case '{': {
                             unsigned lo = 0;
                             long hi = 0;
@@ -544,7 +565,8 @@ namespace wavex::rx {
                             }
                             break;
                         }
-                        default: quantified = false; break;
+                        default: quantified = false;
+                            break;
                     }
                     if (quantified && !at_end()) {
                         if (src[pos] == '?') ++pos; // lazy form: irrelevant for a full match
@@ -565,7 +587,9 @@ namespace wavex::rx {
                 while (!at_end() && src[pos] == '|') {
                     ++pos;
                     if (njumps == max_alternatives) return fail(error::too_complex);
-                    if (!insert(branch_start, insn{opcode::split, 0, static_cast<std::uint16_t>(branch_start + 1), 0})) {
+                    if (!insert(branch_start, insn{
+                                    opcode::split, 0, static_cast<std::uint16_t>(branch_start + 1), 0
+                                })) {
                         return false;
                     }
                     jumps[njumps++] = prog.size;
@@ -580,7 +604,7 @@ namespace wavex::rx {
 
             std::size_t anchor_start{0};
 
-            consteval P run(const std::string_view pattern) noexcept {
+            constexpr P run(const std::string_view pattern) noexcept {
                 src = pattern;
                 if (src.starts_with("(?i)")) {
                     icase = true;
@@ -592,7 +616,6 @@ namespace wavex::rx {
                 return prog;
             }
         };
-
     } // namespace detail
 
     /// Compiles `pattern`. Check `ok()` / `err` on the result (a failed program matches nothing).
@@ -608,6 +631,14 @@ namespace wavex::rx {
         return compile_with<>(pattern);
     }
 
+    /// Same compiler, callable at run time (tests, tools). Production code should use `compile` so a bad pattern is a build error.
+    [[nodiscard]] constexpr program compile_runtime(const std::string_view pattern) noexcept {
+        detail::compiler<program> c;
+        auto prog = c.run(pattern);
+        if (prog.ok()) prog.finalize();
+        return prog;
+    }
+
     /// `matches<"[0-9]+">(s)`: pattern checked at compile time, program built once.
     template<base::fixed_string Pattern>
     [[nodiscard]] constexpr bool matches(const std::string_view s) noexcept {
@@ -615,7 +646,6 @@ namespace wavex::rx {
         static_assert(prog.ok(), "wavex::rx: invalid regular expression");
         return prog.match(s);
     }
-
 } // namespace wavex::rx
 
 #endif // WAVEX_BASE_CTREGEX_HPP

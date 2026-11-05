@@ -192,6 +192,7 @@ export namespace wavex::server {
 #if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
     using server::Http3Server;
     using server::http3server;
+    using server::ComposedServer;
     using server::ComposedHttpServer;
     using server::composed_http_server;
 #endif

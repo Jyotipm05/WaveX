@@ -35,4 +35,7 @@
 
 // ─── High-Level Components & Aliases ───────────────────────────────────────
 #include <wavex/Server/ServerAliases.hpp>
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+#include <wavex/Server/ComposedServer.hpp>
 #include <wavex/Server/ComposedHttpServer.hpp>
+#endif

@@ -50,6 +50,7 @@
 #include <span>
 
 #include <wavex/Base/FlatMap.hpp>
+#include <wavex/Engine/RouteCore.hpp>
 #include <wavex/Base/MiddleWare.hpp>
 #include <wavex/Base/Chainable.hpp>
 #include <asio/awaitable.hpp>
@@ -121,8 +122,10 @@ namespace wavex::engine {
      * @brief Protocol-agnostic radix-tree router.
      *
      * @tparam Proto Protocol type. Must have nested `method`, `request`, and `response` types.
+     * @tparam SegmentCompare Segment policy from RouteCore.hpp. Selects the hasher of each node's static-child index:
+     *         `string_compare` (default) uses std::hash, `hash_compare<H>` uses H. Same parameter as StaticRouter.
      */
-    template<typename Proto>
+    template<typename Proto, typename SegmentCompare = route::string_compare>
     class DynamicRouter {
     public:
         using MethodType = Proto::method;
@@ -218,7 +221,7 @@ namespace wavex::engine {
             /// Built during freeze(). resolve() returns a std::span into this vector
             /// — zero heap allocation, zero std::function copies per request.
             std::unordered_map<MethodType, std::vector<MiddlewareFn> > compiled_middlewares{};
-            std::unordered_map<std::string_view, Node *> static_index{};
+            std::unordered_map<std::string_view, Node *, route::segment_hasher<SegmentCompare> > static_index{};
             std::vector<std::unique_ptr<Node> > children{}; // static children (ownership)
             std::vector<std::unique_ptr<Node> > param_children{}; // dynamic/regex children
             std::string prefix{}; // segment label for static nodes
@@ -525,6 +528,19 @@ namespace wavex::engine {
             const Node *node = resolve_node(root_.get(), segments, 0, params);
 
             if (!node) [[unlikely]] return std::nullopt;
+
+            // Param values may point into `scratch` (a local); normalization only adds a leading '/' and drops a
+            // trailing one, so each value maps back into the caller's `path` by a fixed offset.
+            if (!scratch.empty() && normalized.data() == scratch.data()) [[unlikely]] {
+                const std::ptrdiff_t shift = (path.front() != '/') ? 1 : 0;
+                base::FlatMap<std::string_view, std::string_view> rebased;
+                for (const auto &[k, v]: params) {
+                    rebased.insert_or_assign(k, (v.data() >= scratch.data() && v.data() <= scratch.data() + scratch.size())
+                        ? std::string_view(path.data() + (v.data() - scratch.data()) - shift, v.size())
+                        : v);
+                }
+                params = std::move(rebased);
+            }
 
             const auto it = node->handlers.find(m);
             if (it == node->handlers.end()) [[unlikely]] return std::nullopt;

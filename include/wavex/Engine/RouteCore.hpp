@@ -25,8 +25,11 @@
 
 #include <array>
 #include <concepts>
+#if defined(__MINGW64__) || defined(__clang__) || defined(__GNUC__)
 #include <cstddef>
+#endif
 #include <cstdint>
+#include <functional>
 #include <string_view>
 
 #include <wavex/Base/FixedString.hpp>
@@ -92,9 +95,24 @@ namespace wavex::engine::route {
             return k.text.size() == s.size() && k.text == s;
         }
 
+        /// Hash of a segment, used by DynamicRouter as the hasher of its child index.
+        [[nodiscard]] static constexpr std::uint64_t hash(const std::string_view s) noexcept { return Hash{}(s); }
+
         /// Request-side overload: both keys are prepared, so the hash filters before the string compare.
         [[nodiscard]] static constexpr bool equals(const key_type &a, const key_type &b) noexcept {
             return a.hash == b.hash && a.text == b.text;
+        }
+    };
+
+    /// Hasher for tables keyed by segment text: the policy's own `hash` when it has one, `std::hash` otherwise.
+    template<typename Cmp>
+    struct segment_hasher {
+        [[nodiscard]] std::size_t operator()(const std::string_view s) const noexcept {
+            if constexpr (requires { { Cmp::hash(s) } -> std::convertible_to<std::uint64_t>; }) {
+                return static_cast<std::size_t>(Cmp::hash(s));
+            } else {
+                return std::hash<std::string_view>{}(s);
+            }
         }
     };
 
@@ -258,8 +276,7 @@ namespace wavex::engine::route {
     [[nodiscard]] constexpr bool next_segment(std::string_view &rest, std::string_view &seg) noexcept {
         while (!rest.empty() && rest.front() == '/') rest.remove_prefix(1);
         if (rest.empty()) return false;
-        const std::size_t end = rest.find('/');
-        if (end == std::string_view::npos) {
+        if (const std::size_t end = rest.find('/'); end == std::string_view::npos) {
             seg = rest;
             rest.remove_prefix(rest.size()); // keeps rest.data() at the end of the buffer (wildcard slicing)
         } else {

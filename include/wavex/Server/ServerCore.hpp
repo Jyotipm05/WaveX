@@ -281,7 +281,8 @@ namespace wavex::server {
         // Memory management (ServerConfig.ipp)
         void trim_memory();
 
-        friend class ComposedHttpServer;
+        template<typename R2, typename R3>
+        friend class ComposedServer;
 
     private:
         void start_graceful_shutdown(std::chrono::milliseconds timeout);

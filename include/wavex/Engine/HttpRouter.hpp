@@ -59,10 +59,10 @@ namespace wavex::engine {
      * @brief HTTP-specific convenience wrapper around DynamicRouter<HttpProto<Codec>>.
      * @tparam Codec HTTP protocol codec type (defaults to http1codec).
      */
-    template<typename Codec = protos::http::http1codec>
-    class HttpRouter : public DynamicRouter<HttpProto<Codec> > {
+    template<typename Codec = protos::http::http1codec, typename SegmentCompare = route::string_compare>
+    class HttpRouter : public DynamicRouter<HttpProto<Codec>, SegmentCompare> {
     public:
-        using Base = DynamicRouter<HttpProto<Codec> >;
+        using Base = DynamicRouter<HttpProto<Codec>, SegmentCompare>;
         using typename Base::Handler;
         using typename Base::NotFoundHandler;
         using typename Base::MiddlewareFn;
