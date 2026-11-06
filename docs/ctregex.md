@@ -20,8 +20,9 @@ turn a bad pattern into a compile error.
 * The whole input must match (`std::regex_match`, not `regex_search`), byte by byte; ECMAScript flavour.
 * `.` matches any byte except `\n` and `\r`.
 * Case-insensitive matching with a `(?i)` prefix.
-* Matching is one pass over the input with a bit-set of NFA states (epsilon closures are precomputed): O(input x
-  program size), no backtracking, so `(a+)+$` on a long run of `a` is as cheap as any other pattern.
+* Matching is one pass over the input, no backtracking, so `(a+)+$` on a long run of `a` is as cheap as any other
+  pattern. `compile()` converts the NFA to a DFA at compile time (one table lookup per byte); a pattern that needs
+  more than 64 DFA states or 32 byte classes keeps the bit-set NFA simulation, which is O(input x program size).
 
 ## Syntax
 
@@ -44,9 +45,9 @@ with `too_complex`). `compile_with<MaxInsn, MaxSets>()` builds bigger programs.
 
 ## Cost
 
-A 36-byte UUID check takes about 200 ns and a 7-digit number about 90 ns (GCC 14 `-O2`), roughly 3x faster than
-`std::regex_match` on the same UUID. A program is about 3.4 KB. Converting the NFA to a DFA at compile time would be
-faster still and is possible later; the interface would not change.
+A 36-byte UUID check takes about 60 ns with the DFA (about 200 ns with the NFA simulation, GCC 14 `-O2`), roughly 10x
+faster than `std::regex_match` on the same UUID. `program::has_dfa` tells which one a pattern got and `match_nfa()`
+always runs the simulation. A program is about 5 KB.
 
 ## Testing
 

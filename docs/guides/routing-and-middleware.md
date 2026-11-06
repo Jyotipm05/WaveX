@@ -118,6 +118,29 @@ int main() {
 }
 ```
 
+## Compile-time routing: `StaticRouter`
+
+The routers above register routes at run time. If your routes are known when you build, `StaticRouter` checks them at
+build time instead: a malformed pattern, a bad regex, or a duplicate route is a compile error with a readable message,
+and matching walks a table the compiler built.
+
+```cpp
+#include <wavex/Engine/StaticHttpRouter.hpp>
+using namespace wavex::engine::route::http;
+
+auto router = wavex::engine::route::static_router<wavex::engine::Http1Proto>(
+    get<"/users/{id:int}">(show_user),
+    get<"/items/{code:[A-Z]{3}-[0-9]{4}}">(show_item),   // regex constraint, checked by wavex::rx
+    post<"/users">(create_user));
+
+wavex::server::Server<wavex::protos::http::http1codec, decltype(router)> server(router, "0.0.0.0", 8080);
+```
+
+It plugs into the same servers, supports groups and middleware, and also works in the one-port HTTP/2 + HTTP/3
+`ComposedServer`. The same segment policy (`string_compare`, opt-in `hash_compare<>`) is available on the run-time
+`HttpRouter` as its second template parameter. Full reference: [static-router.md](../static-router.md); the regex
+engine is described in [ctregex.md](../ctregex.md).
+
 ## Static pipelines with `Chainable`
 
 Build compile-time static dispatch pipelines without vtables or dynamic heap allocations using `StaticChain` and `make_chain`:

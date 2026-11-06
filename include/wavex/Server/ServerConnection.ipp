@@ -42,6 +42,14 @@
 #endif
 
 namespace wavex::server {
+    namespace detail {
+        /// Completion condition for asio::async_write that lifts asio's 64 KiB-per-write_some cap, so a response
+        /// slightly over 64 KiB leaves in one syscall instead of 65536 bytes plus a tiny second send.
+        inline constexpr auto write_whole = [](const asio::error_code &ec, const std::size_t) noexcept -> std::size_t {
+            return ec ? 0 : (std::size_t{1} << 22);
+        };
+    } // namespace detail
+
     template<typename Codec, typename RouterType>
     wavex::task<void> Server<Codec, RouterType>::accept_loop() {
         while (state_.load(std::memory_order_acquire) == ServerState::Running) {
@@ -444,7 +452,7 @@ namespace wavex::server {
                                 });
 
                                 auto [write_ec, bytes_written] = co_await asio::async_write(
-                                    *s, asio::buffer(data), asio::as_tuple(asio::use_awaitable));
+                                    *s, asio::buffer(data), detail::write_whole, asio::as_tuple(asio::use_awaitable));
                                 (void) timer.cancel();
 
                                 if (timed_out || write_ec == asio::error::operation_aborted) [[unlikely]] {
@@ -466,7 +474,7 @@ namespace wavex::server {
                     if (!res.is_headers_sent()) [[likely]] {
                         std::pmr::string wire_resp(arena.resource());
                         res.serialize_to(wire_resp);
-                        co_await asio::async_write(stream, asio::buffer(wire_resp),
+                        co_await asio::async_write(stream, asio::buffer(wire_resp), detail::write_whole,
                                                    asio::use_awaitable);
                     }
 

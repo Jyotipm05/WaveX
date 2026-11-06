@@ -11,19 +11,24 @@
 
 ## Guides
 
-| Guide                                                                | Topics                                                              |
-|:---------------------------------------------------------------------|:--------------------------------------------------------------------|
-| [Routing, middleware & responses](guides/routing-and-middleware.md)  | Routes, params, middleware, `StaticChain`, 404s, redirects, `QUERY` |
-| [HTTP/2 and HTTP/3](guides/http2-and-http3.md)                       | h2c, h2, HTTP/3 over QUIC                                           |
-| [WebSocket & WebTransport](guides/websocket-and-webtransport.md)     | RFC 6455, WebSocket over HTTP/3 (RFC 9220), WebTransport sessions   |
-| [TLS 1.3](guides/tls.md)                                             | `enable_tls`, `TlsConfig`, dev certificates                         |
-| [Keep-alive, shutdown & events](guides/connections-and-shutdown.md)  | Timeouts, quotas, draining, restart, `EventBus`                     |
-| [HTTP client](guides/http-client.md)                                 | `HttpClient`, ALPN, h2c, bodies                                     |
-| [File uploads & compression](guides/file-uploads-and-compression.md) | Multipart, spooling, Gzip/Deflate                                   |
-| [Async offloading](guides/async-offloading.md)                       | `spawn_blocking`, `wavex::fs`                                       |
-| [Memory & lifetimes](guides/memory-and-lifetimes.md)                 | Arenas, `FlatMap`, `string_view` contract                           |
-| [Logging & CLI](guides/logging-and-cli.md)                           | `wavex::log`, `CliParser`                                           |
-| [Custom protocols](guides/custom-protocols.md)                       | Codec, traits and router for your own protocol                      |
+| Guide                                                                | Topics                                                                     |
+|:---------------------------------------------------------------------|:---------------------------------------------------------------------------|
+| [Routing, middleware & responses](guides/routing-and-middleware.md)  | Routes, params, middleware, `StaticChain`, 404s, redirects, `QUERY`        |
+| [Compile-time routing](static-router.md)                             | `StaticRouter`: routes checked at build time, regex params, one-port h2+h3 |
+| [Compile-time regex](ctregex.md)                                     | `wavex::rx`: constexpr regex to DFA, used by `StaticRouter`                |
+| [Own coroutine engine (design note)](design-coroutine-engine.md)     | Benchmarks vs axum/actix and a staged plan                                 |
+| [Coroutine frame elision](task-elision.md)                           | Prototype: allocation-free child coroutines on Clang 20                    |
+| [Streaming response bodies](streaming-bodies.md)                     | `send_streaming`, `HttpClient::open`, `Http3Pool`                          |
+| [HTTP/2 and HTTP/3](guides/http2-and-http3.md)                       | h2c, h2, HTTP/3 over QUIC                                                  |
+| [WebSocket & WebTransport](guides/websocket-and-webtransport.md)     | RFC 6455, WebSocket over HTTP/3 (RFC 9220), WebTransport sessions          |
+| [TLS 1.3](guides/tls.md)                                             | `enable_tls`, `TlsConfig`, dev certificates                                |
+| [Keep-alive, shutdown & events](guides/connections-and-shutdown.md)  | Timeouts, quotas, draining, restart, `EventBus`                            |
+| [HTTP client](guides/http-client.md)                                 | `HttpClient`, ALPN, h2c, bodies                                            |
+| [File uploads & compression](guides/file-uploads-and-compression.md) | Multipart, spooling, Gzip/Deflate                                          |
+| [Async offloading](guides/async-offloading.md)                       | `spawn_blocking`, `wavex::fs`                                              |
+| [Memory & lifetimes](guides/memory-and-lifetimes.md)                 | Arenas, `FlatMap`, `string_view` contract                                  |
+| [Logging & CLI](guides/logging-and-cli.md)                           | `wavex::log`, `CliParser`                                                  |
+| [Custom protocols](guides/custom-protocols.md)                       | Codec, traits and router for your own protocol                             |
 
 ## Reference
 

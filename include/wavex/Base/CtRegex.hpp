@@ -89,6 +89,18 @@ namespace wavex::rx {
         state_set start{}; ///< states reachable before any input (consuming states and match)
         std::array<state_set, MaxInsn> follow{}; ///< follow[pc]: states reachable after pc consumes a byte
 
+        // ── DFA (built by finalize() when small enough; match() falls back to the NFA otherwise) ──
+        static constexpr std::size_t max_dfa_states = 64;
+        static constexpr std::size_t max_classes = 32;
+        static constexpr std::uint8_t dead = 0xFF;
+
+        std::array<std::uint8_t, 256> byte_class{};                        ///< bytes with the same behaviour share a class
+        std::array<std::uint8_t, max_dfa_states * max_classes> dfa{};      ///< dfa[state * classes + class] -> state or `dead`
+        std::array<bool, max_dfa_states> accepting{};
+        std::uint8_t classes{0};
+        std::uint8_t dfa_states{0};
+        bool has_dfa{false};
+
         /// Precomputes the epsilon closures so matching never walks split/jmp chains. Called by compile().
         constexpr void finalize() noexcept {
             start = closure(0);
@@ -96,10 +108,109 @@ namespace wavex::rx {
                 if (const opcode op = code[pc].op; op == opcode::chr || op == opcode::any || op == opcode::set)
                     follow[pc] = closure(pc + 1);
             }
+            build_dfa();
         }
 
+        /// True when `pc` (a consuming instruction) accepts byte `c`.
+        [[nodiscard]] constexpr bool hits(const std::size_t pc, const unsigned char c) const noexcept {
+            switch (const insn &in = code[pc]; in.op) {
+                case opcode::chr: return in.ch == c;
+                case opcode::any: return c != '\n' && c != '\r';
+                case opcode::set: return ((sets[in.x][c >> 6] >> (c & 63)) & 1U) != 0;
+                default: return false;
+            }
+        }
+
+        /// Subset construction over byte classes. Leaves `has_dfa` false when the pattern needs more than
+        /// `max_dfa_states` states or `max_classes` byte classes (the NFA simulation then does the matching).
+        constexpr void build_dfa() noexcept {
+            has_dfa = false;
+            // 1. Byte classes: refine a partition of 0..255 by every consuming instruction.
+            std::array<std::uint8_t, 256> rep{};
+            unsigned n = 1;
+            for (std::size_t c = 0; c < 256; ++c) byte_class[c] = 0;
+            for (std::size_t pc = 0; pc < size; ++pc) {
+                if (code[pc].op == opcode::split || code[pc].op == opcode::jmp || code[pc].op == opcode::match) continue;
+                std::array<int, 2 * max_classes> remap{};
+                for (auto &r: remap) r = -1;
+                unsigned next_n = 0;
+                std::array<std::uint8_t, 256> nc{};
+                for (std::size_t c = 0; c < 256; ++c) {
+                    const std::size_t key = byte_class[c] * 2u + (hits(pc, static_cast<unsigned char>(c)) ? 1u : 0u);
+                    if (remap[key] < 0) {
+                        if (next_n == max_classes) return;
+                        remap[key] = static_cast<int>(next_n++);
+                    }
+                    nc[c] = static_cast<std::uint8_t>(remap[key]);
+                }
+                byte_class = nc;
+                n = next_n;
+            }
+            classes = static_cast<std::uint8_t>(n);
+            for (std::size_t c = 256; c-- > 0;) rep[byte_class[c]] = static_cast<std::uint8_t>(c);
+
+            // 2. Subsets of NFA states.
+            std::array<state_set, max_dfa_states> subset{};
+            std::size_t count = 1;
+            subset[0] = start;
+            const std::size_t last = size - 1;
+            for (std::size_t d = 0; d < count; ++d) {
+                accepting[d] = ((subset[d][last >> 6] >> (last & 63)) & 1U) != 0;
+                for (std::size_t k = 0; k < n; ++k) {
+                    state_set nxt{};
+                    for (std::size_t w = 0; w < words; ++w) {
+                        std::uint64_t bits = subset[d][w];
+                        while (bits != 0) {
+                            const std::size_t pc = w * 64 + static_cast<std::size_t>(std::countr_zero(bits));
+                            bits &= bits - 1;
+                            if (hits(pc, rep[k])) {
+                                for (std::size_t j = 0; j < words; ++j) nxt[j] |= follow[pc][j];
+                            }
+                        }
+                    }
+                    bool empty = true;
+                    for (const auto v: nxt) empty = empty && v == 0;
+                    if (empty) {
+                        dfa[d * n + k] = dead;
+                        continue;
+                    }
+                    std::size_t found = count;
+                    for (std::size_t i = 0; i < count; ++i) {
+                        if (subset[i] == nxt) {
+                            found = i;
+                            break;
+                        }
+                    }
+                    if (found == count) {
+                        if (count == max_dfa_states) return;
+                        subset[count++] = nxt;
+                    }
+                    dfa[d * n + k] = static_cast<std::uint8_t>(found);
+                }
+            }
+            dfa_states = static_cast<std::uint8_t>(count);
+            has_dfa = true;
+        }
+
+
         /// True when all of `s` matches. A program that failed to compile matches nothing.
+        /// Uses the DFA (one table lookup per byte) when the pattern is small enough, the NFA simulation otherwise.
         [[nodiscard]] constexpr bool match(const std::string_view s) const noexcept {
+            if (err != error::none || size == 0) return false;
+            if (has_dfa) {
+                std::size_t st = 0;
+                for (const char raw: s) {
+                    const std::uint8_t nx = dfa[st * classes + byte_class[static_cast<unsigned char>(raw)]];
+                    if (nx == dead) return false;
+                    st = nx;
+                }
+                return accepting[st];
+            }
+            return match_nfa(s);
+        }
+
+        /// The bitset NFA simulation (always available; used when there is no DFA and by the tests).
+        [[nodiscard]] constexpr bool match_nfa(const std::string_view s) const noexcept {
             if (err != error::none || size == 0) return false;
             state_set cur = start;
             for (const char raw: s) {

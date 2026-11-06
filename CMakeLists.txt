@@ -773,4 +773,9 @@ if (WAVEX_BENCH)
     target_link_libraries(wavex_bench_server PRIVATE wavex)
     add_executable(wavex_loadgen benchmarks/loadgen.cpp)
     target_link_libraries(wavex_loadgen PRIVATE wavex)
+    add_executable(wavex_task_elision benchmarks/task_elision.cpp) # standalone prototype, see docs/task-elision.md
+    if (NOT MSVC)
+        # Symmetric transfer is only a tail call when optimizing; at -O0 the 1M-iteration loop would overflow the stack.
+        target_compile_options(wavex_task_elision PRIVATE -O2)
+    endif ()
 endif ()

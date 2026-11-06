@@ -39,6 +39,9 @@ namespace {
     static_assert(rx::matches<"(?i)hello">("HeLLo") && !rx::matches<"hello">("HeLLo"));
     static_assert(rx::matches<"^ab$">("ab"));
     static_assert(rx::matches<"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}">("123e4567-e89b-12d3-a456-426614174000"));
+    static_assert(rx::compile("[0-9a-f]{8}-[0-9a-f]{4}").has_dfa);
+    static_assert(rx::compile("a{40}b{40}").has_dfa == false || rx::compile("a{40}b{40}").match("") == false);
+    static_assert(rx::compile("(ab|cd)+e?").match("abcdab"));
     static_assert(rx::compile("(ab").err == rx::error::unbalanced_paren);
     static_assert(rx::compile("ab)").err == rx::error::unbalanced_paren);
     static_assert(rx::compile("\\").err == rx::error::trailing_backslash);
@@ -159,7 +162,7 @@ namespace {
 
     void differential_tests() {
         generator gen(20261102);
-        int patterns = 0, comparisons = 0, mismatches = 0;
+        int patterns = 0, comparisons = 0, mismatches = 0, dfa_patterns = 0, nfa_vs_dfa = 0;
         for (int i = 0; i < 6000; ++i) {
             const std::string pat = gen.alt(0);
             const auto prog = rx::compile_runtime(pat);
@@ -175,11 +178,13 @@ namespace {
                 continue;
             }
             ++patterns;
+            if (prog.has_dfa) ++dfa_patterns;
             for (int k = 0; k < 24; ++k) {
                 const std::string in = gen.input();
                 const bool want = std::regex_match(in, ref);
                 const bool got = prog.match(in);
                 ++comparisons;
+                if (prog.match_nfa(in) != got) ++nfa_vs_dfa;
                 if (want != got) {
                     if (++mismatches <= 5) std::cout << "  mismatch /" << pat << "/ on \"" << in << "\": std=" << want << " rx=" << got << "\n";
                 }
@@ -188,6 +193,8 @@ namespace {
         check(mismatches == 0, "no disagreement with std::regex (" + std::to_string(comparisons) + " comparisons over " +
                                    std::to_string(patterns) + " patterns)");
         check(patterns > 4000, "most generated patterns compiled");
+        check(nfa_vs_dfa == 0, "DFA and NFA simulation agree on every input");
+        check(dfa_patterns > patterns / 2, "most generated patterns get a DFA (" + std::to_string(dfa_patterns) + ")");
     }
 
     void robustness_tests() {

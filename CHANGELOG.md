@@ -7,6 +7,11 @@ Tagged releases before 0.4.0 (`v0.1.0-alpha` to `v0.3.0-alpha`) are listed under
 ## [Unreleased] (0.4.0 development)
 
 ### Added
+- `docs/design-coroutine-engine.md`: first measurements against axum and actix-web and a staged plan.
+- Responses above 64 KiB are written with one `sendto` instead of 65536 bytes plus a remainder (`detail::write_whole` lifts asio's per-`write_some` cap).
+- `wavex::rx` builds a DFA at compile time (`has_dfa`, `match_nfa()`): a UUID check drops from about 200 ns to about 60 ns. Patterns above 64 DFA states or 32 byte classes keep the NFA simulation. Differential tests check DFA, NFA and `std::regex` agree.
+- `benchmarks/task_elision.cpp` and `docs/task-elision.md`: prototype of an own task type with `[[clang::coro_await_elidable]]` (0 instead of 3 heap allocations per iteration on Clang 20); `wavex::task` stays an alias of `asio::awaitable`.
+- Docs: `static-router.md`, `ctregex.md` and `streaming-bodies.md` are now linked from the docs index, the routing guide and the README.
 - `HttpClient::open(req, options)` returns a `ResponseReader` (`response()`, `co_await read_chunk()`, `body_error()`, `close()`): pull-style streaming with the same backpressure as `send_streaming`. New `HeadHook` internal seam delivers the headers before the first chunk.
 - `Http3Pool` and `ClientOptions::h3_pool`: opt-in QUIC connection reuse across HTTP/3 requests (shared per origin, dead connections replaced, one retry).
 - `DynamicRouter<Proto, SegmentCompare = route::string_compare>` and `HttpRouter<Codec, SegmentCompare>`: the same segment policy parameter as `StaticRouter`. `hash_compare<H>` swaps the hasher of each node's static-child index (`route::segment_hasher`); matching is identical (`test_dynamic_router_cmp`). Existing code is unchanged.
