@@ -24,7 +24,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
-#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 
 #include <wavex/Base/FlatMap.hpp>
 
@@ -131,9 +131,10 @@ namespace wavex::base {
             return std::forward<Self>(self).send_impl(body);
         }
 
-        /// Set the response body as JSON — sets Content-Type automatically
-        template<typename Self>
-        decltype(auto) json(this Self &&self, const nlohmann::json &j) {
+        /// Set the response body as JSON — sets Content-Type automatically.
+        /// Needs the full `<nlohmann/json.hpp>` at the call site (this header only forward-declares it, which keeps it cheap to include).
+        template<typename Self, typename J = nlohmann::json>
+        decltype(auto) json(this Self &&self, const J &j) {
             self.set("Content-Type", "application/json");
             return std::forward<Self>(self).send(j.dump());
         }

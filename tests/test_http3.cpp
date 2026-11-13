@@ -19,6 +19,7 @@
 #include <wavex/protos/http/http3codec.hpp>
 #include <wavex/protos/http/http.hpp>
 #include <wavex/Server/Server.hpp>
+#include <wavex/Server/ComposedHttpServer.hpp>
 #include <wavex/Network/QUIC.hpp>
 #include <asio/io_context.hpp>
 #include <asio/ip/tcp.hpp>

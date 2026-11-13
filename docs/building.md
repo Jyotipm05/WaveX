@@ -100,6 +100,17 @@ WaveX is a pure C++23 framework requiring a conforming modern C++23 compiler and
 - CI Debug jobs build with `-g1` (`-DCMAKE_CXX_FLAGS_DEBUG=-g1`): line tables are kept for backtraces and sanitizer reports, but local-variable debug info is dropped. Measured on two test targets, this cut compile time by about 11% and test binaries by about 36%. Use plain `-g` locally when stepping through code in a debugger.
 - Install the distro RE2 to skip those steps: `sudo apt install libre2-dev` (Ubuntu 24.04 ships RE2 2023-03-01, which does not need Abseil). CMake finds it through pkg-config when there is no CMake package, and a clean build drops from 369 to 101 steps. The GCC and Clang CI jobs do this. Sanitizer builds should keep building RE2 from source so it is instrumented too.
 
+### Include cost for projects that use WaveX
+
+Measured with GCC 14 (`-c -O0`, one translation unit that only includes `<wavex/Server/Server.hpp>`), `Server.hpp` went from 6.2 s to 4.0 s by keeping two things out of it:
+
+- **`nlohmann/json.hpp`** (about 2 s per translation unit, instantiated again in each one). `Base/Response.hpp` and `Client/HttpClient.hpp` only forward-declare `nlohmann::json`. If you call `res.json(...)`, `req.json(...)` or `response.json()`, add `#include <nlohmann/json.hpp>` in that file.
+- **The composed HTTP/2 + HTTP/3 server** (it brings in all of QUIC, about 1 s). Add `#include <wavex/Server/ComposedHttpServer.hpp>` to use `ComposedHttpServer`.
+
+`<wavex/wavex.hpp>` still includes everything, so code that includes the umbrella header needs no change. `tests/test_include_hygiene.cpp` fails the build if a public header pulls the full JSON header back in.
+
+Tried and rejected: `extern template` for `HttpRouter<codec>` made a user translation unit about 0.7 s slower (GCC 14) because the whole class is instantiated eagerly, so only `Server<...>` and `ComposedServer<...>` use it. Header-level anonymous namespaces would not help either: they give every translation unit its own copy of the code and break the one-definition rule for inline functions and templates.
+
 ### Portability workflow
 
 `.github/workflows/portability.yml` builds and tests on Windows (MSVC, vcpkg) and macOS (Homebrew LLVM) when started manually and once a week. It is informational: the jobs use `continue-on-error`, so they never block a pull request, and they have not been run yet, so expect to adjust them on first use. Move a job into `ci.yml` once it passes reliably.

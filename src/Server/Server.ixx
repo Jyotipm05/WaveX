@@ -15,6 +15,10 @@ module;
 #include <wavex/Server/ThreadPool.hpp>
 #include <wavex/Server/BlockingPool.hpp>
 #include <wavex/Server/Server.hpp>
+#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
+#include <wavex/Server/ComposedServer.hpp>
+#include <wavex/Server/ComposedHttpServer.hpp>
+#endif
 #include <wavex/Async/SpawnBlocking.hpp>
 
 export module wavex:server;

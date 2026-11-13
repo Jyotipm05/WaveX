@@ -35,7 +35,5 @@
 
 // ─── High-Level Components & Aliases ───────────────────────────────────────
 #include <wavex/Server/ServerAliases.hpp>
-#if defined(WAVEX_HAS_SSL) && WAVEX_HAS_SSL
-#include <wavex/Server/ComposedServer.hpp>
-#include <wavex/Server/ComposedHttpServer.hpp>
-#endif
+// ComposedServer.hpp / ComposedHttpServer.hpp (HTTP/2 + HTTP/3 on one port, pulls in QUIC) are not included here:
+// they cost about 1 s per translation unit. Include them where you use them; <wavex/wavex.hpp> includes both.

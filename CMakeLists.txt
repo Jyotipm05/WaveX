@@ -706,6 +706,8 @@ if (WAVEX_TEST)
     wavex_add_test(wavex_method_template_tests tests/test_method_template.cpp)
     wavex_add_test(wavex_static_router_tests tests/test_static_router.cpp)
     wavex_add_test(wavex_dynamic_router_cmp_tests tests/test_dynamic_router_cmp.cpp)
+    # DEFINES keeps this test off the shared precompiled <wavex/wavex.hpp>, which would defeat the check.
+    wavex_add_test(wavex_include_hygiene_tests tests/test_include_hygiene.cpp DEFINES WAVEX_INCLUDE_HYGIENE_TEST=1)
     wavex_add_test(wavex_ctregex_tests tests/test_ctregex.cpp)
     wavex_add_test(wavex_server_tests tests/test_server.cpp)
     wavex_add_test(wavex_client_tests tests/test_client.cpp

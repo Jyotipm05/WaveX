@@ -17,6 +17,7 @@
 #include <algorithm>
 
 #include <wavex/Client/HttpClient.hpp>
+#include <nlohmann/json.hpp>
 #include <wavex/Network/Dns/Resolver.hpp>
 #include <wavex/Client/Http3Client.hpp>
 #include <asio/co_spawn.hpp>

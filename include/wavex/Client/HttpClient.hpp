@@ -29,7 +29,7 @@
 
 #include <asio/awaitable.hpp>
 #include <wavex/Base/Task.hpp>
-#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 
 
 #include <wavex/Base/Response.hpp>
