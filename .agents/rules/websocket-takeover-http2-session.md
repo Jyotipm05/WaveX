@@ -3,7 +3,7 @@
 Split out of `future-protocols-architecture.md` to keep each rule file small. Sections keep their original numbers (§C, §D, §5, §6).
 
 ### C. WebSockets Protocol (RFC 6455, RFC 9220)
-- **Status**: **Implemented (Beta)** — `include/wavex/protos/websocket/WebSocket.hpp`, `src/protos/websocket/WebSocket.cpp`, tests in `tests/test_websocket.cpp` and `tests/test_webtransport.cpp` (HTTP/3 variant).
+- **Status**: **Implemented (Beta)** — `include/wavex/protos/websocket/WebSocket.hpp`, `src/protos/websocket/WebSocket.cpp`, tests in `tests/protocols/test_websocket.cpp` and `tests/protocols/test_webtransport.cpp` (HTTP/3 variant).
 - **Layer**: Protocol switch after an HTTP exchange. HTTP/1.1 `Upgrade` (`101`); extended CONNECT with `:protocol = websocket` (`200`) on HTTP/2 (RFC 8441, the multiplexed session hands the stream over as a byte stream) and HTTP/3 (RFC 9220, frames carried in DATA frames).
 - **Architecture**:
   - `websocket::accept(req, res, handler, opts)` validates the handshake, fills `101` / `200` (or `400` / `426` / `501`) and installs `res.upgrade(fn)`. `HttpRouter::websocket()` wraps it (GET on HTTP/1.x routers, CONNECT on `Http3Router`).

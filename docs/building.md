@@ -42,7 +42,8 @@ cmake --build --preset fast-release
 
 # test
 ctest --preset run-tests --output-on-failure
-ctest --preset run-tests -R test_server_keepalive --output-on-failure
+ctest --preset run-tests -R server_keepalive --output-on-failure   # by name
+ctest --preset run-tests -L routing --output-on-failure            # by group: base routing protocols server client content checks
 ctest --preset asan
 ctest --preset tsan
 ```
@@ -107,7 +108,7 @@ Measured with GCC 14 (`-c -O0`, one translation unit that only includes `<wavex/
 - **`nlohmann/json.hpp`** (about 2 s per translation unit, instantiated again in each one). `Base/Response.hpp` and `Client/HttpClient.hpp` only forward-declare `nlohmann::json`. If you call `res.json(...)`, `req.json(...)` or `response.json()`, add `#include <nlohmann/json.hpp>` in that file.
 - **The composed HTTP/2 + HTTP/3 server** (it brings in all of QUIC, about 1 s). Add `#include <wavex/Server/ComposedHttpServer.hpp>` to use `ComposedHttpServer`.
 
-`<wavex/wavex.hpp>` still includes everything, so code that includes the umbrella header needs no change. `tests/test_include_hygiene.cpp` fails the build if a public header pulls the full JSON header back in.
+`<wavex/wavex.hpp>` still includes everything, so code that includes the umbrella header needs no change. `tests/checks/test_include_hygiene.cpp` fails the build if a public header pulls the full JSON header back in.
 
 Tried and rejected: `extern template` for `HttpRouter<codec>` made a user translation unit about 0.7 s slower (GCC 14) because the whole class is instantiated eagerly, so only `Server<...>` and `ComposedServer<...>` use it. Header-level anonymous namespaces would not help either: they give every translation unit its own copy of the code and break the one-definition rule for inline functions and templates.
 

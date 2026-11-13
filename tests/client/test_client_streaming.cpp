@@ -17,6 +17,8 @@
 #include <random>
 #include <thread>
 
+#include "../support/project_root.hpp"
+
 using namespace wavex;
 namespace h1 = protos::http;
 namespace h3 = protos::http::http3;
@@ -229,7 +231,7 @@ int main() {
     test_h1_parser();
     test_h3_parser();
 
-    const auto root = std::filesystem::path(std::source_location::current().file_name()).parent_path().parent_path();
+    const auto root = wavex_test::project_root();
     const std::string cert = (root / "ssl" / "test.crt").string();
     const std::string key = (root / "ssl" / "test.key").string();
     const std::string big = payload(3 * 1024 * 1024);

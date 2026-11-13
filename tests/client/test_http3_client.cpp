@@ -19,6 +19,8 @@
 #include <source_location>
 #include <thread>
 
+#include "../support/project_root.hpp"
+
 using namespace wavex;
 
 namespace {
@@ -48,7 +50,7 @@ namespace {
 }
 
 int main() {
-    const auto root = std::filesystem::path(std::source_location::current().file_name()).parent_path().parent_path();
+    const auto root = wavex_test::project_root();
     const std::string cert = (root / "ssl" / "test.crt").string();
     const std::string key = (root / "ssl" / "test.key").string();
 

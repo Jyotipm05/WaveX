@@ -160,6 +160,8 @@ Or via presets:
 ctest --preset run-tests
 ```
 
+Tests are grouped by area under [`tests/`](tests/README.md) (`base`, `routing`, `protocols`, `server`, `client`, `content`, `checks`); run one group with `ctest --test-dir build -L routing`. To add a test, put it in the matching directory and register it in [`tests/WaveXTests.cmake`](tests/WaveXTests.cmake).
+
 ### Interactive Manual Testing
 
 For HTTP protocol testing or Postman verification, launch the interactive demo server:

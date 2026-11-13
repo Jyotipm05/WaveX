@@ -102,7 +102,7 @@ srv.run();
 ```
 
 The routers are borrowed and must outlive the server; register the same routes in both (a helper templated on the
-protocol, as in `tests/test_composed_static.cpp`, keeps them in sync). `ComposedHttpServer` is the same class with
+protocol, as in `tests/server/test_composed_static.cpp`, keeps them in sync). `ComposedHttpServer` is the same class with
 two owned `HttpRouter`s and the `get/post/...` conveniences.
 
 ## Limits

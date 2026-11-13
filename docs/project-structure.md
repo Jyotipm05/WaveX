@@ -33,7 +33,9 @@ include/wavex/
     └── http/                 http1codec, http2codec, http3codec, HttpRequest, HttpResponse, Methods, http.hpp
 
 src/            implementation files and C++ module interfaces (.ixx), mirrors include/
-tests/          unit tests and the four interactive dev servers
+tests/          unit and integration tests by area (base, routing, protocols, server, client, content, checks), see tests/README.md
+tools/          interactive Postman dev servers (tools/dev-servers)
+benchmarks/     load generator, benchmark server, coroutine-elision prototype
 cmake/          package config template (WaveXConfig.cmake.in)
 ssl/            place for local dev certificates (git-ignored)
 docs/           documentation and logo assets

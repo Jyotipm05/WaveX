@@ -9,10 +9,10 @@ WaveX ships four CLI-driven servers for manual testing with Postman, cURL or a b
 
 | Executable                   | Protocol Modes                           | Default Ports                             | Source                                                                        |
 |:-----------------------------|:-----------------------------------------|:------------------------------------------|:------------------------------------------------------------------------------|
-| `wavex_postman_http1_server` | Plain HTTP / HTTPS (TLS 1.3)             | `8080` (plain), `8443` (`--tls`)          | [tests/postman_demo_http1_server.cpp](../tests/postman_demo_http1_server.cpp) |
-| `wavex_postman_http2_server` | Cleartext h2c / HTTP/2 over TLS 1.3 (h2) | `8082` (cleartext), `8444` (`--tls`)      | [tests/postman_demo_http2_server.cpp](../tests/postman_demo_http2_server.cpp) |
-| `wavex_postman_http3_server` | HTTP/3 over TLS 1.3 (h3) / Cleartext Dev | `8445` (TLS default), `8083` (`--no-tls`) | [tests/postman_demo_http3_server.cpp](../tests/postman_demo_http3_server.cpp) |
-| `wavex_postman_quic_server`  | RFC 9000 & 9001 QUIC Transport Dev Mode  | `8443` (UDP TLS 1.3)                      | [tests/postman_demo_quic_server.cpp](../tests/postman_demo_quic_server.cpp)   |
+| `wavex_postman_http1_server` | Plain HTTP / HTTPS (TLS 1.3)             | `8080` (plain), `8443` (`--tls`)          | [tools/dev-servers/postman_demo_http1_server.cpp](../tools/dev-servers/postman_demo_http1_server.cpp) |
+| `wavex_postman_http2_server` | Cleartext h2c / HTTP/2 over TLS 1.3 (h2) | `8082` (cleartext), `8444` (`--tls`)      | [tools/dev-servers/postman_demo_http2_server.cpp](../tools/dev-servers/postman_demo_http2_server.cpp) |
+| `wavex_postman_http3_server` | HTTP/3 over TLS 1.3 (h3) / Cleartext Dev | `8445` (TLS default), `8083` (`--no-tls`) | [tools/dev-servers/postman_demo_http3_server.cpp](../tools/dev-servers/postman_demo_http3_server.cpp) |
+| `wavex_postman_quic_server`  | RFC 9000 & 9001 QUIC Transport Dev Mode  | `8443` (UDP TLS 1.3)                      | [tools/dev-servers/postman_demo_quic_server.cpp](../tools/dev-servers/postman_demo_quic_server.cpp)   |
 
 ## Command-Line Options (Built-in CLI)
 

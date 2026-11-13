@@ -28,6 +28,8 @@
 #include <wavex/Network/QUIC.hpp>
 #include <wavex/Base/Logger.hpp>
 
+#include "../support/project_root.hpp"
+
 using namespace wavex::network::quic;
 namespace quic = wavex::network::quic;
 
@@ -600,8 +602,7 @@ static void test_quic_server_client_loopback(const bool use_strand = false, cons
     asio::io_context server_io;
     asio::io_context client_io;
 
-    const auto current_src = std::filesystem::path(std::source_location::current().file_name());
-    const auto project_root = current_src.parent_path().parent_path();
+    const auto project_root = wavex_test::project_root();
     const std::string cert_path = (project_root / "ssl" / "test.crt").string();
     const std::string key_path = (project_root / "ssl" / "test.key").string();
 
@@ -1982,8 +1983,7 @@ static void test_cert_resolution_d4() {
     assert(cert_threw);
 
     // 2. Missing private key file must fail immediately at config time with std::runtime_error
-    const auto current_src = std::filesystem::path(std::source_location::current().file_name());
-    const auto project_root = current_src.parent_path().parent_path();
+    const auto project_root = wavex_test::project_root();
     const std::string valid_cert = (project_root / "ssl" / "test.crt").string();
 
     bool key_threw = false;

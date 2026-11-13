@@ -1,5 +1,5 @@
 /**
- * @file test_MW.cpp
+ * @file test_middleware.cpp
  * @brief Tests for the wavex:middleware module partition.
  *
  * Tests covered:
